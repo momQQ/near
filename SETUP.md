@@ -34,8 +34,10 @@
 
 Это нужно, чтобы ссылки из писем (подтверждение почты, сброс пароля) открывали ваше приложение.
 
-> **Для теста можно отключить подтверждение почты:** Authentication → Sign In / Providers → Email → выключите **Confirm email** → Save.
-> Бесплатный почтовый сервер Supabase отправляет всего несколько писем в час. Для настоящего запуска подключите свой SMTP (Authentication → Emails → SMTP Settings).
+**Подтверждение почты.** Убедитесь, что включено: Authentication → Sign In / Providers → Email → **Confirm email** = ON. Тогда после регистрации человек получает письмо и входит только после нажатия на ссылку.
+
+> Бесплатный почтовый сервер Supabase отправляет всего несколько писем в час — для теста хватит. Для настоящего запуска подключите свой SMTP (Authentication → Emails → SMTP Settings), например бесплатный тариф Resend или Brevo.
+> Текст письма можно перевести на русский: Authentication → Emails → Templates → Confirm signup.
 
 ## Шаг 4. Скопируйте ключи
 
@@ -69,6 +71,36 @@ SUPABASE_ANON_KEY: "eyJhbGciOi...",
 
 ---
 
+## Шаг 7. ИИ-проверка фото и сообщений (по желанию)
+
+Фото в публикациях и чатах, а также текст сообщений будут проверяться бесплатным сервисом модерации OpenAI. Подозрительное фото размывается с предупреждением, а жалоба автоматически попадает модератору.
+
+1. Зарегистрируйтесь на https://platform.openai.com → **API keys** → **Create new secret key**. Скопируйте ключ (`sk-...`). Модерация бесплатная, но OpenAI может попросить привязать карту.
+2. В Supabase: **Edge Functions** → **Secrets** → **Add new secret**: имя `OPENAI_API_KEY`, значение — ваш ключ → Save.
+3. **Edge Functions** → **Deploy a new function** → **Via Editor**. Название: `moderate`. Удалите пример кода, вставьте весь текст из файла `supabase/functions/moderate/index.ts` → **Deploy function**.
+4. **SQL Editor** → выполните:
+   ```sql
+   update public.app_settings set ai_moderation = true;
+   ```
+5. На GitHub в `js/config.js` поставьте `AI_MODERATION: true` → Commit.
+
+Выключить: `update public.app_settings set ai_moderation = false;` и `AI_MODERATION: false`.
+
+## Шаг 8. Назначить себя модератором
+
+После регистрации в приложении: **SQL Editor** → выполните (подставьте свой email):
+
+```sql
+update public.profiles set is_admin = true
+where id = (select id from auth.users where email = 'ваш@email.kz');
+```
+
+В профиле появится кнопка **🛡 Модерация**: жалобы, скрытие и восстановление публикаций, удаление, бан пользователей.
+
+Снять бан вручную: `update public.profiles set banned = false where id = '...';`
+
+---
+
 ## Если что-то не работает
 
 | Что видно | Что сделать |
@@ -78,6 +110,8 @@ SUPABASE_ANON_KEY: "eyJhbGciOi...",
 | Письмо не приходит | Проверьте "Спам"; лимит бесплатных писем — несколько в час; для теста отключите Confirm email |
 | Ссылка из письма открывает не то | Проверьте Шаг 3 (Site URL и Redirect URLs) |
 | "Нет прав на это действие" | Запустите `schema.sql` еще раз целиком |
-| Фото не загружается | Storage → проверьте, что есть бакет `post-media` (Public) |
+| Фото не загружается | Storage → проверьте, что есть бакеты `post-media` и `chat-media` (Public) |
+| Не приходят новые сообщения без обновления | Database → Replication (Publications) → `supabase_realtime`: включены `messages`, `posts`, `notifications` |
+| Фото "проверяется" и не открывается | Функция `moderate` не развернута или нет секрета `OPENAI_API_KEY`. Проверьте шаг 7 или выключите ИИ-проверку |
 
 Безопасность: ключ anon можно хранить в открытом коде — защиту обеспечивают правила доступа из `schema.sql` (каждый может менять только свои публикации, видеть только свои уведомления и сохраненное).

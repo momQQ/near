@@ -55,7 +55,7 @@
 
   /* ---------- navigation ---------- */
   let hist = [];
-  const TABS = ["v-feed", "v-map", "v-disc", "v-create", "v-com", "v-prof"];
+  const TABS = ["v-feed", "v-map", "v-disc", "v-create", "v-chats", "v-prof"];
   const cur = () => { const v = document.querySelector(".view.on:not(#v-auth)"); return v ? v.id : "v-feed"; };
   function go(id, push = true) {
     const c = cur();
@@ -64,7 +64,8 @@
     qa(".view").forEach((v) => { if (v.id !== "v-auth") v.classList.remove("on"); });
     $(id).classList.add("on");
     $(id).scrollTop = 0;
-    document.body.classList.toggle("picking", id === "sv-pick");
+    document.body.classList.toggle("picking", id === "sv-pick"); document.body.classList.toggle("in-conv", id === "sv-conv");
+    if (id !== "sv-conv") { convId = null; stopRec(true); }
     const tab = TABS.includes(id) ? id : null;
     if (tab) qa(".tb,.tb-plus").forEach((x) => x.classList.toggle("on", x.dataset.v === tab));
     onEnter(id);
@@ -79,6 +80,9 @@
     if (id === "sv-deals") renderDeals();
     if (id === "sv-lost") renderLost();
     if (id === "sv-notif") renderNotifs();
+    if (id === "v-chats") renderChats();
+    if (id === "sv-find") { $("fq").value = ""; $("fRes").innerHTML = '<div class="dim center" style="font-size:12px;padding:20px">Введите минимум 2 буквы</div>'; setTimeout(() => $("fq").focus(), 150); }
+    if (id === "sv-mod") renderMod();
     if (id === "v-feed" && feedDirty) loadFeed();
   }
   qa("[data-v]").forEach((b) => (b.onclick = () => {
@@ -88,7 +92,8 @@
   document.addEventListener("click", (e) => {
     const o = e.target.closest("[data-open]"); if (o) { go(o.dataset.open); return; }
     const b = e.target.closest("[data-back]"); if (b) { back(); return; }
-    const c = e.target.closest("[data-create]"); if (c) { if (requireAuth("Войдите, чтобы публиковать")) openCreate({ type: c.dataset.create }); }
+    const c = e.target.closest("[data-create]"); if (c) { if (requireAuth("Войдите, чтобы публиковать")) openCreate({ type: c.dataset.create }); return; }
+    const r = e.target.closest("[data-rules]"); if (r) { e.preventDefault(); showRules(); }
   });
 
   /* ---------- bottom sheet ---------- */
@@ -140,6 +145,7 @@
     if (!data.first) return formErr(f, "Укажите имя");
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(data.email)) return formErr(f, "Проверьте правильность email");
     if (data.password.length < 6) return formErr(f, "Пароль должен быть не короче 6 символов");
+    if (!f.rules.checked) return formErr(f, "Чтобы продолжить, примите правила сообщества");
     try {
       const r = await busy(f.querySelector("[type=submit]"), () => api.signUp(data));
       if (r.needsConfirm) { $("sentText").innerHTML = `Мы отправили письмо на <b>${esc(data.email)}</b>. Откройте его и нажмите ссылку, чтобы подтвердить почту. После этого вы войдете автоматически.`; showAuth("sent"); }
@@ -166,7 +172,7 @@
     onUserChange();
   }
   function onUserChange() {
-    feedDirty = true; wide = null; loadFeed(); refreshBadge(); if (cur() === "v-prof") renderProfile();
+    feedDirty = true; wide = null; loadFeed(); refreshBadge(); refreshChatBadge(); if (cur() === "v-prof") renderProfile(); if (cur() === "v-chats") renderChats();
     if (mapReady) loadMapPosts();
   }
 
@@ -219,9 +225,17 @@
   }
   $("refreshBtn").onclick = () => { $("refreshBtn").style.background = ""; wide = null; loadFeed(); };
 
+  function shieldFor(m, ownerId) {
+    if (!m) return null;
+    if (m.mod_status === "flagged") return "⚠️ Возможно неприемлемое фото";
+    if (m.mod_status === "pending" && !(user && user.id === ownerId)) return "⏳ Фото проверяется";
+    return null;
+  }
   function mediaBox(p, cls = "post-img") {
     const c = CATS[p.category] || CATS.talk, m = p.media[0];
     const multi = p.media.length > 1 ? `<span class="multi">1/${p.media.length}</span>` : "";
+    const sh = shieldFor(m, p.user_id);
+    if (sh && m.type === "image") return `<div class="${cls} blur-wrap" style="background-image:url('${esc(m.url)}')"><div class="shield">${sh}<span style="font-size:10.5px;font-weight:500;opacity:.8">откройте, чтобы посмотреть</span></div>${multi}</div>`;
     if (m && m.type === "image") return `<div class="${cls}" style="background-image:url('${esc(m.url)}')">${multi}</div>`;
     if (m && m.type === "video") return `<div class="${cls}" style="background:#000"><video src="${esc(m.url)}#t=0.5" muted playsinline preload="metadata"></video><span class="play">▶</span>${multi}</div>`;
     return `<div class="${cls}" style="background:linear-gradient(135deg,${c.c}66,#1f1f2e 75%)">${c.e}</div>`;
@@ -232,7 +246,7 @@
     if (p.event) act = `<button class="act${p.event.joined ? " joined" : ""}" data-join="${p.id}">${p.event.joined ? "✓ Иду" : "Иду"} · ${p.event.members}${p.event.capacity ? "/" + p.event.capacity : ""}</button>`;
     else act = `<button class="act" data-onmap="${p.id}">🗺 На карте</button>`;
     return `<div class="post${closed ? " closed" : ""}" data-post="${p.id}">
-      <div class="post-h">${ava(p.author, c.c)}<div class="who"><b>${esc(p.author.name)}</b><span>${timeAgo(p.created_at)} · ${fmtDist(D(p))}</span></div>
+      <div class="post-h"><span class="who-link" data-user="${p.user_id}">${ava(p.author, c.c)}</span><div class="who"><b class="who-link" data-user="${p.user_id}">${esc(p.author.name)}</b><span>${timeAgo(p.created_at)} · ${fmtDist(D(p))}</span></div>
         <span class="st ${closed ? "done" : ""}" style="${closed ? "" : `background:${c.c}22;color:${c.c}`}">${closed ? "Закрыто" : c.e + " " + c.n}</span></div>
       ${mediaBox(p)}
       <div class="post-d">${esc(p.text)}</div>
@@ -295,6 +309,7 @@
   function postClick(e) {
     const t = e.target;
     let b;
+    if ((b = t.closest("[data-user]"))) return openUser(b.dataset.user);
     if ((b = t.closest("[data-like]"))) return doLike(b.dataset.like);
     if ((b = t.closest("[data-save]"))) return doSave(b.dataset.save);
     if ((b = t.closest("[data-join]"))) return doJoin(b.dataset.join);
@@ -323,7 +338,7 @@
     const c = CATS[p.category] || CATS.talk, mine = user && user.id === p.user_id, closed = p.status === "closed";
     $("pdSub").textContent = c.e + " " + c.n + " · " + fmtDist(D(p)) + " от вас";
     const media = p.media.length
-      ? `<div class="pd-media">${p.media.map((m) => m.type === "video" ? `<video src="${esc(m.url)}" controls playsinline preload="metadata"></video>` : `<img src="${esc(m.url)}" alt="" loading="lazy">`).join("")}</div>`
+      ? `<div class="pd-media">${p.media.map((m) => { const sh = shieldFor(m, p.user_id); return m.type === "video" ? `<video src="${esc(m.url)}" controls playsinline preload="metadata"></video>` : sh ? `<div class="blur-wrap" data-reveal><img src="${esc(m.url)}" alt=""><div class="shield">${sh}<button type="button">Показать</button></div></div>` : `<img src="${esc(m.url)}" alt="" loading="lazy" data-zoom>`; }).join("")}</div>`
       : `<div class="pd-media"><div class="pd-ph" style="background:linear-gradient(135deg,${c.c}55,#1f1f2e 80%)">${c.e}</div></div>`;
     const ev = p.event ? `<div class="ev-box"><b>🗓 ${fmtWhen(p.event.starts_at)}</b><div class="muted" style="font-size:12px;margin-top:3px">Участников: ${p.event.members}${p.event.capacity ? " из " + p.event.capacity : ""}</div>
       <div class="row">${closed ? "" : `<button class="btn ${p.event.joined ? "btn-ghost" : "btn-main"}" data-join="${p.id}">${p.event.joined ? "✓ Я иду · отменить" : "Иду"}</button>`}<button class="btn btn-ghost" id="pdCal">📅 В календарь</button></div></div>` : "";
@@ -331,7 +346,8 @@
     const own = mine ? `<div class="own"><button id="pdEdit">✏️ Изменить</button><button id="pdClose">${closeLabel}</button><button class="del" id="pdDel">🗑 Удалить</button></div>` : "";
     const cms = openPostId === p.id ? openComments : [];
     $("pdBody").innerHTML = `
-      <div class="pd-author">${ava(p.author, c.c)}<div><b>${esc(p.author.name)}</b><span>${timeAgo(p.created_at)}${p.updated_at && p.updated_at !== p.created_at && new Date(p.updated_at) - new Date(p.created_at) > 60000 ? " · изменено" : ""}</span></div></div>
+      <div class="pd-author"><span class="who-link" data-user="${p.user_id}">${ava(p.author, c.c)}</span><div class="who-link" data-user="${p.user_id}"><b>${esc(p.author.name)}</b><span>${timeAgo(p.created_at)}${p.updated_at && p.updated_at !== p.created_at && new Date(p.updated_at) - new Date(p.created_at) > 60000 ? " · изменено" : ""}</span></div>${mine ? "" : `<button class="more-btn" id="pdMore">⋯</button>`}</div>
+      ${p.status === "hidden" ? `<div class="warn-banner red" style="margin:0 0 10px">🛡 Публикация скрыта по жалобам и ждет проверки модератора. Ее видите только вы${user && user.is_admin ? " и модераторы" : ""}.</div>` : ""}
       ${closed ? `<div class="closed-note">✅ Автор отметил публикацию как неактуальную</div>` : ""}
       ${media}
       <div class="pd-text">${esc(p.text)}</div>
@@ -339,7 +355,7 @@
       <div class="pd-acts"><button class="lk${p.liked ? " on" : ""}" data-like="${p.id}">${p.liked ? "♥" : "♡"} ${p.likes}</button><button class="sv${p.saved ? " on" : ""}" data-save="${p.id}">${p.saved ? "★ Сохр." : "☆ Сохранить"}</button><button data-onmap="${p.id}">🗺 Карта</button><button id="pdShare">↗ Поделиться</button></div>
       ${own}
       <div class="lbl">Комментарии · ${cms.length}</div>
-      <div class="cmts">${cms.map((x) => `<div class="cmt">${ava(x.author)}<div><b>${esc(x.author.name)} <span class="dim" style="font-weight:400">· ${timeAgo(x.created_at)}</span></b><span>${esc(x.text)}</span></div>${user && user.id === x.user_id ? `<button class="x" data-delcm="${x.id}">✕</button>` : ""}</div>`).join("") || '<div class="dim" style="font-size:12px;margin-bottom:10px">Пока нет комментариев. Будьте первым!</div>'}</div>
+      <div class="cmts">${cms.map((x) => `<div class="cmt"><span class="who-link" data-user="${x.user_id}">${ava(x.author)}</span><div><b class="who-link" data-user="${x.user_id}">${esc(x.author.name)} <span class="dim" style="font-weight:400">· ${timeAgo(x.created_at)}</span></b><span>${esc(x.text)}</span></div>${user && user.id === x.user_id ? `<button class="x" data-delcm="${x.id}">✕</button>` : `<button class="flag" data-repcm="${x.id}" data-uid="${x.user_id}" title="Пожаловаться">⚑</button>`}</div>`).join("") || '<div class="dim" style="font-size:12px;margin-bottom:10px">Пока нет комментариев. Будьте первым!</div>'}</div>
       ${user ? `<form class="inrow cmt-form" id="cmForm"><input id="cmIn" placeholder="Написать комментарий..." maxlength="500" autocomplete="off"><button type="submit">➤</button></form>` : `<button class="btn btn-ghost full" id="cmLogin">Войдите, чтобы комментировать</button>`}`;
     bindDetail(p);
   }
@@ -352,12 +368,23 @@
       if ((b = e.target.closest("[data-join]"))) return doJoin(p.id);
       if ((b = e.target.closest("[data-onmap]"))) return showOnMap(p.id);
       if ((b = e.target.closest("[data-delcm]"))) return delComment(b.dataset.delcm);
+      if ((b = e.target.closest("[data-repcm]"))) return reportSheet({ type: "comment", id: b.dataset.repcm, user_id: b.dataset.uid, label: "комментарий" });
+      if ((b = e.target.closest("[data-reveal]"))) { b.classList.remove("blur-wrap"); b.querySelector(".shield").remove(); return; }
+      if ((b = e.target.closest("[data-zoom]"))) return openViewer(b.src);
+      if ((b = e.target.closest("[data-user]"))) return openUser(b.dataset.user);
     };
     if ($("pdShare")) $("pdShare").onclick = () => sharePost(p);
+    if ($("pdMore")) $("pdMore").onclick = () => {
+      openSheet("Публикация", `<button class="opt-row" id="mRep">⚑ Пожаловаться на публикацию<span>›</span></button><button class="opt-row" id="mUser">👤 Профиль автора<span>›</span></button><button class="opt-row" id="mBlock" style="color:#ff8a95">🚫 Заблокировать ${esc(p.author.name)}<span></span></button>`);
+      $("mRep").onclick = () => reportSheet({ type: "post", id: p.id, user_id: p.user_id, label: "публикацию" });
+      $("mUser").onclick = () => { closeSheet(); openUser(p.user_id); };
+      $("mBlock").onclick = () => blockUser(p.user_id, p.author.name, () => back());
+    };
     if ($("pdCal")) $("pdCal").onclick = () => addToCalendar(p);
     if ($("cmLogin")) $("cmLogin").onclick = () => requireAuth("Войдите, чтобы комментировать");
     if ($("cmForm")) $("cmForm").onsubmit = async (e) => {
       e.preventDefault(); const v = $("cmIn").value.trim(); if (!v) return;
+      if (N.hasBad(v)) toast("🤬 Грубые слова будут скрыты звездочками");
       $("cmIn").disabled = true;
       try { await api.addComment(p.id, v); openComments = await api.listComments(p.id); p.comments = openComments.length; renderDetail(p); refreshCardEverywhere(p); }
       catch (err) { toast(err.message); $("cmIn").disabled = false; }
@@ -485,6 +512,7 @@
         event = { starts_at: d.toISOString(), capacity: cap > 0 ? cap : null };
       }
     }
+    if (N.hasBad(text)) toast("🤬 Грубые слова будут скрыты звездочками");
     const btn = $("pubBtn"); btn.disabled = true;
     try {
       if (cr.edit) {
@@ -524,7 +552,7 @@
     return leafletP;
   }
   const zoomFor = (r) => (r <= 500 ? 16 : r <= 1000 ? 15 : r <= 3000 ? 14 : r <= 5000 ? 13 : 12);
-  const TILE = ["https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", { maxZoom: 19, subdomains: "abcd", attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> © <a href="https://carto.com/">CARTO</a>' }];
+  const TILE = ["https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>' }];
   $("mapCats").innerHTML = chipsHtml("all");
   $("mapCats").onclick = (e) => { const b = e.target.closest("[data-c]"); if (!b) return; mapCat = b.dataset.c; $("mapCats").innerHTML = chipsHtml(mapCat); loadMapPosts(); };
   $("mapRad").onclick = (e) => { const b = e.target.closest("[data-r]"); if (!b) return; setRadius(+b.dataset.r); feedDirty = true; if (mapReady) map.fitBounds(circleLayer.getBounds(), { padding: [10, 10] }); };
@@ -748,13 +776,13 @@
       const list = await api.notifications();
       const unread = list.filter((n) => !n.read).length;
       $("nfSub").textContent = unread ? unread + " новых" : "все прочитано";
-      const ic = { like: "♥", likes: "♥", comment: "💬", comments: "💬", join: "🎉", event_members: "🎉" };
-      $("nfList").innerHTML = list.length ? list.map((n) => `<button class="res${n.read ? "" : " unread"}" data-post="${n.post_id || ""}"><span class="e">${ic[n.type] || "🔔"}</span><div><b>${esc(n.actor.name)}</b><span>${esc(n.text || "")} · ${timeAgo(n.created_at)}</span></div></button>`).join("")
+      const ic = { like: "♥", likes: "♥", comment: "💬", comments: "💬", join: "🎉", event_members: "🎉", friend_request: "👋", friend_accept: "🤝", post_hidden: "🛡" };
+      $("nfList").innerHTML = list.length ? list.map((n) => `<button class="res${n.read ? "" : " unread"}" data-post="${n.post_id || ""}" data-actor="${(n.type || "").startsWith("friend") ? (n.actor && n.actor.id) || n.actor_id || "" : ""}"><span class="e">${ic[n.type] || "🔔"}</span><div><b>${esc(n.actor.name)}</b><span>${esc(n.text || "")} · ${timeAgo(n.created_at)}</span></div></button>`).join("")
         : '<div class="empty"><b>Уведомлений пока нет</b>Здесь появятся лайки, комментарии и участники ваших событий</div>';
       if (unread) { await api.markNotificationsRead(); refreshBadge(); }
     } catch (e) { $("nfList").innerHTML = `<div class="empty"><b>Ошибка</b>${esc(e.message)}</div>`; }
   }
-  $("nfList").onclick = (e) => { const b = e.target.closest("[data-post]"); if (b && b.dataset.post) openPost(b.dataset.post); };
+  $("nfList").onclick = (e) => { const b = e.target.closest("[data-post]"); if (!b) return; if (b.dataset.actor) { if (b.dataset.actor) openUser(b.dataset.actor); return; } if (b.dataset.post) openPost(b.dataset.post); };
 
   /* =====================================================
      PROFILE
@@ -772,16 +800,18 @@
       if ($("pReset")) $("pReset").onclick = resetDemo;
       return;
     }
-    b.innerHTML = `<div class="pf"><div class="big"><div>${user.avatar_url ? `<img src="${esc(user.avatar_url)}" alt="">` : esc(initial(user.name))}</div></div><b>${esc(user.name)}</b><div class="email">${esc(user.email || "")}</div><div class="since">${user.district ? "📍 " + esc(user.district) + " район" : "Район не указан"}</div></div>
+    b.innerHTML = `<div class="pf"><div class="big"><div>${user.avatar_url ? `<img src="${esc(user.avatar_url)}" alt="">` : esc(initial(user.name))}</div></div><b>${esc(user.name)}</b><div class="email">${esc(user.email || "")}</div><div class="since">${user.district ? "📍 " + esc(user.district) + " район" : "Район не указан"}</div>${user.instagram ? `<a class="insta" href="https://instagram.com/${esc(user.instagram)}" target="_blank" rel="noopener">📷 @${esc(user.instagram)}</a>` : ""}</div>
+      ${user.banned ? '<div class="warn-banner red ban-note">⛔ Ваш аккаунт ограничен модератором: публиковать и писать сообщения нельзя.</div>' : ""}
       <div class="pstats" id="pStats"><div><b>…</b><span>Публикации</span></div><div><b>…</b><span>Сохранено</span></div><div><b>…</b><span>События</span></div></div>
-      <div class="prof-btns"><button id="pEdit">✏️ Редактировать</button><button id="pPass">🔑 Сменить пароль</button></div>
+      <div class="prof-btns"><button id="pEdit">✏️ Редактировать</button><button id="pPass">🔑 Сменить пароль</button><button id="pBlocked">🚫 Заблокированные</button><button data-rules>📜 Правила</button>${user.is_admin ? '<button id="pMod" style="grid-column:span 2;border-color:rgba(255,46,136,.4)">🛡 Модерация <span class="mini-badge hidden" id="modBadge"></span></button>' : ""}</div>
       <div class="seg" id="pSeg"><button data-t="mine" class="${profTab === "mine" ? "on" : ""}">Мои публикации</button><button data-t="saved" class="${profTab === "saved" ? "on" : ""}">Сохраненное</button></div>
       <div id="pList"><div class="spin"></div></div>
       <div class="lbl" style="margin-top:14px">Уведомления</div>
       ${PREF_LIST.map(([k, n, d]) => `<div class="set"><span>${n}</span><button class="tg${(prefs[k] ?? d) ? " on" : ""}" data-pref="${k}"></button></div>`).join("")}
       ${api.mode === "local" ? '<div class="demo-strip mt12">🧪 Демо-режим: аккаунт и публикации хранятся только на этом устройстве</div>' : ""}
       <button class="logout" id="pOut">Выйти из аккаунта</button>`;
-    $("pEdit").onclick = editProfile; $("pPass").onclick = changePassword; $("pOut").onclick = logout;
+    $("pEdit").onclick = editProfile; $("pPass").onclick = changePassword; $("pOut").onclick = logout; $("pBlocked").onclick = blockedSheet;
+    if ($("pMod")) { $("pMod").onclick = () => go("sv-mod"); api.openReportsCount().then((n) => { if ($("modBadge") && n) { $("modBadge").textContent = n; $("modBadge").classList.remove("hidden"); } }).catch(() => {}); }
     qa("#pSeg [data-t]").forEach((x) => (x.onclick = () => { profTab = x.dataset.t; qa("#pSeg button").forEach((y) => y.classList.toggle("on", y === x)); loadProfList(); }));
     qa("[data-pref]").forEach((t) => (t.onclick = () => { t.classList.toggle("on"); prefs[t.dataset.pref] = t.classList.contains("on"); try { localStorage.setItem(PREFS_KEY, JSON.stringify(prefs)); } catch (e) {} toast((prefs[t.dataset.pref] ? "Включено: " : "Выключено: ") + t.previousElementSibling.textContent.replace(/^\S+\s/, "")); }));
     $("pList").onclick = (e) => { const r = e.target.closest("[data-post]"); if (r) openPost(r.dataset.post); };
@@ -799,6 +829,7 @@
     let avatarFile = null;
     openSheet("Редактировать профиль", `<div class="av-edit"><span class="ava" id="avPrev" style="background:#ff2e8822;color:#ff6aa8">${user.avatar_url ? `<img src="${esc(user.avatar_url)}" alt="">` : esc(initial(user.name))}</span><button class="btn btn-ghost" id="avBtn" type="button">📷 Сменить фото</button><input type="file" id="avFile" accept="image/*" hidden></div>
       <div class="fld"><label>Имя и фамилия</label><input id="peName" value="${esc(user.name)}" maxlength="60"></div>
+      <div class="fld"><label>Instagram</label><input id="peInsta" value="${esc(user.instagram || "")}" placeholder="ваш_ник (без @)" autocapitalize="off" autocomplete="off"><div class="hint">Покажется в профиле кнопкой, которая открывает ваш Instagram</div></div>
       <div class="fld"><label>Район</label><select id="peDist"><option value="">Не указан</option>${DISTRICTS.map((d) => `<option ${user.district === d[0] ? "selected" : ""}>${d[0]}</option>`).join("")}</select></div>
       <div class="err" id="peErr"></div>
       <div class="sheet-btns"><button class="btn btn-ghost" id="peCancel">Отмена</button><button class="btn btn-main" id="peSave">Сохранить</button></div>`);
@@ -806,7 +837,7 @@
     $("avFile").onchange = (e) => { const f = e.target.files[0]; if (!f) return; try { N.validateFile(f); avatarFile = f; $("avPrev").innerHTML = `<img src="${URL.createObjectURL(f)}" alt="">`; } catch (err) { toast(err.message); } };
     $("peCancel").onclick = closeSheet;
     $("peSave").onclick = async () => {
-      try { user = await busy($("peSave"), () => api.updateProfile({ name: $("peName").value, district: $("peDist").value, avatarFile })); closeSheet(); toast("✓ Профиль обновлен"); renderProfile(); }
+      try { user = await busy($("peSave"), () => api.updateProfile({ name: $("peName").value, district: $("peDist").value, avatarFile, instagram: $("peInsta").value })); closeSheet(); toast("✓ Профиль обновлен"); renderProfile(); }
       catch (e) { $("peErr").textContent = e.message; $("peErr").classList.add("on"); }
     };
   }
@@ -829,6 +860,339 @@
     if (!(await confirmSheet("Сбросить демо-данные?", "Удалятся все аккаунты и публикации, созданные на этом устройстве, и вернутся примеры.", "Сбросить", true))) return;
     api.resetDemo(); user = null; wide = null; cache.clear(); onUserChange(); toast("Демо-данные сброшены");
   }
+
+
+  /* =====================================================
+     ПРАВИЛА, ЖАЛОБЫ, БЛОКИРОВКИ
+     ===================================================== */
+  function showRules() {
+    openSheet("Правила сообщества NEAR", `<ol class="rules">
+      <li>Уважайте соседей: без оскорблений, угроз, травли и дискриминации.</li>
+      <li>Публикуйте правду. Ложные ДТП, SOS и фейки удаляются, автор блокируется.</li>
+      <li>Без спама, мошенничества и навязчивой рекламы.</li>
+      <li>Без откровенных, жестоких и шокирующих фото и видео.</li>
+      <li>Не публикуйте чужие личные данные: адреса, номера, документы, лица детей.</li>
+      <li>При угрозе жизни сначала звоните 112.</li>
+      <li>Грубые слова скрываются автоматически. Фото и сообщения могут проверяться автоматически.</li>
+      <li>Нарушения: жалоба ⚑ → проверка модератором → скрытие контента или блокировка аккаунта.</li>
+    </ol><button class="btn btn-main full" id="rulesOk">Понятно</button>`);
+    $("rulesOk").onclick = () => { closeSheet(); const cb = document.querySelector('#f-signup [name=rules]'); if (cb && $("v-auth").classList.contains("on")) cb.checked = true; };
+  }
+  function reportSheet({ type, id, user_id, label }) {
+    if (!requireAuth("Войдите, чтобы отправить жалобу")) return;
+    const R2 = N.REASONS; let reason = null;
+    openSheet("Пожаловаться на " + label, `<div class="reason-list">${Object.entries(R2).map(([k, v]) => `<button class="opt-row" data-reason="${k}">${v}<span></span></button>`).join("")}</div>
+      <div class="fld mt8"><textarea id="repDet" maxlength="500" placeholder="Подробности (необязательно)" style="min-height:70px"></textarea></div>
+      ${user_id && user && user_id !== user.id ? `<label class="rules-check" style="margin:0 0 12px"><input type="checkbox" id="repBlock"> <span>Также заблокировать этого пользователя</span></label>` : ""}
+      <div class="err" id="repErr"></div>
+      <div class="sheet-btns"><button class="btn btn-ghost" id="repNo">Отмена</button><button class="btn btn-main" id="repYes">Отправить</button></div>`);
+    qa("[data-reason]", $("bsList")).forEach((b) => (b.onclick = () => { reason = b.dataset.reason; qa("[data-reason]", $("bsList")).forEach((x) => { x.classList.toggle("on", x === b); x.querySelector("span").textContent = x === b ? "✓" : ""; }); }));
+    $("repNo").onclick = closeSheet;
+    $("repYes").onclick = async () => {
+      if (!reason) { $("repErr").textContent = "Выберите причину"; $("repErr").classList.add("on"); return; }
+      try {
+        await busy($("repYes"), () => api.report({ type, id, user_id, reason, details: $("repDet").value }));
+        const alsoBlock = $("repBlock") && $("repBlock").checked;
+        if (alsoBlock) await api.block(user_id);
+        closeSheet(); toast("🛡 Спасибо! Модератор проверит жалобу" + (alsoBlock ? ", пользователь заблокирован" : ""));
+        if (alsoBlock) { wide = null; feedDirty = true; loadFeed(); }
+      } catch (e) { $("repErr").textContent = e.message; $("repErr").classList.add("on"); }
+    };
+  }
+  async function blockUser(id, name, after) {
+    if (!requireAuth("Войдите, чтобы блокировать")) return;
+    if (!(await confirmSheet("Заблокировать " + name + "?", "Вы не будете видеть публикации и комментарии этого человека, он не сможет писать вам. Дружба будет удалена. Разблокировать можно в профиле.", "Заблокировать", true))) return;
+    try { await api.block(id); toast("🚫 " + name + " заблокирован(а)"); wide = null; feedDirty = true; loadFeed(); if (mapReady) loadMapPosts(); refreshChatBadge(); if (after) after(); }
+    catch (e) { toast(e.message); }
+  }
+  async function blockedSheet() {
+    openSheet("Заблокированные", '<div class="spin"></div>');
+    try {
+      const list = await api.blockedList();
+      $("bsList").innerHTML = list.length ? list.map((u) => `<div class="u-row">${ava(u)}<div class="tx"><b>${esc(u.name)}</b><span>${esc(u.district || "")}</span></div><button class="pill-btn ghost" data-unblock="${u.id}">Разблокировать</button></div>`).join("") : '<div class="empty"><b>Список пуст</b>Вы никого не блокировали</div>';
+      qa("[data-unblock]", $("bsList")).forEach((b) => (b.onclick = async () => { try { await api.unblock(b.dataset.unblock); b.closest(".u-row").remove(); toast("Пользователь разблокирован"); wide = null; feedDirty = true; } catch (e) { toast(e.message); } }));
+    } catch (e) { $("bsList").innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
+  }
+  function openViewer(src) { $("viewerImg").src = src; $("viewer").classList.remove("hidden"); }
+  $("viewer").onclick = () => { $("viewer").classList.add("hidden"); $("viewerImg").src = ""; };
+
+  /* =====================================================
+     ПРОФИЛЬ ДРУГОГО ПОЛЬЗОВАТЕЛЯ
+     ===================================================== */
+  let openUserId = null;
+  async function openUser(id) {
+    if (!id) return;
+    if (user && id === user.id) { hist = []; go("v-prof", false); return; }
+    openUserId = id; go("sv-user"); $("uBody").innerHTML = '<div class="spin"></div>'; $("uSub").textContent = "";
+    try { const u = await api.getProfile(id); if (openUserId === id) renderUser(u); }
+    catch (e) { $("uBody").innerHTML = `<div class="empty"><b>Не открылось</b>${esc(e.message)}</div>`; }
+  }
+  function renderUser(u) {
+    const fs = u.friendship;
+    const fBtn = u.blocked ? "" : fs === "friends" ? `<button class="btn btn-ghost" id="uFriend">✓ В друзьях</button>`
+      : fs === "requested" ? `<button class="btn btn-ghost" id="uFriend">⏳ Заявка отправлена</button>`
+      : fs === "incoming" ? `<button class="btn btn-main" id="uFriend">✓ Принять заявку</button>`
+      : `<button class="btn btn-main" id="uFriend">➕ Добавить в друзья</button>`;
+    $("uSub").textContent = fs === "friends" ? "ваш друг" : "";
+    $("uBody").innerHTML = `<div class="up">${ava(u)}<b>${esc(u.name)}</b><div class="d">${u.district ? "📍 " + esc(u.district) + " район · " : ""}в NEAR с ${new Date(u.created_at || Date.now()).toLocaleDateString("ru-RU", { day: "numeric", month: "long", year: "numeric" })}</div>
+      ${u.instagram ? `<a class="insta" href="https://instagram.com/${esc(u.instagram)}" target="_blank" rel="noopener">📷 @${esc(u.instagram)}</a>` : ""}</div>
+      <div class="up-stats"><div><b>${u.posts}</b><br><span>публикаций</span></div><div><b>${u.friends}</b><br><span>друзей</span></div></div>
+      ${u.blocked ? `<div class="warn-banner red" style="margin:0 0 12px">🚫 Вы заблокировали этого пользователя<div class="wb-acts"><button id="uUnblock">Разблокировать</button></div></div>` : `<div class="up-acts">${fBtn}<button class="btn btn-ghost" id="uMsg">💬 Написать</button><button class="iconbtn" id="uMore">⋯</button></div>`}
+      ${fs === "incoming" && !u.blocked ? `<button class="more" id="uDecline">Отклонить заявку</button>` : ""}
+      <div class="lbl">Публикации</div><div id="uPosts"><div class="spin"></div></div>`;
+    const reload = () => openUser(u.id);
+    if ($("uUnblock")) $("uUnblock").onclick = async () => { try { await api.unblock(u.id); toast("Разблокирован(а)"); wide = null; feedDirty = true; reload(); } catch (e) { toast(e.message); } };
+    if ($("uFriend")) $("uFriend").onclick = async () => {
+      if (!requireAuth("Войдите, чтобы добавлять друзей")) return;
+      try {
+        if (fs === "none") { await api.sendFriendRequest(u.id); toast("👋 Заявка отправлена"); }
+        else if (fs === "incoming") { await api.acceptFriend(u.id); toast("🤝 Теперь вы друзья"); }
+        else if (fs === "requested") { if (!(await confirmSheet("Отменить заявку?", "Заявка в друзья будет удалена.", "Отменить заявку"))) return; await api.removeFriend(u.id); toast("Заявка отменена"); }
+        else if (fs === "friends") { if (!(await confirmSheet("Удалить из друзей?", u.name + " исчезнет из списка друзей. Переписка сохранится.", "Удалить", true))) return; await api.removeFriend(u.id); toast("Удален(а) из друзей"); }
+        reload(); refreshChatBadge();
+      } catch (e) { toast(e.message); }
+    };
+    if ($("uDecline")) $("uDecline").onclick = async () => { try { await api.removeFriend(u.id); toast("Заявка отклонена"); reload(); refreshChatBadge(); } catch (e) { toast(e.message); } };
+    if ($("uMsg")) $("uMsg").onclick = () => startChat(u.id);
+    if ($("uMore")) $("uMore").onclick = () => {
+      openSheet(u.name, `<button class="opt-row" id="umRep">⚑ Пожаловаться на пользователя<span>›</span></button><button class="opt-row" id="umBlock" style="color:#ff8a95">🚫 Заблокировать<span></span></button>`);
+      $("umRep").onclick = () => reportSheet({ type: "user", id: u.id, user_id: u.id, label: "пользователя" });
+      $("umBlock").onclick = () => blockUser(u.id, u.name, reload);
+    };
+    api.userPosts(u.id).then((list) => { remember(list); if ($("uPosts")) $("uPosts").innerHTML = list.length ? list.map(rowPost).join("") : '<div class="empty">Публикаций пока нет</div>'; }).catch(() => {});
+  }
+  $("uBody").addEventListener("click", (e) => { const b = e.target.closest("[data-post]"); if (b && b.classList.contains("row-post")) openPost(b.dataset.post); });
+
+  /* =====================================================
+     ЧАТЫ, ДРУЗЬЯ, ЗАЯВКИ
+     ===================================================== */
+  let chTab = "chats";
+  qa("#chSeg [data-t]").forEach((b) => (b.onclick = () => { chTab = b.dataset.t; qa("#chSeg button").forEach((x) => x.classList.toggle("on", x === b)); renderChats(); }));
+  function msgPreview(m) {
+    if (!m) return "";
+    const pre = user && m.sender_id === user.id ? "Вы: " : "";
+    if (m.mod_status === "flagged") return pre + "⚠️ Скрытое сообщение";
+    return pre + ({ image: "📷 Фото", video: "🎬 Видео", audio: "🎤 Голосовое" }[m.kind] || m.text || "");
+  }
+  const shortTime = (iso) => { const d = new Date(iso), n = new Date(); return d.toDateString() === n.toDateString() ? d.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" }) : d.toLocaleDateString("ru-RU", { day: "numeric", month: "short" }); };
+  async function renderChats() {
+    const box = $("chBody");
+    if (!user) { box.innerHTML = `<div class="empty"><b>Сообщения и друзья</b>Войдите, чтобы переписываться с соседями<br><button class="btn btn-main mt12" id="chLogin">Войти</button></div>`; $("chLogin").onclick = () => showAuth("login"); return; }
+    box.innerHTML = '<div class="spin"></div>';
+    try {
+      const rq = await api.friendRequests();
+      $("reqBadge").textContent = rq.incoming.length; $("reqBadge").classList.toggle("hidden", !rq.incoming.length);
+      if (chTab === "chats") {
+        const list = await api.conversations();
+        box.innerHTML = list.length ? list.map((c) => `<button class="u-row${c.unread ? " unread-row" : ""}" data-conv="${c.id}">${ava(c.other)}<div class="tx"><b>${esc(c.other.name)}${c.friend ? "" : '<span class="tag-mini">не в друзьях</span>'}</b><span>${esc(msgPreview(c.last))}</span></div><div class="meta"><small>${shortTime(c.last.created_at)}</small>${c.unread ? `<span class="unread">${c.unread}</span>` : ""}</div></button>`).join("")
+          : `<div class="empty"><b>Пока нет переписок</b>Откройте профиль соседа и нажмите "Написать"<br><button class="btn btn-main mt12" data-open="sv-find">Найти людей</button></div>`;
+      } else if (chTab === "friends") {
+        const list = await api.friends();
+        box.innerHTML = list.length ? list.map((u) => `<div class="u-row" data-user="${u.id}">${ava(u)}<div class="tx"><b>${esc(u.name)}</b><span>${u.district ? esc(u.district) + " район" : ""}${u.instagram ? " · @" + esc(u.instagram) : ""}</span></div><button class="pill-btn" data-chat="${u.id}">💬</button></div>`).join("")
+          : `<div class="empty"><b>Друзей пока нет</b>Найдите соседей по имени или добавьте автора публикации из его профиля</div>`;
+      } else {
+        box.innerHTML = (rq.incoming.length ? '<div class="lbl">Входящие</div>' + rq.incoming.map((u) => `<div class="u-row" data-user="${u.id}">${ava(u)}<div class="tx"><b>${esc(u.name)}</b><span>хочет добавить вас в друзья</span></div><button class="pill-btn" data-accept="${u.id}">Принять</button><button class="pill-btn ghost" data-decline="${u.id}">✕</button></div>`).join("") : "")
+          + (rq.outgoing.length ? '<div class="lbl mt12">Отправленные</div>' + rq.outgoing.map((u) => `<div class="u-row" data-user="${u.id}">${ava(u)}<div class="tx"><b>${esc(u.name)}</b><span>ждем ответа</span></div><button class="pill-btn ghost" data-decline="${u.id}">Отменить</button></div>`).join("") : "")
+          || '<div class="empty"><b>Заявок нет</b>Здесь появятся заявки в друзья</div>';
+      }
+    } catch (e) { box.innerHTML = `<div class="empty"><b>Ошибка</b>${esc(e.message)}</div>`; }
+  }
+  $("chBody").onclick = async (e) => {
+    let b;
+    if ((b = e.target.closest("[data-accept]"))) { try { await api.acceptFriend(b.dataset.accept); toast("🤝 Теперь вы друзья"); renderChats(); refreshChatBadge(); } catch (er) { toast(er.message); } return; }
+    if ((b = e.target.closest("[data-decline]"))) { try { await api.removeFriend(b.dataset.decline); toast("Заявка удалена"); renderChats(); refreshChatBadge(); } catch (er) { toast(er.message); } return; }
+    if ((b = e.target.closest("[data-chat]"))) return startChat(b.dataset.chat);
+    if ((b = e.target.closest("[data-conv]"))) return openConv(b.dataset.conv);
+    if ((b = e.target.closest("[data-user]"))) return openUser(b.dataset.user);
+  };
+  async function refreshChatBadge() {
+    if (!api || !user) { $("chatBadge").classList.add("hidden"); return; }
+    try {
+      const [m, rq] = await Promise.all([api.unreadMessages(), api.friendRequests()]);
+      const n = m + rq.incoming.length;
+      $("chatBadge").textContent = n > 9 ? "9+" : n; $("chatBadge").classList.toggle("hidden", !n);
+    } catch (e) {}
+  }
+
+  /* поиск людей */
+  let fT = null;
+  $("fq").oninput = () => { clearTimeout(fT); fT = setTimeout(async () => {
+    const q = $("fq").value.trim();
+    if (q.length < 2) { $("fRes").innerHTML = '<div class="dim center" style="font-size:12px;padding:20px">Введите минимум 2 буквы</div>'; return; }
+    $("fRes").innerHTML = '<div class="spin"></div>';
+    try { const list = await api.searchUsers(q); $("fRes").innerHTML = list.length ? list.map((u) => `<button class="u-row" data-user="${u.id}">${ava(u)}<div class="tx"><b>${esc(u.name)}</b><span>${u.district ? esc(u.district) + " район" : "Алматы"}${u.instagram ? " · @" + esc(u.instagram) : ""}</span></div><span class="pill-btn ghost">Профиль</span></button>`).join("") : '<div class="empty"><b>Никого не нашли</b>Проверьте написание имени</div>'; }
+    catch (e) { $("fRes").innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
+  }, 300); };
+  $("fRes").onclick = (e) => { const b = e.target.closest("[data-user]"); if (b) openUser(b.dataset.user); };
+
+  /* =====================================================
+     ПЕРЕПИСКА: текст, фото, видео, голосовые
+     ===================================================== */
+  let convId = null, convInfo = null, convPoll = null;
+  async function startChat(otherId) {
+    if (!requireAuth("Войдите, чтобы писать сообщения")) return;
+    try { const cid = await api.openConversation(otherId); openConv(cid); } catch (e) { toast(e.message); }
+  }
+  async function openConv(cid) {
+    go("sv-conv"); convId = cid; $("convMsgs").innerHTML = '<div class="spin"></div>'; $("convWarn").classList.add("hidden"); $("convWho").innerHTML = ""; $("convProg").textContent = "";
+    try {
+      convInfo = await api.conversationInfo(cid);
+      const o = convInfo.other;
+      $("convWho").innerHTML = `${ava(o)}<div style="min-width:0"><b>${esc(o.name)}</b><span>${convInfo.friend ? "друг" : "не в друзьях"}</span></div>`;
+      const w = $("convWarn");
+      if (convInfo.blocked) { w.className = "warn-banner red"; w.innerHTML = "🚫 Переписка недоступна: пользователь заблокирован."; }
+      else if (!convInfo.friend) { w.className = "warn-banner"; w.innerHTML = `⚠️ ${esc(o.name)} нет у вас в друзьях. Не переходите по ссылкам, не сообщайте коды из SMS, данные карт и адрес.<div class="wb-acts"><button id="cwRep">⚑ Пожаловаться</button><button id="cwBlock">🚫 Заблокировать</button></div>`;
+        $("cwRep").onclick = () => reportSheet({ type: "user", id: o.id, user_id: o.id, label: "пользователя" });
+        $("cwBlock").onclick = () => blockUser(o.id, o.name, () => openConv(cid)); }
+      else w.classList.add("hidden");
+      if (convInfo.blocked || !convInfo.friend) w.classList.remove("hidden");
+      $("composer").classList.toggle("hidden", !!convInfo.blocked);
+      await loadMsgs(true);
+      clearInterval(convPoll); convPoll = setInterval(() => { if (convId === cid && !document.hidden) loadMsgs(false); else if (convId !== cid) clearInterval(convPoll); }, api.mode === "local" ? 2500 : 8000);
+    } catch (e) { $("convMsgs").innerHTML = `<div class="empty"><b>Не открылось</b>${esc(e.message)}</div>`; }
+  }
+  $("convWho").onclick = () => { if (convInfo) openUser(convInfo.other.id); };
+  $("convMenu").onclick = () => {
+    if (!convInfo) return; const o = convInfo.other;
+    openSheet(o.name, `<button class="opt-row" id="cmProf">👤 Профиль<span>›</span></button><button class="opt-row" id="cmRep">⚑ Пожаловаться<span>›</span></button><button class="opt-row" id="cmBlock" style="color:#ff8a95">🚫 Заблокировать<span></span></button>`);
+    $("cmProf").onclick = () => { closeSheet(); openUser(o.id); };
+    $("cmRep").onclick = () => reportSheet({ type: "user", id: o.id, user_id: o.id, label: "пользователя" });
+    $("cmBlock").onclick = () => blockUser(o.id, o.name, () => openConv(convId));
+  };
+  let lastSig = "";
+  async function loadMsgs(scroll) {
+    const cid = convId; if (!cid) return;
+    const list = await api.messages(cid);
+    if (cid !== convId) return;
+    const sig = list.map((m) => m.id + m.mod_status + (m.read_at ? 1 : 0)).join("|");
+    if (sig === lastSig && !scroll) return; lastSig = sig;
+    const box = $("convMsgs"), atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
+    let day = "";
+    box.innerHTML = list.length ? list.map((m) => {
+      const d = new Date(m.created_at).toLocaleDateString("ru-RU", { day: "numeric", month: "long" });
+      const sep = d !== day ? `<div class="day-sep">${(day = d)}</div>` : "";
+      return sep + bubble(m);
+    }).join("") : `<div class="empty" style="margin-top:20px"><b>Начните разговор</b>Напишите сообщение, отправьте фото или голосовое 🎤</div>`;
+    if (scroll || atBottom) box.scrollTop = box.scrollHeight;
+    if (list.some((m) => user && m.sender_id !== user.id && !m.read_at)) { api.markRead(cid).then(refreshChatBadge).catch(() => {}); }
+  }
+  function bubble(m) {
+    const mine = user && m.sender_id === user.id;
+    const tm = `<span class="tm">${new Date(m.created_at).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" })}${mine ? (m.read_at ? " ✓✓" : " ✓") : ""}${mine && m.mod_status === "pending" ? " ⏳" : ""}</span>`;
+    const flagged = m.mod_status === "flagged", pendingForThem = m.mod_status === "pending" && !mine && m.kind === "image";
+    let body = "";
+    if (m.kind === "text") {
+      body = flagged && !mine ? `<div class="blur-wrap" data-reveal style="border-radius:10px"><div class="bg" style="padding:4px 2px">${esc(m.text)}</div><div class="shield" style="font-size:11px">⚠️ Возможно оскорбительное<button type="button">Показать</button></div></div>` : esc(m.text);
+      return `<div class="bub ${mine ? "me" : "them"}" data-msg="${m.id}">${body}${flagged && mine ? '<span class="tm">⚠️ скрыто для получателя</span>' : ""}${tm}</div>`;
+    }
+    if (m.kind === "image") {
+      const img = `<img src="${esc(m.media_url)}" alt="" loading="lazy" data-zoom>`;
+      body = (flagged || pendingForThem) && !mine ? `<div class="blur-wrap" data-reveal>${img}<div class="shield">${flagged ? "⚠️ Возможно неприемлемое фото" : "⏳ Фото проверяется"}<button type="button">Показать</button></div></div>` : img;
+    }
+    if (m.kind === "video") body = `<video src="${esc(m.media_url)}" controls playsinline preload="metadata"></video>`;
+    if (m.kind === "audio") body = `<audio src="${esc(m.media_url)}" controls preload="metadata"></audio>`;
+    return `<div class="bub media ${mine ? "me" : "them"}" data-msg="${m.id}">${body}${m.text ? `<div class="cap">${esc(m.text)}</div>` : ""}${tm}</div>`;
+  }
+  $("convMsgs").addEventListener("click", (e) => {
+    let b;
+    if ((b = e.target.closest("[data-reveal]"))) { if (e.target.tagName === "BUTTON") { b.classList.remove("blur-wrap"); const s2 = b.querySelector(".shield"); if (s2) s2.remove(); } return; }
+    if ((b = e.target.closest("[data-zoom]"))) return openViewer(b.src);
+    if ((b = e.target.closest("[data-msg]")) && !e.target.closest("audio,video")) msgMenu(b.dataset.msg, b.classList.contains("me"));
+  });
+  function msgMenu(id, mine) {
+    const txt = ($(`convMsgs`).querySelector(`[data-msg="${id}"]`) || {}).innerText || "";
+    openSheet("Сообщение", `<button class="opt-row" id="mmCopy">📋 Копировать текст<span></span></button>${mine ? `<button class="opt-row" id="mmDel" style="color:#ff8a95">🗑 Удалить у всех<span></span></button>` : `<button class="opt-row" id="mmRep">⚑ Пожаловаться на сообщение<span>›</span></button>`}`);
+    $("mmCopy").onclick = async () => { try { await navigator.clipboard.writeText(txt.replace(/\d{1,2}:\d{2}.*$/s, "").trim()); toast("Скопировано"); } catch (e) { toast("Не удалось скопировать"); } closeSheet(); };
+    if ($("mmDel")) $("mmDel").onclick = async () => { closeSheet(); try { await api.deleteMessage(id); lastSig = ""; loadMsgs(false); } catch (e) { toast(e.message); } };
+    if ($("mmRep")) $("mmRep").onclick = () => reportSheet({ type: "message", id, user_id: convInfo && convInfo.other.id, label: "сообщение" });
+  }
+  $("msgIn").oninput = () => { const has = !!$("msgIn").value.trim(); $("sendBtn").classList.toggle("hidden", !has); $("micBtn").classList.toggle("hidden", has); };
+  async function sendPayload(payload) {
+    const cid = convId; if (!cid) return;
+    try { await api.sendMessage(cid, payload, (m) => ($("convProg").textContent = m)); $("convProg").textContent = ""; lastSig = ""; await loadMsgs(true); }
+    catch (e) { $("convProg").textContent = ""; toast(e.message); throw e; }
+  }
+  $("composer").onsubmit = async (e) => {
+    e.preventDefault(); const v = $("msgIn").value.trim(); if (!v) return;
+    if (N.hasBad(v)) toast("🤬 Грубые слова будут скрыты звездочками");
+    $("msgIn").value = ""; $("msgIn").oninput();
+    try { await sendPayload({ text: v }); } catch (er) { $("msgIn").value = v; $("msgIn").oninput(); }
+    $("msgIn").focus();
+  };
+  $("attachBtn").onclick = () => $("chatFile").click();
+  $("chatFile").onchange = async (e) => {
+    const f = e.target.files[0]; e.target.value = ""; if (!f) return;
+    try { const k = N.validateChatFile(f); if (k === "audio") throw new Error("Выберите фото или видео"); await sendPayload({ file: f, kind: k }); } catch (er) { if (!er.raw) toast(er.message); }
+  };
+  /* голосовые сообщения */
+  let rec = null, recChunks = [], recStart = 0, recTimer = null, recStream = null;
+  function pickMime() {
+    const c = ["audio/mp4", "audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus"];
+    if (!window.MediaRecorder) return null;
+    for (const t of c) { try { if (MediaRecorder.isTypeSupported(t)) return t; } catch (e) {} }
+    return "";
+  }
+  $("micBtn").onclick = async () => {
+    const mime = pickMime();
+    if (mime === null || !navigator.mediaDevices) { toast("Запись голоса не поддерживается в этом браузере"); return; }
+    try { recStream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+    catch (e) { toast("Разрешите доступ к микрофону в настройках браузера"); return; }
+    recChunks = []; rec = new MediaRecorder(recStream, mime ? { mimeType: mime } : undefined);
+    rec.ondataavailable = (ev) => { if (ev.data && ev.data.size) recChunks.push(ev.data); };
+    rec.start(250); recStart = Date.now();
+    $("composer").classList.add("hidden"); $("recBar").classList.remove("hidden"); $("recTime").textContent = "0:00";
+    recTimer = setInterval(() => { const s2 = Math.floor((Date.now() - recStart) / 1000); $("recTime").textContent = Math.floor(s2 / 60) + ":" + String(s2 % 60).padStart(2, "0"); if (s2 >= 120) $("recSend").click(); }, 250);
+  };
+  function stopRec(cancel) {
+    return new Promise((res) => {
+      clearInterval(recTimer);
+      if (!rec) { res(null); return; }
+      const r = rec; rec = null;
+      r.onstop = () => { if (recStream) recStream.getTracks().forEach((t) => t.stop()); recStream = null; $("recBar").classList.add("hidden"); $("composer").classList.toggle("hidden", !!(convInfo && convInfo.blocked));
+        if (cancel) { res(null); return; }
+        const type = (r.mimeType || "audio/webm").split(";")[0];
+        res(new File(recChunks, "voice." + (type.includes("mp4") ? "m4a" : type.split("/")[1]), { type })); };
+      try { r.stop(); } catch (e) { res(null); }
+    });
+  }
+  $("recCancel").onclick = () => stopRec(true);
+  $("recSend").onclick = async () => {
+    const dur = (Date.now() - recStart) / 1000; const f = await stopRec(false);
+    if (!f || dur < 0.8) { if (f) toast("Слишком короткое голосовое"); return; }
+    try { await sendPayload({ file: f, kind: "audio", duration: dur }); } catch (e) {}
+  };
+
+  /* =====================================================
+     ПАНЕЛЬ МОДЕРАТОРА
+     ===================================================== */
+  async function renderMod() {
+    const box = $("modList"); box.innerHTML = '<div class="spin"></div>';
+    try {
+      const list = await api.reportsList();
+      const seen = new Set(), uniq = list.filter((r) => { const k = r.target_type + r.target_id; if (seen.has(k)) return false; seen.add(k); return true; });
+      $("modSub").textContent = uniq.length ? uniq.length + " на проверке" : "все проверено";
+      const TT = { post: "📝 Публикация", comment: "💬 Комментарий", message: "✉️ Сообщение", user: "👤 Пользователь" };
+      box.innerHTML = uniq.length ? uniq.map((r) => `<div class="rep" data-rep="${r.id}">
+        <div class="rh"><span>${TT[r.target_type]} · жалоб: ${r.count}</span><span>${timeAgo(r.created_at)}</span></div>
+        <div class="rr">${esc(N.REASONS[r.reason] || r.reason)}</div>
+        <div class="dim" style="font-size:11.5px">Автор: <b class="who-link" data-user="${r.target_user || ""}">${esc(r.target.name)}</b>${r.target.banned ? " ⛔" : ""} · пожаловался: ${esc(r.reporter.name)}</div>
+        ${r.details ? `<div class="dim" style="font-size:11.5px;margin-top:4px">"${esc(r.details)}"</div>` : ""}
+        <div class="pv">${esc(r.preview || "—")}</div>
+        <div class="ra">${r.target_type === "post" ? `<button data-act="open" data-post="${r.target_id}">Открыть</button><button class="danger" data-act="hide">Скрыть</button><button class="okb" data-act="restore">Вернуть</button>` : ""}
+          ${r.target_type !== "user" ? `<button class="danger" data-act="delete">Удалить</button>` : ""}
+          ${r.target_user && !r.target.banned ? `<button class="danger" data-act="ban">⛔ Забанить автора</button>` : ""}
+          <button data-act="dismiss">Отклонить жалобу</button></div></div>`).join("") : '<div class="empty"><b>Жалоб нет 🎉</b>Новые жалобы появятся здесь</div>';
+    } catch (e) { box.innerHTML = `<div class="empty"><b>Нет доступа</b>${esc(e.message)}</div>`; }
+  }
+  $("modList").onclick = async (e) => {
+    const u = e.target.closest("[data-user]"); if (u && u.dataset.user) return openUser(u.dataset.user);
+    const b = e.target.closest("[data-act]"); if (!b) return;
+    const card2 = b.closest("[data-rep]"), act = b.dataset.act;
+    if (act === "open") return openPost(b.dataset.post);
+    const labels = { hide: "Скрыть публикацию?", restore: "Вернуть публикацию в ленту?", delete: "Удалить навсегда?", ban: "Забанить автора? Он не сможет публиковать и писать.", dismiss: "Отклонить жалобу?" };
+    if (!(await confirmSheet("Модерация", labels[act], "Да", act === "delete" || act === "ban"))) return;
+    try { await api.resolveReport(card2.dataset.rep, act); toast("✓ Готово"); wide = null; feedDirty = true; renderMod(); } catch (er) { toast(er.message); }
+  };
 
   /* =====================================================
      DEMO-РАЗДЕЛЫ (SOS, услуги, опросы, помощь, сообщества)
@@ -899,9 +1263,14 @@
     refreshBadge();
     try { api.subscribe((type, row) => {
       if (type === "post") { wide = null; if (mapReady) { clearTimeout(mapT); mapT = setTimeout(loadMapPosts, 800); } if (row && N.dist(pos, row) <= R && (!user || row.user_id !== user.id)) { $("refreshBtn").style.background = "var(--grad)"; toast("🆕 Новая публикация рядом. Нажмите ↻"); } }
-      if (type === "notif") refreshBadge();
+      if (type === "notif") { refreshBadge(); refreshChatBadge(); }
+      if (type === "message" || type === "message_update") {
+        if (convId && row && row.conversation_id === convId) { lastSig = ""; loadMsgs(false); }
+        else if (type === "message") { refreshChatBadge(); toast("💬 Новое сообщение"); if (cur() === "v-chats") renderChats(); }
+      }
     }); } catch (e) { console.warn(e); }
-    setInterval(() => { if (!document.hidden) refreshBadge(); }, 60000);
+    refreshChatBadge();
+    setInterval(() => { if (!document.hidden) { refreshBadge(); refreshChatBadge(); } }, api.mode === "local" ? 15000 : 30000);
     loadLeaflet().catch(() => {});
     const m = location.hash.match(/post=([\w-]+)/); if (m) openPost(m[1]);
   }

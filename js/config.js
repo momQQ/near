@@ -14,6 +14,10 @@ window.NEAR_CONFIG = {
   SUPABASE_URL: "",       // пример: "https://abcdefgh.supabase.co"
   SUPABASE_ANON_KEY: "",  // длинный ключ, начинается с "eyJ..." или "sb_publishable_..."
 
+  // ИИ-проверка фото и сообщений (см. SETUP.md, шаг 7).
+  // Включайте только после того, как развернули функцию "moderate".
+  AI_MODERATION: false,
+
   // Центр карты по умолчанию (Алматы)
   CITY: { name: "Алматы", lat: 43.2389, lng: 76.8897, zoom: 13 },
 

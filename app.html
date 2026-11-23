@@ -45,6 +45,7 @@
       </div>
       <div class="fld"><label>Email</label><input name="email" type="email" autocomplete="email" inputmode="email" placeholder="you@mail.kz" required></div>
       <div class="fld"><label>Пароль</label><div class="pw"><input name="password" type="password" autocomplete="new-password" placeholder="Пароль" minlength="6" required><button type="button" data-eye>👁</button></div><div class="hint">Не короче 6 символов</div></div>
+      <label class="rules-check"><input type="checkbox" name="rules"> <span>Я принимаю <button type="button" class="lnk" data-rules>правила сообщества NEAR</button></span></label>
       <button class="btn btn-main big" type="submit">Зарегистрироваться</button>
       <div class="auth-foot">Уже есть аккаунт? <button type="button" class="lnk" data-auth="login">Войти</button></div>
     </form>
@@ -121,6 +122,7 @@
       <button class="dt" data-open="sv-services"><span class="e" style="background:rgba(61,165,255,.15)">🛠️</span><b>Услуги</b><span>Мастера поблизости</span></button>
       <button class="dt" data-open="sv-polls"><span class="e" style="background:rgba(43,212,125,.15)">🗳️</span><b>Опросы района</b><span>Решаем вместе</span></button>
       <button class="dt" data-open="sv-help"><span class="e" style="background:rgba(0,180,166,.15)">🤝</span><b>Помощь рядом</b><span>Соседи помогают</span></button>
+      <button class="dt" data-open="v-com"><span class="e" style="background:rgba(166,60,255,.15)">👥</span><b>Сообщества</b><span>Районы и интересы</span></button>
       <button class="dt" id="parkBtn"><span class="soon">скоро</span><span class="e" style="background:rgba(155,155,180,.12)">🅿️</span><b>Парковки</b><span>Свободные места</span></button>
     </div>
   </div>
@@ -253,9 +255,60 @@
     <div id="pdBody"><div class="spin"></div></div>
   </div>
 
+
+  <!-- ============ CHATS ============ -->
+  <div class="view" id="v-chats">
+    <div class="cr-title">Сообщения</div>
+    <div class="seg" id="chSeg"><button data-t="chats" class="on">Чаты</button><button data-t="friends">Друзья</button><button data-t="requests">Заявки <span class="mini-badge hidden" id="reqBadge"></span></button></div>
+    <button class="search" data-open="sv-find">🔍 Найти людей по имени</button>
+    <div id="chBody"><div class="spin"></div></div>
+  </div>
+
+  <!-- FIND PEOPLE -->
+  <div class="view" id="sv-find">
+    <div class="sub-h"><button class="back" data-back>‹</button><div><b>Найти людей</b><small>по имени и фамилии</small></div></div>
+    <input class="qin" id="fq" type="search" placeholder="Например: Айдана" autocomplete="off">
+    <div id="fRes"></div>
+  </div>
+
+  <!-- USER PROFILE -->
+  <div class="view" id="sv-user">
+    <div class="sub-h"><button class="back" data-back>‹</button><div><b>Профиль</b><small id="uSub"></small></div></div>
+    <div id="uBody"><div class="spin"></div></div>
+  </div>
+
+  <!-- CONVERSATION -->
+  <div class="view" id="sv-conv">
+    <div class="conv-h">
+      <button class="back" data-back>‹</button>
+      <button class="conv-who" id="convWho"></button>
+      <button class="iconbtn" id="convMenu">⋯</button>
+    </div>
+    <div class="warn-banner hidden" id="convWarn"></div>
+    <div class="conv-msgs" id="convMsgs"></div>
+    <div class="rec-bar hidden" id="recBar"><span class="rec-dot"></span><span id="recTime">0:00</span><span class="dim">Запись голосового...</span><button id="recCancel">✕</button><button class="send" id="recSend">➤</button></div>
+    <form class="composer" id="composer">
+      <button type="button" class="cbtn" id="attachBtn">📎</button>
+      <input type="file" id="chatFile" accept="image/*,video/*" hidden>
+      <input id="msgIn" placeholder="Сообщение..." autocomplete="off" maxlength="2000">
+      <button type="button" class="cbtn mic" id="micBtn">🎤</button>
+      <button type="submit" class="cbtn send hidden" id="sendBtn">➤</button>
+    </form>
+    <div class="progress" id="convProg"></div>
+  </div>
+
+  <!-- MODERATION -->
+  <div class="view" id="sv-mod">
+    <div class="sub-h"><button class="back" data-back>‹</button><div><b>🛡 Модерация</b><small id="modSub">жалобы пользователей</small></div></div>
+    <div id="modList"><div class="spin"></div></div>
+  </div>
+
+  <!-- IMAGE VIEWER -->
+  <div class="viewer hidden" id="viewer"><img id="viewerImg" alt=""><button id="viewerX">✕</button></div>
+
   <!-- COMMUNITIES -->
           <div class="view" id="v-com">
-            <div class="cr-title">Сообщества рядом</div>
+            <div class="sub-h"><button class="back" data-back>‹</button><div><b>Сообщества рядом</b><small>пример раздела</small></div></div>
             <div class="lbl">Мой дом</div>
             <div class="com"><span class="cv" style="background:linear-gradient(135deg,#2bd47d,#1a8f6a)">🏢</span><div><b>ЖК "Тау Самал" 🔒</b><span>Вода, лифты, парковка, УК</span><small>312 жителей · только для жильцов</small></div><button class="jn">Войти</button></div>
             <div class="lbl">Районы</div>
@@ -303,7 +356,7 @@
     </div>
     <button class="tb-plus" data-v="v-create" title="Создать"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.6" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></button>
     <div class="tb-pill">
-      <button class="tb" data-v="v-com" title="Сообщества"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round"><circle cx="9" cy="8" r="3.2"/><path d="M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6"/><circle cx="17" cy="9" r="2.5"/><path d="M17 14c2.5 0 4 1.8 4 4.5"/></svg></button>
+      <button class="tb" data-v="v-chats" title="Сообщения"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linejoin="round"><path d="M4 5h16v11H9l-5 4z"/></svg><span class="dot hidden" id="chatBadge">0</span></button>
       <button class="tb" data-v="v-prof" title="Профиль"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4.4 3.6-8 8-8s8 3.6 8 8"/></svg></button>
     </div>
   </div>

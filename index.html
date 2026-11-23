@@ -467,6 +467,66 @@ footer .wrap{display:flex;justify-content:space-between;align-items:center;flex-
 .bs p{font-size:13.5px;color:var(--muted)}
 .road.four{grid-template-columns:repeat(4,1fr)}
 @media(max-width:980px){.three,.feat,.base,.road.four{grid-template-columns:1fr}.ft.wide{grid-column:auto}}
+
+/* v3 */
+button.search{width:100%;text-align:left}
+button.loc-pill{cursor:pointer}
+button.bell{cursor:pointer}
+textarea.inp{width:100%;border:0;outline:none;resize:none;font:inherit;font-size:12px;display:block}
+.toast{position:absolute;left:50%;top:calc(58px + env(safe-area-inset-top));transform:translate(-50%,-20px);opacity:0;pointer-events:none;background:rgba(30,30,46,.97);border:1px solid var(--line);border-radius:14px;padding:10px 14px;font-size:12px;font-weight:600;z-index:40;width:max-content;max-width:88%;text-align:center;transition:.25s;box-shadow:0 10px 30px rgba(0,0,0,.5)}
+.toast.on{opacity:1;transform:translate(-50%,0)}
+.sheet-bg{position:absolute;inset:0;background:rgba(0,0,0,.55);z-index:30;opacity:0;pointer-events:none;transition:.2s}
+.sheet-bg.on{opacity:1;pointer-events:auto}
+.bsheet{position:absolute;left:0;right:0;bottom:0;background:var(--card);border-radius:24px 24px 0 0;border-top:1px solid var(--line);padding:10px 14px calc(16px + env(safe-area-inset-bottom));z-index:31;transform:translateY(100%);transition:.25s;max-height:75%;display:flex;flex-direction:column}
+.bsheet.on{transform:none}
+.bsheet:not(.on){visibility:hidden;transition:transform .25s,visibility 0s .25s}
+.screen{overflow:clip}
+.bsheet .grip{width:36px;height:4px;border-radius:2px;background:#3a3a50;margin:0 auto 10px}
+.bsheet h4{font-size:15px;margin-bottom:10px}
+.bs-list{overflow-y:auto;flex:1;margin-bottom:10px}
+.cmt{display:flex;gap:8px;margin-bottom:10px;font-size:12px}
+.cmt .ava{width:26px;height:26px;font-size:11px}
+.cmt b{font-size:11.5px;display:block}
+.cmt span{color:var(--muted)}
+.opt-row{display:flex;align-items:center;justify-content:space-between;width:100%;padding:12px;border-radius:12px;background:var(--card2);margin-bottom:6px;font-size:13px;text-align:left}
+.opt-row.on{outline:1.5px solid var(--p)}
+.inrow{display:flex;gap:8px}
+.inrow input{flex:1;min-width:0;background:var(--card2);border:1px solid var(--line);border-radius:999px;padding:10px 14px;color:var(--text);font:inherit;font-size:13px;outline:none}
+.inrow input:focus{border-color:var(--p)}
+.inrow button{width:40px;height:40px;border-radius:50%;background:var(--grad);font-size:16px;flex-shrink:0}
+.qin{width:100%;background:var(--card);border:1px solid var(--p);border-radius:14px;padding:11px 13px;color:var(--text);font:inherit;font-size:13px;outline:none;margin-bottom:10px}
+.res{display:flex;gap:10px;align-items:center;width:100%;text-align:left;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:10px 12px;margin-bottom:7px}
+.res .e{width:34px;height:34px;border-radius:10px;background:var(--card2);display:grid;place-items:center;font-size:17px;flex-shrink:0}
+.res b{font-size:12.5px;display:block}
+.res span{font-size:10.5px;color:var(--dim)}
+.res.unread{border-color:rgba(255,46,136,.35)}
+.res.unread b:after{content:" •";color:var(--p)}
+.qtags{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px}
+.qtags button{font-size:11px;padding:6px 11px;border-radius:999px;background:var(--card);border:1px solid var(--line);color:var(--muted)}
+#sv-chat.on{display:flex;flex-direction:column}
+.chat-msgs{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:8px;padding:4px 0 10px}
+.chat-msgs .msg{font-size:12.5px;padding:9px 12px;max-width:80%}
+.chat-in{margin-bottom:calc(84px + env(safe-area-inset-bottom))}
+.set{display:flex;align-items:center;justify-content:space-between;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:11px 12px;margin-bottom:7px;font-size:12px}
+.tg{width:38px;height:22px;border-radius:999px;background:#33334a;position:relative;transition:.2s;flex-shrink:0}
+.tg:after{content:"";position:absolute;left:3px;top:3px;width:16px;height:16px;border-radius:50%;background:#fff;transition:.2s}
+.tg.on{background:var(--grad)}
+.tg.on:after{left:19px}
+.help{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:11px 12px;margin-bottom:8px}
+.help b{font-size:12.5px;display:block}
+.help span{font-size:10.5px;color:var(--dim);display:block;margin:2px 0 8px}
+.help button{font-size:11px;font-weight:700;padding:6px 12px;border-radius:999px;background:var(--grad)}
+.help button.done{background:rgba(43,212,125,.15);color:var(--ok)}
+.map-top button.chip{cursor:pointer}
+.sh-open{margin-left:auto;font-size:11px;font-weight:700;padding:7px 12px;border-radius:999px;background:var(--grad);flex-shrink:0}
+.lf{cursor:pointer;text-align:left}
+.rrow{cursor:pointer;width:100%;text-align:left}
+.sos-big{cursor:pointer;border:0;color:#fff}
+.sos-big.sent{background:radial-gradient(circle,#2bd47d,#16865a);font-size:15px;animation:none;box-shadow:0 0 0 14px rgba(43,212,125,.14)}
+.post-f .lk{font-size:11px;color:var(--dim)}
+.post-f .lk.on{color:var(--p)}
+.post-f .cm{font-size:11px;color:var(--dim)}
+.post-f .act.on{background:rgba(43,212,125,.15);color:var(--ok)}
 </style>
 </head>
 <body>
@@ -513,13 +573,13 @@ footer .wrap{display:flex;justify-content:space-between;align-items:center;flex-
           <div class="status"><span>9:41</span><span>●●● 5G ▮</span></div>
           <div class="app-top">
             <div class="logo"><span class="logo-mark"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.6" stroke-linecap="round"><path d="M12 22s7-6.2 7-12a7 7 0 1 0-14 0c0 5.8 7 12 7 12z"/><circle cx="12" cy="10" r="2.6"/></svg></span>NEAR</div>
-            <span class="loc-pill"><i></i>Бостандыкский</span>
-            <span class="bell">🔔</span>
+            <button class="loc-pill" id="locBtn"><i></i><span id="locName">Бостандыкский</span> ▾</button>
+            <button class="bell" id="bellBtn">🔔</button>
           </div>
 
           <!-- FEED -->
           <div class="view on" id="v-feed">
-            <div class="search">🔍 Поиск: люди, события, услуги, места</div>
+            <button class="search" data-search>🔍 Поиск: люди, события, услуги, места</button>
             <div class="radius" id="radius">
               <button data-r="500">500 м</button><button data-r="1000" class="on">1 км</button><button data-r="3000">3 км</button><button data-r="5000">5 км</button><button data-r="10000">10 км</button>
             </div>
@@ -534,11 +594,11 @@ footer .wrap{display:flex;justify-content:space-between;align-items:center;flex-
           <div class="view map-view" id="v-map">
             <div class="map-wrap">
               <svg class="map-svg" id="miniMap" viewBox="0 0 330 600" preserveAspectRatio="xMidYMid slice"></svg>
-              <div class="map-top"><span class="chip on">Сейчас</span><span class="chip">🔥 Тепловая</span><span class="chip">🎉 События</span></div>
+              <div class="map-top" id="mapTop"><button class="chip on" data-mf="all">Сейчас</button><button class="chip" data-mf="heat">🔥 Тепловая</button><button class="chip" data-mf="event">🎉 События</button></div>
               <div class="priv">🔒 Люди не видны</div>
               <div class="map-sheet" id="sheet">
                 <div class="grip"></div>
-                <div class="row"><span class="ic" id="sh-ic" style="background:rgba(255,46,136,.15)">⚽</span><div><b id="sh-t">Ищут компанию для футбола</b><span id="sh-d">Парк · ~700 м · 4 свободных места</span></div></div>
+                <div class="row"><span class="ic" id="sh-ic" style="background:rgba(255,46,136,.15)">⚽</span><div><b id="sh-t">Ищут компанию для футбола</b><span id="sh-d">Парк · ~700 м · 4 свободных места</span></div><button class="sh-open" id="shOpen">Открыть</button></div>
               </div>
             </div>
           </div>
@@ -557,7 +617,7 @@ footer .wrap{display:flex;justify-content:space-between;align-items:center;flex-
               <button class="cr-item"><span class="e">📢</span><b>Обьявление</b></button>
             </div>
             <div class="cr-form">
-              <div class="inp">Ищу компанию для футбола сегодня в 19:00</div>
+              <textarea class="inp" id="crText" rows="2" placeholder="Что происходит рядом?">Ищу компанию для футбола сегодня в 19:00</textarea>
               <div class="ai-hint">✨<span><b>NEAR AI</b> заполнил детали за тебя. Проверь и опубликуй.</span></div>
               <div class="kv">
                 <div><small>Место</small><b>Парк Первого Президента</b></div>
@@ -572,7 +632,7 @@ footer .wrap{display:flex;justify-content:space-between;align-items:center;flex-
 
           <!-- DISCOVER -->
           <div class="view" id="v-disc">
-            <div class="search">🔍 Сантехник, кофе, концерт, ключи...</div>
+            <button class="search" data-search>🔍 Сантехник, кофе, концерт, ключи...</button>
             <button class="sos-banner" data-open="sv-sos"><span class="sb">SOS</span><div><b>Нужна срочная помощь рядом?</b><span>Сообщить людям поблизости · не заменяет 112</span></div></button>
             <div class="disc-grid">
               <button class="dt" data-open="sv-radar"><span class="cnt">14</span><span class="e" style="background:rgba(255,46,136,.15)">📡</span><b>NEAR Radar</b><span>Что вокруг сейчас</span></button>
@@ -581,8 +641,8 @@ footer .wrap{display:flex;justify-content:space-between;align-items:center;flex-
               <button class="dt" data-open="sv-services"><span class="e" style="background:rgba(61,165,255,.15)">🛠️</span><b>Услуги</b><span>Мастера поблизости</span></button>
               <button class="dt" data-open="sv-lost"><span class="cnt">3</span><span class="e" style="background:rgba(255,176,32,.15)">🔑</span><b>Потеряно / найдено</b><span>Вещи, документы, питомцы</span></button>
               <button class="dt" data-open="sv-polls"><span class="e" style="background:rgba(43,212,125,.15)">🗳️</span><b>Опросы района</b><span>Решаем вместе</span></button>
-              <button class="dt"><span class="e" style="background:rgba(0,180,166,.15)">🤝</span><b>Помощь рядом</b><span>Соседи помогают</span></button>
-              <button class="dt"><span class="soon">скоро</span><span class="e" style="background:rgba(155,155,180,.12)">🅿️</span><b>Парковки</b><span>Свободные места</span></button>
+              <button class="dt" data-open="sv-help"><span class="e" style="background:rgba(0,180,166,.15)">🤝</span><b>Помощь рядом</b><span>Соседи помогают</span></button>
+              <button class="dt" id="parkBtn"><span class="soon">скоро</span><span class="e" style="background:rgba(155,155,180,.12)">🅿️</span><b>Парковки</b><span>Свободные места</span></button>
             </div>
           </div>
 
@@ -603,17 +663,17 @@ footer .wrap{display:flex;justify-content:space-between;align-items:center;flex-
               <span class="bl" style="left:82%;top:70%;background:#3da5ff">⚽</span>
               <span class="bl" style="left:12%;top:72%;background:#3da5ff">🎲</span>
             </div>
-            <div class="rrow"><span class="rd2">500 м</span><span>3 новых события</span></div>
-            <div class="rrow"><span class="rd2">1 км</span><span>ДТП и пробка на Аль-Фараби</span></div>
-            <div class="rrow"><span class="rd2">3 км</span><span>5 мероприятий сегодня</span></div>
-            <div class="rrow"><span class="rd2">5 км</span><span>2 акции и 4 встречи</span></div>
+            <button class="rrow" data-rr="500"><span class="rd2">500 м</span><span>3 новых события</span></button>
+            <button class="rrow" data-rr="1000"><span class="rd2">1 км</span><span>ДТП и пробка на Аль-Фараби</span></button>
+            <button class="rrow" data-rr="3000"><span class="rd2">3 км</span><span>5 мероприятий сегодня</span></button>
+            <button class="rrow" data-rr="5000"><span class="rd2">5 км</span><span>2 акции и 4 встречи</span></button>
           </div>
 
           <!-- SOS -->
           <div class="view" id="sv-sos">
             <div class="sub-h"><button class="back" data-back>‹</button><div><b>NEAR SOS</b><small>сообщение людям поблизости</small></div></div>
             <a class="call112" href="tel:112">📞 Опасно для жизни? Звони 112</a>
-            <div class="sos-big">SOS</div>
+            <button class="sos-big" id="sosBtn">SOS</button>
             <div class="urg" id="urg">
               <button class="on">🚗 Свидетель ДТП</button><button>🔥 Пожар</button>
               <button>🧒 Потерялся ребенок</button><button>🆘 Помощь человеку</button>
@@ -625,24 +685,17 @@ footer .wrap{display:flex;justify-content:space-between;align-items:center;flex-
           <div class="view" id="sv-lost">
             <div class="sub-h"><button class="back" data-back>‹</button><div><b>Потеряно / найдено</b><small>Бостандыкский · 3 км</small></div></div>
             <div class="seg" id="lfSeg"><button class="on">Потеряли</button><button>Нашли</button></div>
-            <div class="match">✨<div><b>NEAR AI нашел совпадение</b>Твой "черный кошелек" похож на найденный в 400 м у ТРЦ Mega</div></div>
-            <div class="chips"><span class="chip on">Все</span><span class="chip">🐾 Животные</span><span class="chip">📄 Документы</span><span class="chip">🔑 Ключи</span><span class="chip">📱 Телефоны</span></div>
-            <div class="lf-grid">
-              <div class="lf"><div class="im" style="background:linear-gradient(135deg,#2a2a3a,#4a4a62)">👛</div><div class="t"><b>Черный кошелек</b><span>~600 м · вчера</span></div></div>
-              <div class="lf"><div class="im" style="background:linear-gradient(135deg,#6b4a2b,#e0a15f)">🐈</div><div class="t"><b>Рыжий кот Барсик</b><span>~1,2 км · 2 дня</span></div></div>
-              <div class="lf"><div class="im" style="background:linear-gradient(135deg,#1d3a5c,#3da5ff)">🪪</div><div class="t"><b>Удостоверение</b><span>~900 м · сегодня</span></div></div>
-              <div class="lf"><div class="im" style="background:linear-gradient(135deg,#3a1d5c,#a63cff)">🎒</div><div class="t"><b>Рюкзак школьный</b><span>~2 км · сегодня</span></div></div>
-            </div>
-            <button class="btn btn-main full">+ Я потерял / нашел</button>
+            <div class="match" id="lfMatch" style="cursor:pointer">✨<div><b>NEAR AI нашел совпадение</b>Твой "черный кошелек" похож на найденный в 400 м у ТРЦ Mega</div></div>
+            <div class="chips" id="lfChips"><button class="chip on" data-k="all">Все</button><button class="chip" data-k="pets">🐾 Животные</button><button class="chip" data-k="docs">📄 Документы</button><button class="chip" data-k="keys">🔑 Ключи</button><button class="chip" data-k="phones">📱 Телефоны</button><button class="chip" data-k="money">👛 Кошельки</button></div>
+            <div class="lf-grid" id="lfGrid"></div>
+            <button class="btn btn-main full" id="lfAdd">+ Я потерял / нашел</button>
           </div>
 
           <!-- SERVICES -->
           <div class="view" id="sv-services">
             <div class="sub-h"><button class="back" data-back>‹</button><div><b>Услуги рядом</b><small>проверенные мастера района</small></div></div>
-            <div class="svc-cats"><span class="on"><i>🚰</i>Сантехник</span><span><i>💡</i>Электрик</span><span><i>🚗</i>Автомеханик</span><span><i>🔨</i>Ремонт</span><span><i>📚</i>Репетитор</span><span><i>🧹</i>Уборка</span><span><i>💻</i>ПК-мастер</span></div>
-            <div class="pro"><span class="pa" style="background:rgba(61,165,255,.15)">👨‍🔧</span><div><b>Нурлан · сантехник</b><span>⭐ 4.9 · 128 отзывов · 800 м</span><span class="pr">от 5 000 ₸ · приедет за 40 мин</span></div><button class="wr">Написать</button></div>
-            <div class="pro"><span class="pa" style="background:rgba(43,212,125,.15)">🧰</span><div><b>Мастер на час "Сервис 24"</b><span>⭐ 4.7 · 64 отзыва · 1,5 км</span><span class="pr">от 4 000 ₸ · сегодня</span></div><button class="wr">Написать</button></div>
-            <div class="pro"><span class="pa" style="background:rgba(255,176,32,.15)">🔧</span><div><b>Сергей · сантехник</b><span>⭐ 4.8 · 41 отзыв · 2,3 км</span><span class="pr">от 6 000 ₸ · завтра</span></div><button class="wr">Написать</button></div>
+            <div class="svc-cats" id="svcCats"><span class="on"><i>🚰</i>Сантехник</span><span><i>💡</i>Электрик</span><span><i>🚗</i>Автомеханик</span><span><i>🔨</i>Ремонт</span><span><i>📚</i>Репетитор</span><span><i>🧹</i>Уборка</span><span><i>💻</i>ПК-мастер</span></div>
+            <div id="proList"></div>
           </div>
 
           <!-- POLLS -->
@@ -667,18 +720,20 @@ footer .wrap{display:flex;justify-content:space-between;align-items:center;flex-
           <!-- EVENTS -->
           <div class="view" id="sv-events">
             <div class="sub-h"><button class="back" data-back>‹</button><div><b>События</b><small>сегодня и на выходных</small></div></div>
-            <div class="ev" id="ev1">
+            <div class="ev" data-title="Футбол 5×5 в парке" data-date="20261123T190000">
               <div class="eh" style="background:linear-gradient(135deg,#1d6b4f,#2bd47d)"><span class="date"><b>23</b>НОЯ</span>⚽</div>
               <div class="eb"><b>Футбол 5×5 в парке</b><span>📍 Парк Первого Президента · 19:00</span>
                 <div class="avs"><i style="background:#3da5ff">Е</i><i style="background:#ff2e88">А</i><i style="background:#ffb020">Т</i><i style="background:#a63cff">Д</i><small>6 из 10 · 4 места</small></div>
-                <div class="ev-act"><button class="go" id="goBtn">Иду</button><button>📅 В календарь</button><button>💬 Чат</button></div>
-                <div class="rem">✓ Ты идешь · напомним за 1 час · <u id="cancelEv">отменить</u></div>
+                <div class="ev-act"><button class="go">Иду</button><button class="cal">📅 В календарь</button><button class="cht">💬 Чат</button></div>
+                <div class="rem">✓ Ты идешь · напомним за 1 час · <u class="cancel">отменить</u></div>
               </div>
             </div>
-            <div class="ev">
+            <div class="ev" data-title="Настольные игры соседей" data-date="20261129T180000">
               <div class="eh" style="background:linear-gradient(135deg,#3a1d6b,#a63cff,#ff2e88)"><span class="date"><b>29</b>НОЯ</span>🎲</div>
               <div class="eb"><b>Настольные игры соседей</b><span>📍 Антикафе "Ход" · сб 18:00</span>
-                <div class="avs"><i style="background:#2bd47d">М</i><i style="background:#ff6a3d">С</i><small>9 из 12</small></div>
+                <div class="avs"><i style="background:#2bd47d">М</i><i style="background:#ff6a3d">С</i><small>9 из 12 · 3 места</small></div>
+                <div class="ev-act"><button class="go">Иду</button><button class="cal">📅 В календарь</button><button class="cht">💬 Чат</button></div>
+                <div class="rem">✓ Ты идешь · напомним за 1 час · <u class="cancel">отменить</u></div>
               </div>
             </div>
           </div>
@@ -686,12 +741,47 @@ footer .wrap{display:flex;justify-content:space-between;align-items:center;flex-
           <!-- DEALS -->
           <div class="view" id="sv-deals">
             <div class="sub-h"><button class="back" data-back>‹</button><div><b>Скидки рядом</b><small>активируй и покажи на кассе</small></div></div>
-            <div class="coupon" id="coupon"><small>Кофейня "Арман" · кофе за 500 ₸</small><div class="code">NEAR-4827</div><div class="tm">Покажи на кассе · действует <span id="ctm">14:59</span></div></div>
-            <div class="deal"><span class="di" style="background:rgba(255,176,32,.15)">☕<em>500 ₸</em></span><div><b>Кофе за 500 ₸</b><span>Кофейня "Арман" · 300 м</span></div><button class="ac" id="actBtn">Активировать</button></div>
-            <div class="deal"><span class="di" style="background:rgba(255,46,136,.15)">🍝<em>−20%</em></span><div><b>Ужин −20%</b><span>Ресторан "Дастархан" · 900 м</span></div><button class="ac">Активировать</button></div>
-            <div class="deal"><span class="di" style="background:rgba(61,165,255,.15)">🛵<em>0 ₸</em></span><div><b>Бесплатная доставка</b><span>Пекарня "Нан" · 1,1 км</span></div><button class="ac">Активировать</button></div>
-            <div class="deal"><span class="di" style="background:rgba(43,212,125,.15)">🛒<em>−15%</em></span><div><b>Для жителей района</b><span>Магазин у дома · 200 м</span></div><button class="ac">Активировать</button></div>
+            <div class="coupon" id="coupon"><small id="cpName">Кофейня "Арман" · кофе за 500 ₸</small><div class="code" id="cpCode">NEAR-4827</div><div class="tm">Покажи на кассе · действует <span id="ctm">14:59</span></div></div>
+            <div class="deal"><span class="di" style="background:rgba(255,176,32,.15)">☕<em>500 ₸</em></span><div><b>Кофе за 500 ₸</b><span>Кофейня "Арман" · 300 м</span></div><button class="ac" data-deal="Кофейня &quot;Арман&quot; · кофе за 500 ₸">Активировать</button></div>
+            <div class="deal"><span class="di" style="background:rgba(255,46,136,.15)">🍝<em>−20%</em></span><div><b>Ужин −20%</b><span>Ресторан "Дастархан" · 900 м</span></div><button class="ac" data-deal="Ресторан &quot;Дастархан&quot; · ужин −20%">Активировать</button></div>
+            <div class="deal"><span class="di" style="background:rgba(61,165,255,.15)">🛵<em>0 ₸</em></span><div><b>Бесплатная доставка</b><span>Пекарня "Нан" · 1,1 км</span></div><button class="ac" data-deal="Пекарня &quot;Нан&quot; · бесплатная доставка">Активировать</button></div>
+            <div class="deal"><span class="di" style="background:rgba(43,212,125,.15)">🛒<em>−15%</em></span><div><b>Для жителей района</b><span>Магазин у дома · 200 м</span></div><button class="ac" data-deal="Магазин у дома · −15% для жителей">Активировать</button></div>
           </div>
+
+          <!-- SEARCH -->
+          <div class="view" id="sv-search">
+            <div class="sub-h"><button class="back" data-back>‹</button><div><b>Поиск по NEAR</b><small>люди, события, услуги, места</small></div></div>
+            <input class="qin" id="q" type="search" placeholder="Например: сантехник, кофе, футбол">
+            <div class="qtags" id="qTags"><button>футбол</button><button>кофе</button><button>сантехник</button><button>кошелек</button><button>ЖК</button></div>
+            <div id="qRes"></div>
+          </div>
+
+          <!-- NOTIFICATIONS -->
+          <div class="view" id="sv-notif">
+            <div class="sub-h"><button class="back" data-back>‹</button><div><b>Уведомления</b><small id="nfSub">3 новых</small></div></div>
+            <div id="nfList"></div>
+          </div>
+
+          <!-- CHAT -->
+          <div class="view" id="sv-chat">
+            <div class="sub-h"><button class="back" data-back>‹</button><div><b id="chatName">Чат</b><small>личные сообщения · номер скрыт</small></div></div>
+            <div class="chat-msgs" id="chatMsgs"></div>
+            <form class="inrow chat-in" id="chatForm"><input id="chatIn" placeholder="Сообщение..." autocomplete="off"><button type="submit">➤</button></form>
+          </div>
+
+          <!-- HELP -->
+          <div class="view" id="sv-help">
+            <div class="sub-h"><button class="back" data-back>‹</button><div><b>Помощь рядом</b><small>соседи помогают соседям</small></div></div>
+            <div class="help"><b>Помочь донести диван на 4 этаж</b><span>Ерлан · ~400 м · сегодня 18:00</span><button>Помогу</button></div>
+            <div class="help"><b>Купить продукты пожилой соседке</b><span>ЖК "Тау Самал" · ~200 м · завтра</span><button>Помогу</button></div>
+            <div class="help"><b>Нужна машина перевезти вещи</b><span>Асель · ~1,5 км · сб</span><button>Помогу</button></div>
+            <div class="help"><b>Ищем донора крови II+</b><span>Городская больница · ~3 км</span><button>Помогу</button></div>
+            <button class="btn btn-main full" id="helpAdd">+ Попросить о помощи</button>
+          </div>
+
+          <div class="sheet-bg" id="sheetBg"></div>
+          <div class="bsheet" id="bsheet"><div class="grip"></div><h4 id="bsTitle"></h4><div class="bs-list" id="bsList"></div><form class="inrow" id="bsForm"><input id="bsIn" placeholder="Написать комментарий..." autocomplete="off"><button type="submit">➤</button></form></div>
+          <div class="toast" id="toast"></div>
 
           <!-- COMMUNITIES -->
           <div class="view" id="v-com">
@@ -708,7 +798,7 @@ footer .wrap{display:flex;justify-content:space-between;align-items:center;flex-
 
           <!-- PROFILE -->
           <div class="view" id="v-prof">
-            <div class="pf"><div class="big"><div>А</div></div><b>Айдана · @aidana_alm</b><div class="ver">✓ Подтвержденный профиль</div><div class="since">Участник с октября 2026 · Бостандыкский</div></div>
+            <div class="pf"><div class="big"><div>N</div></div><b>Nurdaulet Kalmakhambet</b><div class="since" style="margin-top:2px">@nurdaulet</div><div class="ver">✓ Подтвержденный профиль</div><div class="since">Участник с октября 2026 · Бостандыкский</div></div>
             <div class="pstats"><div><b>124</b><span>Публикации</span></div><div><b>89</b><span>Подтверждено</span></div><div><b class="grad-text">4.9</b><span>Репутация</span></div></div>
             <div class="lbl">NEAR Trust</div>
             <div class="post" style="padding:12px;font-size:12px;color:var(--muted)">Рейтинг считается по достоверности и пользе публикаций, а не по их количеству.<div class="join-bar" style="margin:10px 0 0"><i style="width:92%"></i></div></div>
@@ -717,7 +807,13 @@ footer .wrap{display:flex;justify-content:space-between;align-items:center;flex-
             <div class="lbl">Сохраненное · 7</div>
             <div class="badges" style="margin-bottom:10px"><span>🎉 Фестиваль еды</span><span>🛠️ Нурлан, сантехник</span><span>🏷️ Ужин −20%</span></div>
             <div class="lbl">Значки</div>
-            <div class="badges"><span>🏅 Основатель NEAR</span><span>🐾 Нашла 3 питомцев</span><span>🤝 Помогла соседям</span><span>📸 Надежный репортер</span></div>
+            <div class="badges"><span>🏅 Основатель NEAR</span><span>🐾 Нашел 3 питомцев</span><span>🤝 Помог соседям</span><span>📸 Надежный репортер</span></div>
+            <div class="lbl" style="margin-top:14px">Уведомления</div>
+            <div class="set"><span>🚨 Происшествия рядом</span><button class="tg on"></button></div>
+            <div class="set"><span>🎉 События и встречи</span><button class="tg on"></button></div>
+            <div class="set"><span>🏷️ Скидки</span><button class="tg"></button></div>
+            <div class="set"><span>🌙 Тихие часы 23:00–08:00</span><button class="tg on"></button></div>
+            <div class="set"><span>📍 Показывать мой район</span><button class="tg on"></button></div>
           </div>
 
           <div class="tabbar">
@@ -1026,21 +1122,22 @@ let R=1000,C="all";
 const postsEl=document.getElementById("posts");
 function render(){
   const list=POSTS.filter(p=>p.d<=R&&(C==="all"||p.c===C));
-  postsEl.innerHTML=list.length?list.map((p,i)=>`
+  postsEl.innerHTML=list.length?list.map(p=>{const i=POSTS.indexOf(p);if(p.lk===undefined){p.lk=12+i*7;p.cm=[["Алия","Я тоже там рядом 👍"],["Тимур","Спасибо за инфу!"]].slice(0,1+i%2)}return `
   <div class="post${p.closed?' closed':''}">
     <div class="post-h"><span class="ava" style="background:${p.col}22;color:${p.col}">${p.who[0]}</span><div class="who"><b>${p.who}</b><span>${p.time}</span></div><span class="st ${p.st[0]}">${p.st[1]}</span></div>
     <div class="post-img" style="background:${p.bg}">${p.img}<span class="geo">📍 ${p.geo}</span></div>
     <div class="post-t">${p.t}</div><div class="post-d">${p.ds}</div>
-    ${p.join?'<div class="join-bar"><i></i></div>':''}
-    <div class="post-f"><span>♡ ${12+i*7}</span><span>💬 ${3+i}</span><button class="sv" data-sv>☆</button>
-      ${p.confirm!==undefined?`<button class="act alt" data-cf="${POSTS.indexOf(p)}">✓ Подтвердить · ${p.confirm}</button>`:`<button class="act">${p.act}</button>`}
+    ${p.join?'<div class="join-bar"><i style="width:'+(p.done?70:60)+'%"></i></div>':''}
+    <div class="post-f"><button class="lk${p.liked?' on':''}" data-lk="${i}">${p.liked?'♥':'♡'} ${p.lk}</button><button class="cm" data-cm="${i}">💬 ${p.cm.length}</button><button class="sv${p.saved?' on':''}" data-sv="${i}">${p.saved?'★':'☆'}</button>
+      ${p.confirm!==undefined?`<button class="act alt${p.done?' done':''}" data-cf="${i}">${p.done?'✓ Ты подтвердил':'✓ Подтвердить'} · ${p.confirm}</button>`:`<button class="act${p.done?' on':''}" data-act="${i}">${p.done?(DONE[p.act]||'✓ '+p.act):p.act}</button>`}
     </div>
-  </div>`).join(""):`<div class="post" style="padding:30px 16px;text-align:center;color:var(--muted);font-size:12px">В этом радиусе пока тихо.<br>Попробуй увеличить радиус 👆</div>`;
+  </div>`}).join(""):`<div class="post" style="padding:30px 16px;text-align:center;color:var(--muted);font-size:12px">В этом радиусе пока тихо.<br>Попробуй увеличить радиус 👆</div>`;
 }
+const DONE={"Присоединиться":"✓ Ты в игре","Пойду":"✓ Иду","Спасибо":"❤ Спасибо","Написать":"Написать","Маршрут":"Маршрут","Смотреть":"Смотреть","Подробнее":"Подробнее"};
 render();
 document.getElementById("radius").onclick=e=>{const b=e.target.closest("button");if(!b)return;document.querySelectorAll("#radius button").forEach(x=>x.classList.remove("on"));b.classList.add("on");R=+b.dataset.r;render()};
 document.getElementById("cats").onclick=e=>{const b=e.target.closest(".chip");if(!b)return;document.querySelectorAll("#cats .chip").forEach(x=>x.classList.remove("on"));b.classList.add("on");C=b.dataset.c;render()};
-postsEl.onclick=e=>{const sv=e.target.closest("[data-sv]");if(sv){sv.classList.toggle("on");sv.textContent=sv.classList.contains("on")?"★":"☆";return}const b=e.target.closest("[data-cf]");if(!b||b.classList.contains("done"))return;const p=POSTS[+b.dataset.cf];p.confirm++;b.classList.add("done");b.textContent="✓ Ты подтвердил · "+p.confirm;};
+
 
 /* ---------- TABS ---------- */
 document.querySelectorAll("[data-v]").forEach(b=>b.onclick=()=>{
@@ -1049,7 +1146,7 @@ document.querySelectorAll("[data-v]").forEach(b=>b.onclick=()=>{
   document.querySelectorAll(".tb").forEach(t=>t.classList.toggle("on",t===b));
 });
 document.getElementById("crGrid").onclick=e=>{const b=e.target.closest(".cr-item");if(!b)return;document.querySelectorAll(".cr-item").forEach(x=>x.classList.remove("on"));b.classList.add("on")};
-document.getElementById("pubBtn").onclick=function(){this.textContent="✓ Опубликовано рядом с тобой";setTimeout(()=>{document.querySelector('[data-v="v-feed"]').click();this.textContent="Опубликовать"},900)};
+
 
 /* ---------- MAP ---------- */
 function rnd(seed){return()=>{seed=(seed*16807)%2147483647;return seed/2147483647}}
@@ -1069,7 +1166,7 @@ function buildMap(svg,W,H,markers,seed){
   for(let i=1;i<6;i++){const x=W*i/6+(r()-.5)*20;s+=`<path d="M${x} 0 L ${x+(r()-.5)*40} ${H}" stroke="#232336" stroke-width="${i%2?5:2.5}"/>`}
   s+=`<path d="M0 ${H*.85} L ${W} ${H*.15}" stroke="#2a2a40" stroke-width="6"/>`;
   // heat
-  s+=`<circle cx="${W*.42}" cy="${H*.4}" r="${W*.22}" fill="url(#h1${seed})"/><circle cx="${W*.2}" cy="${H*.75}" r="${W*.16}" fill="url(#h2${seed})"/><circle cx="${W*.8}" cy="${H*.72}" r="${W*.14}" fill="url(#h3${seed})"/>`;
+  s+=`<g class="heat"><circle cx="${W*.42}" cy="${H*.4}" r="${W*.22}" fill="url(#h1${seed})"/><circle cx="${W*.2}" cy="${H*.75}" r="${W*.16}" fill="url(#h2${seed})"/><circle cx="${W*.8}" cy="${H*.72}" r="${W*.14}" fill="url(#h3${seed})"/></g>`;
   // me
   s+=`<circle cx="${W*.5}" cy="${H*.52}" r="46" fill="#ff2e88" opacity=".08"/><circle cx="${W*.5}" cy="${H*.52}" r="26" fill="#ff2e88" opacity=".14"/><circle cx="${W*.5}" cy="${H*.52}" r="8" fill="#fff" stroke="#ff2e88" stroke-width="4"/>`;
   markers.forEach((m,i)=>{
@@ -1116,10 +1213,161 @@ document.querySelectorAll("[data-back]").forEach(b=>b.onclick=()=>showView("v-di
 document.getElementById("urg").onclick=e=>{const b=e.target.closest("button");if(!b)return;document.querySelectorAll("#urg button").forEach(x=>x.classList.remove("on"));b.classList.add("on")};
 document.getElementById("lfSeg").onclick=e=>{const b=e.target.closest("button");if(!b)return;document.querySelectorAll("#lfSeg button").forEach(x=>x.classList.remove("on"));b.classList.add("on")};
 document.querySelectorAll("[data-poll]").forEach(pl=>pl.onclick=e=>{const o=e.target.closest(".opt");if(!o||pl.classList.contains("voted"))return;o.classList.add("mine");pl.classList.add("voted");pl.querySelectorAll(".opt").forEach(x=>x.querySelector("i").style.width=x.dataset.p+"%")});
-const ev=document.getElementById("ev1"),go=document.getElementById("goBtn");
-go.onclick=()=>{ev.classList.add("joined");go.classList.add("in");go.textContent="✓ Иду"};
-document.getElementById("cancelEv").onclick=()=>{ev.classList.remove("joined");go.classList.remove("in");go.textContent="Иду"};
-let ct=null;document.getElementById("actBtn").onclick=function(){document.getElementById("coupon").classList.add("on");this.textContent="✓ Активен";let t=899;clearInterval(ct);ct=setInterval(()=>{t--;document.getElementById("ctm").textContent=Math.floor(t/60)+":"+String(t%60).padStart(2,"0");if(t<=0)clearInterval(ct)},1000)};
+
+
+/* ---------- v3: all buttons ---------- */
+const $=id=>document.getElementById(id);
+let hist=[];
+function cur(){const v=document.querySelector(".view.on");return v?v.id:"v-feed"}
+function go(id,push=true){const c=cur();if(c===id)return;if(push)hist.push(c);document.querySelectorAll(".view").forEach(v=>v.classList.remove("on"));$(id).classList.add("on");$(id).scrollTop=0;
+  const tabFor={"v-feed":"v-feed","v-map":"v-map","v-disc":"v-disc","v-com":"v-com","v-prof":"v-prof","v-create":"v-create"};const t=tabFor[id];if(t)document.querySelectorAll(".tb").forEach(x=>x.classList.toggle("on",x.dataset.v===t))}
+function back(){go(hist.pop()||"v-disc",false)}
+let tt=null;function toast(m){const t=$("toast");t.textContent=m;t.classList.add("on");clearTimeout(tt);tt=setTimeout(()=>t.classList.remove("on"),2200)}
+document.querySelectorAll("[data-v]").forEach(b=>b.onclick=()=>{hist=[];go(b.dataset.v,false)});
+document.querySelectorAll("[data-open]").forEach(b=>b.onclick=()=>go(b.dataset.open));
+document.querySelectorAll("[data-back]").forEach(b=>b.onclick=back);
+
+/* bottom sheet */
+let bsMode=null,bsPost=null;
+function openSheet(title,html,withInput,placeholder){$("bsTitle").textContent=title;$("bsList").innerHTML=html;$("bsForm").style.display=withInput?"flex":"none";$("bsIn").placeholder=placeholder||"";$("sheetBg").classList.add("on");$("bsheet").classList.add("on")}
+function closeSheet(){$("sheetBg").classList.remove("on");$("bsheet").classList.remove("on");bsMode=null}
+$("sheetBg").onclick=closeSheet;
+function cmHtml(p){return p.cm.map(c=>`<div class="cmt"><span class="ava" style="background:#ff2e8822;color:#ff6aa8">${c[0][0]}</span><div><b>${c[0]}</b><span>${c[1]}</span></div></div>`).join("")||'<div style="color:var(--dim);font-size:12px">Пока нет комментариев</div>'}
+$("bsForm").onsubmit=e=>{e.preventDefault();const v=$("bsIn").value.trim();if(!v)return;if(bsMode==="cm"){bsPost.cm.push(["Nurdaulet",v]);$("bsList").innerHTML=cmHtml(bsPost);$("bsList").scrollTop=1e5;render()}$("bsIn").value=""};
+
+/* header */
+const DIST=["Бостандыкский","Алмалинский","Медеуский","Ауэзовский","Алатауский","Наурызбайский","Жетысуский","Турксибский"];
+$("locBtn").onclick=()=>{bsMode="dist";openSheet("Выбери район",DIST.map(d=>`<button class="opt-row${$("locName").textContent===d?' on':''}" data-d="${d}">${d}<span>${$("locName").textContent===d?'✓':''}</span></button>`).join(""),false)};
+$("bsList").onclick=e=>{const d=e.target.closest("[data-d]");if(d){$("locName").textContent=d.dataset.d;closeSheet();toast("📍 Показываем: "+d.dataset.d+" район")}};
+const NF=[["🚗","ДТП на Аль-Фараби","900 м · 4 мин назад","v-feed"],["⚽","Ерлан ответил на твой отклик","Футбол сегодня в 19:00","sv-events"],["🏷️","Новая скидка рядом","Кофе за 500 ₸ · 300 м","sv-deals"],["🗳️","Новый опрос в ЖК","Нужен ли шлагбаум?","sv-polls"],["🐕","Найдена собака рядом","~300 м · Сатпаева","sv-lost"]];
+let nfRead=false;
+function renderNf(){$("nfList").innerHTML=NF.map((n,i)=>`<button class="res${!nfRead&&i<3?' unread':''}" data-go="${n[3]}"><span class="e">${n[0]}</span><div><b>${n[1]}</b><span>${n[2]}</span></div></button>`).join("");$("nfSub").textContent=nfRead?"все прочитано":"3 новых"}
+$("bellBtn").onclick=()=>{renderNf();go("sv-notif");setTimeout(()=>{nfRead=true;document.querySelectorAll(".bell").forEach(b=>b.classList.add("read"))},400)};
+$("nfList").onclick=e=>{const b=e.target.closest("[data-go]");if(b)go(b.dataset.go)};
+const st=document.createElement("style");st.textContent=".bell.read:after{display:none}";document.head.appendChild(st);
+
+/* search */
+const IDX=[
+  ["⚽","Футбол 5×5 в парке","Событие · сегодня 19:00","sv-events","футбол спорт игра парк"],
+  ["🎲","Настольные игры соседей","Событие · сб 18:00","sv-events","игры настолки"],
+  ["☕","Кофе за 500 ₸","Скидка · 300 м","sv-deals","кофе кофейня скидка"],
+  ["🍝","Ужин −20% в \"Дастархан\"","Скидка · 900 м","sv-deals","ресторан ужин еда"],
+  ["🚰","Нурлан · сантехник","Услуги · ⭐ 4.9 · 800 м","sv-services","сантехник ремонт вода"],
+  ["💡","Электрики рядом","Услуги","sv-services","электрик свет"],
+  ["👛","Черный кошелек","Потеряно · ~600 м","sv-lost","кошелек потерял"],
+  ["🔑","Ключи с брелоком","Найдено · ~300 м","sv-lost","ключи нашел"],
+  ["🏢","ЖК \"Тау Самал\"","Сообщество · 312 жителей","v-com","жк дом соседи"],
+  ["🏐","Спорт Алматы","Сообщество · 1 820","v-com","спорт футбол бег"],
+  ["🚗","ДТП на Аль-Фараби","Публикация · 900 м","v-feed","дтп авария пробка"],
+  ["🗳️","Нужен ли шлагбаум?","Опрос ЖК","sv-polls","опрос шлагбаум"],
+  ["🤝","Помочь донести диван","Помощь рядом · 400 м","sv-help","помощь соседи"]
+];
+function renderQ(){const q=$("q").value.trim().toLowerCase();const r=q?IDX.filter(x=>(x[1]+" "+x[2]+" "+x[4]).toLowerCase().includes(q)):IDX.slice(0,6);
+  $("qRes").innerHTML=(q?"":'<div class="lbl">Популярное рядом</div>')+(r.length?r.map(x=>`<button class="res" data-go="${x[3]}"><span class="e">${x[0]}</span><div><b>${x[1]}</b><span>${x[2]}</span></div></button>`).join(""):'<div style="color:var(--dim);font-size:12px;text-align:center;padding:20px">Ничего не нашли. Попробуй другое слово</div>')}
+document.querySelectorAll("[data-search]").forEach(b=>b.onclick=()=>{$("q").value="";renderQ();go("sv-search");setTimeout(()=>$("q").focus(),150)});
+$("q").oninput=renderQ;
+$("qTags").onclick=e=>{const b=e.target.closest("button");if(b){$("q").value=b.textContent;renderQ()}};
+$("qRes").onclick=e=>{const b=e.target.closest("[data-go]");if(b)go(b.dataset.go)};
+
+/* chat */
+const REPLIES=["Привет! Да, актуально 👍","Отлично, договорились!","Спасибо, что написал 🙏","Сейчас посмотрю и отвечу","Подходи, я на месте"];
+function openChat(name,first){$("chatName").textContent=name;$("chatMsgs").innerHTML=`<div class="msg a">${first||"Привет! Чем могу помочь?"}</div>`;go("sv-chat")}
+$("chatForm").onsubmit=e=>{e.preventDefault();const v=$("chatIn").value.trim();if(!v)return;const m=$("chatMsgs");m.insertAdjacentHTML("beforeend",`<div class="msg u">${v.replace(/</g,"&lt;")}</div>`);$("chatIn").value="";m.scrollTop=1e5;
+  setTimeout(()=>{m.insertAdjacentHTML("beforeend",`<div class="msg a"><span class="typing"><i></i><i></i><i></i></span></div>`);m.scrollTop=1e5;setTimeout(()=>{m.lastElementChild.textContent=REPLIES[Math.floor(Math.random()*REPLIES.length)];m.scrollTop=1e5},900)},300)};
+
+/* feed actions */
+postsEl.onclick=e=>{
+  const lk=e.target.closest("[data-lk]");if(lk){const p=POSTS[+lk.dataset.lk];p.liked=!p.liked;p.lk+=p.liked?1:-1;render();return}
+  const cm=e.target.closest("[data-cm]");if(cm){bsPost=POSTS[+cm.dataset.cm];bsMode="cm";openSheet("Комментарии · "+bsPost.t,cmHtml(bsPost),true,"Написать комментарий...");return}
+  const sv=e.target.closest("[data-sv]");if(sv){const p=POSTS[+sv.dataset.sv];p.saved=!p.saved;render();toast(p.saved?"★ Сохранено в профиль":"Убрано из сохраненного");return}
+  const cf=e.target.closest("[data-cf]");if(cf){const p=POSTS[+cf.dataset.cf];if(p.done)return;p.done=true;p.confirm++;render();toast("✓ Спасибо! Ты помог проверить информацию");return}
+  const a=e.target.closest("[data-act]");if(!a)return;const p=POSTS[+a.dataset.act];
+  switch(p.act){
+    case "Присоединиться":p.done=!p.done;render();toast(p.done?"⚽ Ты в игре! Создан чат участников":"Ты вышел из игры");break;
+    case "Пойду":p.done=!p.done;render();toast(p.done?"🎉 Отлично! Напомним за час":"Участие отменено");break;
+    case "Спасибо":p.done=!p.done;render();if(p.done)toast("❤ Спасибо отправлено автору");break;
+    case "Написать":openChat(p.who,p.c==="pets"?"Привет! Да, корги у нас, ждем хозяина 🐶":"Привет!");break;
+    case "Маршрут":toast("🧭 Маршрут построен: "+p.geo.replace("~","")+" · пешком 5 мин");break;
+    case "Смотреть":openChat(p.who+" · LIVE 🔴","Сейчас на склоне идет первый снег ❄️ Задавайте вопросы в чат трансляции!");break;
+    default:toast("Публикация открыта");
+  }
+};
+
+/* create */
+const CRMAP={"Происшествие":["road","🚨","linear-gradient(135deg,#2a2f45,#ff4d5e)"],"Событие":["event","🎉","linear-gradient(135deg,#3a1d6b,#a63cff,#ff2e88)"],"Акция":["food","🍔","linear-gradient(135deg,#5b3a1e,#ffb020)"],"Потеря / находка":["pets","🔎","linear-gradient(135deg,#6b4a2b,#e0a15f)"],"Ищу компанию":["sport","⚽","linear-gradient(135deg,#1d6b4f,#2bd47d)"],"Фото или видео":["all","📸","linear-gradient(135deg,#1e2a3a,#3da5ff)"],"Текст":["all","📝","linear-gradient(135deg,#2a2a3a,#4a4a62)"],"Обьявление":["all","📢","linear-gradient(135deg,#0b3d5c,#00b4a6)"]};
+function openCreate(type,text){document.querySelectorAll(".cr-item").forEach(x=>x.classList.toggle("on",x.querySelector("b").textContent===type));$("crText").value=text||"";hist=[];go("v-create",false);setTimeout(()=>$("crText").focus(),150)}
+$("pubBtn").onclick=function(){const t=$("crText").value.trim();if(!t){toast("Напиши, что происходит 🙂");return}
+  const type=document.querySelector(".cr-item.on b").textContent;const m=CRMAP[type]||CRMAP["Текст"];
+  POSTS.unshift({c:m[0]==="all"?"other":m[0],d:100,who:"Nurdaulet Kalmakhambet",col:"#ff2e88",time:"только что",st:["live","Новая"],img:m[1],bg:m[2],geo:"Рядом с тобой",t:t.length>60?t.slice(0,60)+"…":t,ds:type+" · опубликовано только что",act:"Подробнее"});
+  C="all";document.querySelectorAll("#cats .chip").forEach(x=>x.classList.toggle("on",x.dataset.c==="all"));render();hist=[];go("v-feed",false);toast("✓ Опубликовано рядом с тобой");$("crText").value=""};
+
+/* map */
+let mf="all";
+$("mapTop").onclick=e=>{const b=e.target.closest("[data-mf]");if(!b)return;
+  if(b.dataset.mf==="heat"){b.classList.toggle("on");mini.querySelector(".heat").style.display=b.classList.contains("on")?"":"none";toast(b.classList.contains("on")?"🔥 Тепловая карта включена":"Тепловая карта выключена");return}
+  document.querySelectorAll('#mapTop [data-mf="all"],#mapTop [data-mf="event"]').forEach(x=>x.classList.remove("on"));b.classList.add("on");mf=b.dataset.mf;
+  mini.querySelectorAll(".mk").forEach(g=>{const m=M[+g.dataset.i];g.style.display=(mf==="all"||m.e==="🎉")?"":"none"})};
+document.querySelector('#mapTop [data-mf="heat"]').classList.add("on");
+let shM=M[1];mini.addEventListener("click",e=>{const g=e.target.closest(".mk");if(g)shM=M[+g.dataset.i]});
+$("shOpen").onclick=()=>{const map={"🎉":"sv-events","⚽":"sv-events","🍔":"sv-deals","🐕":"sv-lost","📢":"v-feed","💬":"v-feed","🚗":"v-feed","🚨":"v-feed"};go(map[shM.e]||"v-feed")};
+
+/* communities */
+document.querySelectorAll("#v-com .jn").forEach(b=>b.onclick=()=>{const on=b.classList.toggle("in");const nm=b.parentElement.querySelector("b").textContent;
+  if(b.textContent==="Войти"||b.dataset.w){b.dataset.w=1;b.textContent=on?"✓ Внутри":"Войти";toast(on?"🏢 Добро пожаловать в "+nm:"Ты вышел из сообщества")}else{b.textContent=on?"✓":"+";toast(on?"Ты вступил в "+nm:"Ты вышел из "+nm)}
+  b.style.background=on?"rgba(43,212,125,.15)":"";b.style.color=on?"var(--ok)":""});
+
+/* profile toggles */
+document.querySelectorAll(".tg").forEach(t=>t.onclick=()=>{t.classList.toggle("on");toast((t.classList.contains("on")?"Включено: ":"Выключено: ")+t.previousElementSibling.textContent.replace(/^\S+\s/,""))});
+
+/* discover extras */
+$("parkBtn").onclick=()=>toast("🅿️ Парковки появятся на этапе 4");
+document.querySelectorAll("[data-rr]").forEach(b=>b.onclick=()=>{R=+b.dataset.rr;document.querySelectorAll("#radius button").forEach(x=>x.classList.toggle("on",x.dataset.r===b.dataset.rr));render();hist=[];go("v-feed",false);toast("Лента: радиус "+b.querySelector(".rd2").textContent)});
+$("sosBtn").onclick=function(){if(this.classList.contains("sent")){this.classList.remove("sent");this.textContent="SOS";toast("SOS отменен");return}
+  const u=document.querySelector("#urg .on").textContent;this.classList.add("sent");this.innerHTML="✓ Отправлено<br><small style='font-size:10px;font-weight:600'>нажми, чтобы отменить</small>";toast("🆘 "+u+": сообщение получили 23 человека рядом")};
+document.querySelectorAll("#sv-help .help button").forEach(b=>b.onclick=()=>{const on=b.classList.toggle("done");b.textContent=on?"✓ Ты откликнулся":"Помогу";if(on)toast("🤝 Автор получил твой отклик")});
+$("helpAdd").onclick=()=>openCreate("Текст","Нужна помощь: ");
+
+/* lost & found */
+const LOST=[["money","👛","Черный кошелек","~600 м · вчера","linear-gradient(135deg,#2a2a3a,#4a4a62)"],["pets","🐈","Рыжий кот Барсик","~1,2 км · 2 дня","linear-gradient(135deg,#6b4a2b,#e0a15f)"],["docs","🪪","Удостоверение","~900 м · сегодня","linear-gradient(135deg,#1d3a5c,#3da5ff)"],["phones","📱","Samsung в синем чехле","~2 км · вчера","linear-gradient(135deg,#0b3d5c,#00b4a6)"],["keys","🔑","Ключи от машины","~1,5 км · сегодня","linear-gradient(135deg,#5b3a1e,#ffb020)"],["bags","🎒","Рюкзак школьный","~2 км · сегодня","linear-gradient(135deg,#3a1d5c,#a63cff)"]];
+const FOUND=[["money","👛","Черный кошелек","~400 м · ТРЦ Mega","linear-gradient(135deg,#2a2a3a,#4a4a62)"],["pets","🐕","Корги без ошейника","~300 м · Сатпаева","linear-gradient(135deg,#6b4a2b,#e0a15f)"],["keys","🔑","Ключи с брелоком","~300 м · сегодня","linear-gradient(135deg,#5b3a1e,#ffb020)"],["phones","📱","iPhone в чехле","~1 км · сегодня","linear-gradient(135deg,#0b3d5c,#3da5ff)"],["docs","📄","Паспорт на имя Д.","~2,4 км · вчера","linear-gradient(135deg,#1d3a5c,#3da5ff)"]];
+let lfMode="lost",lfK="all";
+function renderLf(){const arr=(lfMode==="lost"?LOST:FOUND).filter(x=>lfK==="all"||x[0]===lfK);
+  $("lfGrid").innerHTML=arr.length?arr.map(x=>`<button class="lf" data-lf="${x[2]}"><div class="im" style="background:${x[4]}">${x[1]}</div><div class="t"><b>${x[2]}</b><span>${x[3]}</span></div></button>`).join(""):'<div style="grid-column:span 2;color:var(--dim);font-size:12px;text-align:center;padding:20px">В этой категории пока пусто</div>';
+  $("lfMatch").style.display=lfMode==="lost"?"flex":"none"}
+document.querySelectorAll("#lfSeg button").forEach((b,i)=>b.onclick=()=>{document.querySelectorAll("#lfSeg button").forEach(x=>x.classList.remove("on"));b.classList.add("on");lfMode=i?"found":"lost";renderLf()});
+$("lfChips").onclick=e=>{const b=e.target.closest("[data-k]");if(!b)return;document.querySelectorAll("#lfChips .chip").forEach(x=>x.classList.remove("on"));b.classList.add("on");lfK=b.dataset.k;renderLf()};
+$("lfGrid").onclick=e=>{const b=e.target.closest("[data-lf]");if(b)openChat("Автор: "+b.dataset.lf,lfMode==="lost"?"Привет! Вы что-то знаете о моей пропаже?":"Привет! Это ваша вещь? Опишите ее, пожалуйста")};
+$("lfMatch").onclick=()=>openChat("Нашедший: черный кошелек","Здравствуйте! Нашел кошелек у ТРЦ Mega. Опишите, что внутри, и я верну 🙂");
+$("lfAdd").onclick=()=>openCreate("Потеря / находка",lfMode==="lost"?"Потерял: ":"Нашел: ");
+renderLf();
+
+/* services */
+const PRO={"Сантехник":["Нурлан","Сергей","\"Сервис 24\""],"Электрик":["Бауыржан","Олег","\"Свет+\""],"Автомеханик":["Арман","СТО \"Мотор\"","Денис"],"Ремонт":["Бригада Кайрата","\"Ремонт-Про\"","Максат"],"Репетитор":["Айгерим (математика)","Анна (англ.)","Ержан (физика)"],"Уборка":["\"Чистый дом\"","Гульнара","\"Clean KZ\""],"ПК-мастер":["Даурен","\"IT-помощь\"","Артем"]};
+const PA=["👨‍🔧","🧰","🔧","🛠️","👩‍🏫","🧹","💻"];
+function renderPro(cat){const ix=Object.keys(PRO).indexOf(cat);$("proList").innerHTML=PRO[cat].map((n,i)=>`<div class="pro"><span class="pa" style="background:${["rgba(61,165,255,.15)","rgba(43,212,125,.15)","rgba(255,176,32,.15)"][i]}">${PA[ix]}</span><div><b>${n} · ${cat.toLowerCase()}</b><span>⭐ ${(4.9-i*.1).toFixed(1)} · ${[128,64,41][i]} отзывов · ${["800 м","1,5 км","2,3 км"][i]}</span><span class="pr">от ${[5,4,6][i]} 000 ₸ · ${["сегодня","сегодня","завтра"][i]}</span></div><button class="wr" data-pro="${n}">Написать</button></div>`).join("")}
+document.querySelectorAll("#svcCats span").forEach(sp=>sp.onclick=()=>{document.querySelectorAll("#svcCats span").forEach(x=>x.classList.remove("on"));sp.classList.add("on");renderPro(sp.textContent.trim().replace(/^\S+\s?/,"")||sp.lastChild.textContent)});
+document.querySelectorAll("#svcCats span").forEach(sp=>{sp.dataset.cat=sp.lastChild.textContent.trim()});
+document.querySelectorAll("#svcCats span").forEach(sp=>sp.onclick=()=>{document.querySelectorAll("#svcCats span").forEach(x=>x.classList.remove("on"));sp.classList.add("on");renderPro(sp.dataset.cat)});
+$("proList").onclick=e=>{const b=e.target.closest("[data-pro]");if(b)openChat(b.dataset.pro,"Здравствуйте! Опишите задачу, подскажу по цене и времени 🙂")};
+renderPro("Сантехник");
+
+/* events */
+document.querySelectorAll("#sv-events .ev").forEach(ev=>{const g=ev.querySelector(".go");if(!g)return;
+  g.onclick=()=>{ev.classList.add("joined");g.classList.add("in");g.textContent="✓ Иду";toast("🎉 Ты участвуешь: "+ev.dataset.title)};
+  ev.querySelector(".cancel").onclick=()=>{ev.classList.remove("joined");g.classList.remove("in");g.textContent="Иду";toast("Участие отменено")};
+  ev.querySelector(".cal").onclick=()=>{const d=ev.dataset.date;const ics=["BEGIN:VCALENDAR","VERSION:2.0","PRODID:-//NEAR//RU","BEGIN:VEVENT","UID:"+d+"@near","DTSTAMP:"+d,"DTSTART:"+d,"DTEND:"+d.slice(0,9)+String(+d.slice(9,11)+2).padStart(2,"0")+d.slice(11),"SUMMARY:"+ev.dataset.title,"LOCATION:Алматы","END:VEVENT","END:VCALENDAR"].join("\r\n");
+    try{const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([ics],{type:"text/calendar"}));a.download="near-event.ics";document.body.appendChild(a);a.click();a.remove()}catch(err){}toast("📅 Событие добавлено в календарь")};
+  ev.querySelector(".cht").onclick=()=>openChat(ev.dataset.title+" · чат","Всем привет! Кто идет — отпишитесь 👋")});
+
+/* deals */
+let cTimer=null;
+document.querySelectorAll("#sv-deals .ac").forEach(b=>b.onclick=()=>{document.querySelectorAll("#sv-deals .ac").forEach(x=>{x.textContent="Активировать"});b.textContent="✓ Активен";
+  $("cpName").textContent=b.dataset.deal;$("cpCode").textContent="NEAR-"+Math.floor(1000+Math.random()*9000);$("coupon").classList.add("on");$("sv-deals").scrollTop=0;
+  let t=899;clearInterval(cTimer);$("ctm").textContent="14:59";cTimer=setInterval(()=>{t--;$("ctm").textContent=Math.floor(t/60)+":"+String(t%60).padStart(2,"0");if(t<=0)clearInterval(cTimer)},1000);toast("🏷️ Купон активирован, покажи его на кассе")});
+
+/* profile saved/districts chips */
+document.querySelectorAll("#v-prof .badges span").forEach(sp=>sp.style.cursor="pointer");
+document.querySelectorAll("#v-prof .badges span").forEach(sp=>sp.onclick=()=>{const t=sp.textContent;const m={"Фестиваль":"sv-events","Нурлан":"sv-services","Ужин":"sv-deals"};for(const k in m)if(t.includes(k))return go(m[k]);toast(t)});
 </script>
 </body>
 </html>

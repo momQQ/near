@@ -1,5 +1,5 @@
 // NEAR service worker: сначала сеть, при отсутствии интернета — сохраненная копия
-const CACHE = "near-v6";
+const CACHE = "near-v7";
 const SHELL = ["./app.html", "./css/app.css", "./css/near.css", "./js/config.js", "./js/data.js", "./js/app.js",
   "./manifest.json", "./icon-192.png", "./icon-512.png", "./apple-touch-icon.png"];
 self.addEventListener("install", (e) => { e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL))); self.skipWaiting(); });

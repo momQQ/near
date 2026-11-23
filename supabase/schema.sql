@@ -529,4 +529,12 @@ do $$ begin
   begin alter publication supabase_realtime add table public.messages; exception when others then null; end;
 end $$;
 
+-- =====================================================
+--  ДОСТУП К API (на случай, если автодоступ к таблицам выключен)
+--  Защиту обеспечивают правила RLS выше.
+-- =====================================================
+grant usage on schema public to anon, authenticated;
+grant select, insert, update, delete on all tables in schema public to anon, authenticated;
+grant execute on all functions in schema public to anon, authenticated;
+
 -- Готово ✅

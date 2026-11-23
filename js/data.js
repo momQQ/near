@@ -82,6 +82,8 @@
     const m = (e && (e.message || e.error_description || e.msg)) || String(e);
     const map = [
       [/Invalid login credentials/i, "Неверная почта или пароль"],
+      [/Email address not authorized|not authorized/i, "Не удалось отправить письмо на этот email: почтовый сервис NEAR еще не настроен. Напишите администратору."],
+      [/Error sending confirmation|sending.*email/i, "Не удалось отправить письмо подтверждения. Попробуйте позже."],
       [/Email not confirmed/i, "Почта не подтверждена. Откройте письмо от NEAR и перейдите по ссылке."],
       [/already registered|already been registered/i, "Этот email уже зарегистрирован. Попробуйте войти."],
       [/at least 6/i, "Пароль должен быть не короче 6 символов"],

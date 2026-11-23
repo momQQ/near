@@ -11,8 +11,8 @@
 // =====================================================
 
 window.NEAR_CONFIG = {
-  SUPABASE_URL: "",       // пример: "https://abcdefgh.supabase.co"
-  SUPABASE_ANON_KEY: "",  // длинный ключ, начинается с "eyJ..." или "sb_publishable_..."
+  SUPABASE_URL: "https://aswcegzkbzuqwfpxwuqw.supabase.co",
+  SUPABASE_ANON_KEY: "sb_publishable_Vk2tcpFCdU11x2kemOMB_A_eObypm3O",  // публичный ключ, его можно хранить в коде
 
   // ИИ-проверка фото и сообщений (см. SETUP.md, шаг 7).
   // Включайте только после того, как развернули функцию "moderate".

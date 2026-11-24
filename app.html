@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="ru">
+<html lang="ru" data-theme="dark">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
@@ -12,10 +12,13 @@
 <link rel="manifest" href="manifest.json">
 <link rel="icon" type="image/png" sizes="192x192" href="icon-192.png">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
-<link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css">
-<link rel="stylesheet" href="css/app.css">
-<link rel="stylesheet" href="css/near.css">
+<link rel="preconnect" href="https://tiles.openfreemap.org" crossorigin>
+<!-- основные начертания шрифта (WOFF2) загружаются сразу: текст не "прыгает" -->
+<link rel="preload" href="fonts/inter-Regular.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="fonts/inter-SemiBold.woff2" as="font" type="font/woff2" crossorigin>
+<script>/* тема до отрисовки — без вспышки */try{var t=localStorage.getItem("near_theme")||"system";document.documentElement.dataset.theme=t==="light"||(t==="system"&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark"}catch(e){}</script>
+<link rel="stylesheet" href="css/app.min.css">
+<link rel="stylesheet" href="css/near.min.css">
 </head>
 <body class="authing">
 <div class="screen" id="screen">
@@ -28,26 +31,58 @@
       <h1>С возвращением!</h1>
       <p class="sub">Войдите, чтобы видеть и публиковать, что происходит рядом</p>
       <div class="err" data-err></div>
+      <button type="button" class="g-btn" data-google><svg width="18" height="18" viewBox="0 0 48 48"><path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.7 32.7 29.2 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.2-.1-2.3-.4-3.5z"/><path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.7 15.1 19 12 24 12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 16.3 4 9.7 8.3 6.3 14.7z"/><path fill="#4CAF50" d="M24 44c5.2 0 9.9-2 13.4-5.2l-6.2-5.2C29.2 35.1 26.7 36 24 36c-5.2 0-9.6-3.3-11.3-8l-6.5 5C9.5 39.6 16.2 44 24 44z"/><path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.2-2.2 4.2-4.1 5.6l6.2 5.2C37 39.2 44 34 44 24c0-1.2-.1-2.3-.4-3.5z"/></svg>Продолжить с Google</button><div class="or"><span>или</span></div>
       <div class="fld"><label>Email</label><input name="email" type="email" autocomplete="email" inputmode="email" placeholder="you@mail.kz" required></div>
       <div class="fld"><label>Пароль</label><div class="pw"><input name="password" type="password" autocomplete="current-password" placeholder="Пароль" required><button type="button" data-eye>👁</button></div></div>
       <div class="auth-line"><span></span><button type="button" class="lnk" data-auth="forgot">Забыли пароль?</button></div>
+      <div class="cap" data-cap></div>
       <button class="btn btn-main big" type="submit">Войти</button>
       <div class="auth-foot">Нет аккаунта? <button type="button" class="lnk" data-auth="signup">Зарегистрироваться</button></div>
     </form>
 
     <form id="f-signup" class="auth-p hidden" novalidate>
-      <h1>Создать аккаунт</h1>
-      <p class="sub">Пара полей, и вы в NEAR</p>
+      <div class="steps"><i class="on"></i><i></i><i></i></div>
       <div class="err" data-err></div>
-      <div class="row2">
-        <div class="fld"><label>Имя</label><input name="first" autocomplete="given-name" placeholder="Имя" required></div>
-        <div class="fld"><label>Фамилия</label><input name="last" autocomplete="family-name" placeholder="Фамилия"></div>
+      <div class="st" data-st="1">
+        <h1>Создать аккаунт</h1>
+        <p class="sub">Шаг 1 из 3 · вход в аккаунт</p>
+        <button type="button" class="g-btn" data-google><svg width="18" height="18" viewBox="0 0 48 48"><path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.7 32.7 29.2 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.2-.1-2.3-.4-3.5z"/><path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.7 15.1 19 12 24 12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 16.3 4 9.7 8.3 6.3 14.7z"/><path fill="#4CAF50" d="M24 44c5.2 0 9.9-2 13.4-5.2l-6.2-5.2C29.2 35.1 26.7 36 24 36c-5.2 0-9.6-3.3-11.3-8l-6.5 5C9.5 39.6 16.2 44 24 44z"/><path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.2-2.2 4.2-4.1 5.6l6.2 5.2C37 39.2 44 34 44 24c0-1.2-.1-2.3-.4-3.5z"/></svg>Продолжить с Google</button><div class="or"><span>или</span></div>
+        <div class="fld"><label>Email</label><input name="email" type="email" autocomplete="email" inputmode="email" placeholder="you@mail.kz"></div>
+        <div class="fld"><label>Пароль</label><div class="pw"><input name="password" type="password" autocomplete="new-password" placeholder="Не короче 8 символов"><button type="button" data-eye>👁</button></div>
+          <div class="pw-meter"><i></i><i></i><i></i><i></i></div><div class="hint" id="pwHint">Минимум 8 символов, буквы и цифры</div></div>
+        <div class="fld"><label>Повторите пароль</label><input name="password2" type="password" autocomplete="new-password" placeholder="Еще раз"></div>
+        <button class="btn btn-main big" type="button" data-next>Далее</button>
       </div>
-      <div class="fld"><label>Email</label><input name="email" type="email" autocomplete="email" inputmode="email" placeholder="you@mail.kz" required></div>
-      <div class="fld"><label>Пароль</label><div class="pw"><input name="password" type="password" autocomplete="new-password" placeholder="Пароль" minlength="6" required><button type="button" data-eye>👁</button></div><div class="hint">Не короче 6 символов</div></div>
-      <label class="rules-check"><input type="checkbox" name="rules"> <span>Я принимаю <button type="button" class="lnk" data-rules>правила сообщества NEAR</button></span></label>
-      <button class="btn btn-main big" type="submit">Зарегистрироваться</button>
+      <div class="st hidden" data-st="2">
+        <h1>Ваш никнейм</h1>
+        <p class="sub">Шаг 2 из 3 · так вас увидят соседи. Имя и фамилия не нужны</p>
+        <div class="fld"><label for="suNick">Никнейм</label><div class="nick-in"><span>@</span><input name="nickname" id="suNick" autocomplete="username" autocapitalize="off" spellcheck="false" maxlength="20" placeholder="например, Aidana_92"></div>
+          <div class="hint" id="suNickHint" aria-live="polite">3–20 символов: буквы, цифры и _. Менять можно раз в 30 дней</div></div>
+        <label class="rules-check"><input type="checkbox" name="rules"> <span>Я принимаю <button type="button" class="lnk" data-rules>правила сообщества NEAR</button></span></label>
+        <div class="row2"><button class="btn btn-ghost big" type="button" data-prev>Назад</button><button class="btn btn-main big" type="button" data-next>Далее</button></div>
+      </div>
+      <div class="st hidden" data-st="3">
+        <h1>Последний штрих</h1>
+        <p class="sub">Шаг 3 из 3 · можно пропустить и добавить позже</p>
+        <label class="su-ava" id="suAvaBox"><input type="file" accept="image/*" id="suAva" hidden><span id="suAvaPrev">📷</span><b>Добавить фото</b><small>Людям проще доверять, когда видно лицо</small></label>
+        <div class="fld"><label for="suDistrict">Ваш район</label><select name="district" id="suDistrict"></select></div>
+        <div class="fld"><label>Instagram</label><input name="instagram" placeholder="@nickname" autocapitalize="off"></div>
+        <div class="cap" data-cap></div>
+        <div class="row2"><button class="btn btn-ghost big" type="button" data-skip>Пропустить</button><button class="btn btn-main big" type="submit">Готово</button></div>
+        <button class="lnk su-back" type="button" data-prev>← Назад</button>
+      </div>
       <div class="auth-foot">Уже есть аккаунт? <button type="button" class="lnk" data-auth="login">Войти</button></div>
+    </form>
+
+    <form id="f-complete" class="auth-p hidden" novalidate>
+      <h1>Выберите никнейм</h1>
+      <p class="sub">Вы вошли через Google. Имя из Google мы не показываем</p>
+      <div class="err" data-err></div>
+      <div class="fld"><label for="cpNick">Никнейм</label><div class="nick-in"><span>@</span><input name="nickname" id="cpNick" autocomplete="username" autocapitalize="off" spellcheck="false" maxlength="20" placeholder="например, Aidana_92"></div>
+        <div class="hint" id="cpNickHint" aria-live="polite">3–20 символов: буквы, цифры и _. Менять можно раз в 30 дней</div></div>
+      <div class="fld"><label for="cpDistrict">Ваш район</label><select name="district" id="cpDistrict"></select></div>
+      <label class="rules-check"><input type="checkbox" name="rules"> <span>Я принимаю <button type="button" class="lnk" data-rules>правила сообщества NEAR</button></span></label>
+      <button class="btn btn-main big" type="submit">Продолжить</button>
     </form>
 
     <form id="f-forgot" class="auth-p hidden" novalidate>
@@ -55,6 +90,7 @@
       <p class="sub">Укажите email, мы пришлем ссылку для нового пароля</p>
       <div class="err" data-err></div>
       <div class="fld"><label>Email</label><input name="email" type="email" autocomplete="email" inputmode="email" placeholder="you@mail.kz" required></div>
+      <div class="cap" data-cap></div>
       <button class="btn btn-main big" type="submit">Отправить ссылку</button>
       <div class="auth-foot"><button type="button" class="lnk" data-auth="login">← Назад ко входу</button></div>
     </form>
@@ -68,10 +104,13 @@
     </form>
 
     <div id="f-sent" class="auth-p hidden">
-      <h1>Проверьте почту 📬</h1>
+      <div class="sent-ico">📬</div>
+      <h1>Подтвердите почту</h1>
       <div class="ok-box" id="sentText"></div>
-      <p class="sub">Письмо может прийти в течение пары минут. Проверьте папку "Спам".</p>
-      <button class="btn btn-main big" type="button" data-auth="login">Перейти ко входу</button>
+      <p class="sub">Письмо приходит за 1-2 минуты. Не видите? Проверьте "Спам" и "Промоакции".</p>
+      <div class="cap" data-cap></div>
+      <button class="btn btn-ghost big" type="button" id="resendBtn">Отправить письмо еще раз</button>
+      <button class="btn btn-main big mt12" type="button" data-auth="login">Я подтвердил(а), войти</button>
     </div>
 
     <button class="guest" type="button" id="guestBtn">Смотреть без входа →</button>
@@ -81,17 +120,29 @@
   <div class="app-top">
     <div class="logo"><span class="logo-mark"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.6" stroke-linecap="round"><path d="M12 22s7-6.2 7-12a7 7 0 1 0-14 0c0 5.8 7 12 7 12z"/><circle cx="12" cy="10" r="2.6"/></svg></span>NEAR</div>
     <button class="loc-pill" id="locBtn"><i></i><span id="locName">Алматы</span> ▾</button>
-    <button class="bell" id="bellBtn">🔔<span class="notif-badge hidden" id="bellBadge">0</span></button>
+    <button class="bell" id="bellBtn" aria-label="Уведомления">🔔<span class="notif-badge hidden" id="bellBadge">0</span></button>
   </div>
 
   <!-- ============ FEED ============ -->
   <div class="view" id="v-feed">
     <div class="demo-strip hidden" id="demoStrip">🧪 <span>Демо-режим: данные хранятся только на этом устройстве. Подключите Supabase, чтобы все видели публикации друг друга.</span></div>
-    <div class="feed-tools"><button class="search" data-search>🔍 Поиск по публикациям рядом</button><button class="iconbtn" id="refreshBtn" title="Обновить">↻</button></div>
+    <div class="guest-bar hidden" id="guestBar" role="note"><span>👋 Вы смотрите как гость</span><button type="button" data-auth-open="login">Войти</button></div>
+    <div class="feed-tools"><button class="search" data-search>🔍 Поиск по публикациям рядом</button><button class="iconbtn" id="refreshBtn" title="Обновить" aria-label="Обновить">↻</button></div>
+    <div class="quick" id="quick" role="navigation" aria-label="Быстрые разделы">
+      <button type="button" data-quick="meetup"><span class="qi" style="--q:#9855e9">🤝</span>Встречи</button>
+      <button type="button" data-open="sv-events"><span class="qi" style="--q:#3da5ff">🎉</span>События</button>
+      <button type="button" class="q-sos" data-open="sv-sos"><span class="qi" style="--q:#e5243b">SOS</span>SOS</button>
+      <button type="button" data-open="sv-lost"><span class="qi" style="--q:#2bd47d">🔑</span>Потери</button>
+      <button type="button" data-open="sv-deals"><span class="qi" style="--q:#ffb020">🏷️</span>Акции</button>
+      <button type="button" data-open="v-disc"><span class="qi" style="--q:#8a8aa3">⋯</span>Еще</button>
+    </div>
+    <div class="feed-loc" id="feedLoc" aria-live="polite">📍 Определяем место...</div>
     <div class="radius" id="radius">
       <button data-r="500">500 м</button><button data-r="1000">1 км</button><button data-r="3000" class="on">3 км</button><button data-r="5000">5 км</button><button data-r="10000">10 км</button>
     </div>
+    <div class="sort-bar" id="sortBar"></div>
     <div class="chips" id="cats"></div>
+    <div class="push-inv hidden" id="pushInvite"></div>
     <div class="changes" id="changes"><b><i class="live"></i>Что изменилось за час</b><span id="changesText">загружаем...</span></div>
     <div id="posts"><div class="spin"></div></div>
   </div>
@@ -101,17 +152,22 @@
     <div class="mapbox"><div id="map"></div></div>
     <div class="map-ui">
       <div class="chips" id="mapCats"></div>
+      <div class="map-flt" id="mapFlt" role="group" aria-label="Фильтр карты"></div>
       <div class="map-rad" id="mapRad"><button data-r="500">500 м</button><button data-r="1000">1 км</button><button data-r="3000" class="on">3 км</button><button data-r="5000">5 км</button><button data-r="10000">10 км</button></div>
+      <div class="map-geo bad" id="mapGeo"><span>Определяем местоположение...</span></div>
     </div>
+    <button type="button" class="map-here hidden" id="mapHere">🔍 Искать здесь</button>
     <div class="map-msg hidden" id="mapMsg"></div>
     <div class="map-count" id="mapCount">—</div>
-    <div class="map-fab"><button id="mapLocate" title="Где я">◎</button><button id="mapListBtn" title="Список">☰</button></div>
+    <div class="map-mode" id="mapMode" role="group" aria-label="Что показывать на карте"><button type="button" data-mm="screen" class="on">На экране</button><button type="button" data-mm="radius">В радиусе</button></div>
+    <div class="map-fab"><button id="mapTheme" title="Светлая / темная карта">🌓</button><button id="mapLocate" title="Где я">◎</button><button id="mapListBtn" title="Список">☰</button></div>
     <div class="map-list hidden" id="mapList"></div>
     <div class="map-card hidden" id="mapCard"></div>
   </div>
 
   <!-- ============ DISCOVER ============ -->
   <div class="view" id="v-disc">
+    <div class="sub-h"><button class="back" data-back aria-label="Назад">‹</button><div><b>Все разделы</b><small>радар, события, акции, находки</small></div></div>
     <button class="search" data-search>🔍 Поиск: события, находки, акции</button>
     <button class="sos-banner" data-open="sv-sos"><span class="sb">SOS</span><div><b>Нужна срочная помощь рядом?</b><span>Сообщить людям поблизости · не заменяет 112</span></div></button>
     <div class="disc-grid">
@@ -119,22 +175,23 @@
       <button class="dt" data-open="sv-events"><span class="cnt hidden" id="cntEvents"></span><span class="e" style="background:rgba(166,60,255,.15)">🎉</span><b>События</b><span>Встречи и концерты</span></button>
       <button class="dt" data-open="sv-deals"><span class="cnt hidden" id="cntDeals"></span><span class="e" style="background:rgba(255,106,61,.15)">🏷️</span><b>Акции</b><span>Скидки рядом</span></button>
       <button class="dt" data-open="sv-lost"><span class="cnt hidden" id="cntLost"></span><span class="e" style="background:rgba(255,176,32,.15)">🔑</span><b>Потеряно / найдено</b><span>Вещи, документы, питомцы</span></button>
-      <button class="dt" data-open="sv-services"><span class="e" style="background:rgba(61,165,255,.15)">🛠️</span><b>Услуги</b><span>Мастера поблизости</span></button>
-      <button class="dt" data-open="sv-polls"><span class="e" style="background:rgba(43,212,125,.15)">🗳️</span><b>Опросы района</b><span>Решаем вместе</span></button>
-      <button class="dt" data-open="sv-help"><span class="e" style="background:rgba(0,180,166,.15)">🤝</span><b>Помощь рядом</b><span>Соседи помогают</span></button>
-      <button class="dt" data-open="v-com"><span class="e" style="background:rgba(166,60,255,.15)">👥</span><b>Сообщества</b><span>Районы и интересы</span></button>
+      <button class="dt" data-open="sv-services"><span class="soon demo">пример</span><span class="e" style="background:rgba(61,165,255,.15)">🛠️</span><b>Услуги</b><span>Мастера поблизости</span></button>
+      <button class="dt" data-open="sv-polls"><span class="soon demo">пример</span><span class="e" style="background:rgba(43,212,125,.15)">🗳️</span><b>Опросы района</b><span>Решаем вместе</span></button>
+      <button class="dt" data-open="sv-help"><span class="soon demo">пример</span><span class="e" style="background:rgba(0,180,166,.15)">🤝</span><b>Помощь рядом</b><span>Соседи помогают</span></button>
+      <button class="dt" data-open="v-com"><span class="soon demo">пример</span><span class="e" style="background:rgba(166,60,255,.15)">👥</span><b>Сообщества</b><span>Районы и интересы</span></button>
       <button class="dt" id="parkBtn"><span class="soon">скоро</span><span class="e" style="background:rgba(155,155,180,.12)">🅿️</span><b>Парковки</b><span>Свободные места</span></button>
     </div>
   </div>
 
   <!-- RADAR -->
   <div class="view" id="sv-radar">
-    <div class="sub-h"><button class="back" data-back>‹</button><div><b>NEAR Radar</b><small id="radarSub">публикации вокруг тебя</small></div></div>
+    <div class="sub-h"><button class="back" data-back aria-label="Назад">‹</button><div><b>NEAR Radar</b><small id="radarSub">публикации вокруг тебя</small></div></div>
     <div class="radar" id="radarBox">
       <div class="sweep"></div>
-      <div class="ring" style="width:100%;height:100%"><span>5 км</span></div>
-      <div class="ring" style="width:73%;height:73%"><span>3 км</span></div>
-      <div class="ring" style="width:46%;height:46%"><span>1 км</span></div>
+      <div class="ring" style="width:100%;height:100%"><span>10 км</span></div>
+      <div class="ring" style="width:80%;height:80%"><span>5 км</span></div>
+      <div class="ring" style="width:62%;height:62%"><span>3 км</span></div>
+      <div class="ring" style="width:40%;height:40%"><span>1 км</span></div>
       <div class="ring" style="width:22%;height:22%"><span>500 м</span></div>
       <div class="me"></div>
     </div>
@@ -143,22 +200,23 @@
 
   <!-- EVENTS -->
   <div class="view" id="sv-events">
-    <div class="sub-h"><button class="back" data-back>‹</button><div><b>События</b><small>ближайшие в радиусе 10 км</small></div></div>
+    <div class="sub-h"><button class="back" data-back aria-label="Назад">‹</button><div><b id="evTitle">События</b><small>ближайшие в радиусе 10 км</small></div></div>
+    <div class="seg" id="evSeg"><button data-ev="all" class="on">Все</button><button data-ev="today">Сегодня</button><button data-ev="week">Неделя</button></div>
     <div id="eventsList"></div>
     <button class="btn btn-main full mt8" data-create="event">+ Создать событие</button>
   </div>
 
   <!-- DEALS -->
   <div class="view" id="sv-deals">
-    <div class="sub-h"><button class="back" data-back>‹</button><div><b>Акции рядом</b><small>покажите купон на кассе</small></div></div>
-    <div class="coupon" id="coupon"><small id="cpName"></small><div class="code" id="cpCode"></div><div class="tm">Покажите на кассе · действует <span id="ctm">14:59</span></div></div>
+    <div class="sub-h"><button class="back" data-back aria-label="Назад">‹</button><div><b>Акции рядом</b><small>покажите купон на кассе</small></div></div>
+    <div class="coupon" id="coupon"><small id="cpName"></small><div class="code" id="cpCode"></div><div class="tm">🧪 Демо-купон: заведение не подключено, скидку уточняйте у автора акции · <span id="ctm">14:59</span></div></div>
     <div id="dealsList"></div>
     <button class="btn btn-main full mt8" data-create="deal">+ Добавить акцию</button>
   </div>
 
   <!-- LOST & FOUND -->
   <div class="view" id="sv-lost">
-    <div class="sub-h"><button class="back" data-back>‹</button><div><b>Потеряно / найдено</b><small>в радиусе 10 км</small></div></div>
+    <div class="sub-h"><button class="back" data-back aria-label="Назад">‹</button><div><b>Потеряно / найдено</b><small>в радиусе 10 км</small></div></div>
     <div class="seg" id="lfSeg"><button class="on" data-lf="lost">Потеряли</button><button data-lf="found">Нашли</button></div>
     <div class="lf-grid" id="lfGrid"></div>
     <button class="btn btn-main full" id="lfAdd">+ Я потерял / нашел</button>
@@ -169,32 +227,36 @@
             <div class="sub-h"><button class="back" data-back>‹</button><div><b>NEAR SOS</b><small>сообщение людям поблизости</small></div></div>
             <a class="call112" href="tel:112">📞 Опасно для жизни? Звони 112</a>
             <button class="sos-big" id="sosBtn">SOS</button>
+            <div class="sos-state hidden" id="sosState"></div>
             <div class="urg" id="urg">
               <button class="on">🚗 Свидетель ДТП</button><button>🔥 Пожар</button>
               <button>🧒 Потерялся ребенок</button><button>🆘 Помощь человеку</button>
             </div>
-            <div class="warnbox">⚠️ NEAR не заменяет экстренные службы. SOS-сообщения проходят проверку, а уведомления получают только те, кто включил их в настройках.</div>
+            <div class="warnbox">⚠️ SOS — это публикация для людей рядом в ленте и на карте. NEAR <b>не вызывает</b> полицию, скорую или спасателей и не передает им ваше сообщение. При угрозе жизни сначала звоните 112. Ложные SOS удаляются, автор блокируется.</div>
+            <div class="lbl mt12">Мои SOS</div>
+            <div id="sosHist"><div class="dim" style="font-size:12px">Войдите, чтобы видеть историю</div></div>
           </div>
 
   <!-- SERVICES -->
           <div class="view" id="sv-services">
-            <div class="sub-h"><button class="back" data-back>‹</button><div><b>Услуги рядом</b><small>проверенные мастера района</small></div></div>
+            <div class="sub-h"><button class="back" data-back>‹</button><div><b>Услуги рядом</b><small>пример раздела · каталог в разработке</small></div></div>
             <div class="svc-cats" id="svcCats"><span class="on"><i>🚰</i>Сантехник</span><span><i>💡</i>Электрик</span><span><i>🚗</i>Автомеханик</span><span><i>🔨</i>Ремонт</span><span><i>📚</i>Репетитор</span><span><i>🧹</i>Уборка</span><span><i>💻</i>ПК-мастер</span></div>
             <div id="proList"></div>
           </div>
 
   <!-- POLLS -->
           <div class="view" id="sv-polls">
-            <div class="sub-h"><button class="back" data-back>‹</button><div><b>Опросы района</b><small>ЖК "Тау Самал" и Бостандыкский</small></div></div>
+            <div class="sub-h"><button class="back" data-back>‹</button><div><b>Опросы района</b><small>пример раздела</small></div></div>
+            <div class="demo-strip">🧪 Пример раздела: данные ниже ненастоящие и нигде не сохраняются</div>
             <div class="poll" data-poll>
-              <div class="meta"><span>🏢 ЖК "Тау Самал"</span><span>186 голосов · еще 3 дня</span></div>
+              <div class="meta"><span>🏢 ЖК "Тау Самал"</span><span>пример</span></div>
               <div class="q">Нужно ли установить шлагбаум во дворе?</div>
               <button class="opt" data-p="64"><i></i><span>Да</span><em>64%</em></button>
               <button class="opt" data-p="22"><i></i><span>Нет</span><em>22%</em></button>
               <button class="opt" data-p="14"><i></i><span>Нужна доп. информация</span><em>14%</em></button>
             </div>
             <div class="poll" data-poll>
-              <div class="meta"><span>🏙️ Бостандыкский район</span><span>1 204 голоса</span></div>
+              <div class="meta"><span>🏙️ Бостандыкский район</span><span>пример</span></div>
               <div class="q">Какой парк благоустроить первым?</div>
               <button class="opt" data-p="47"><i></i><span>Парк Первого Президента</span><em>47%</em></button>
               <button class="opt" data-p="31"><i></i><span>Сквер на Тимирязева</span><em>31%</em></button>
@@ -204,7 +266,8 @@
 
   <!-- HELP -->
           <div class="view" id="sv-help">
-            <div class="sub-h"><button class="back" data-back>‹</button><div><b>Помощь рядом</b><small>соседи помогают соседям</small></div></div>
+            <div class="sub-h"><button class="back" data-back>‹</button><div><b>Помощь рядом</b><small>пример раздела</small></div></div>
+            <div class="demo-strip">🧪 Пример раздела: просьбы ниже ненастоящие. Реальную просьбу публикуйте кнопкой внизу, она появится в ленте</div>
             <div class="help"><b>Помочь донести диван на 4 этаж</b><span>Ерлан · ~400 м · сегодня 18:00</span><button>Помогу</button></div>
             <div class="help"><b>Купить продукты пожилой соседке</b><span>ЖК "Тау Самал" · ~200 м · завтра</span><button>Помогу</button></div>
             <div class="help"><b>Нужна машина перевезти вещи</b><span>Асель · ~1,5 км · сб</span><button>Помогу</button></div>
@@ -251,7 +314,7 @@
 
   <!-- POST DETAIL -->
   <div class="view" id="sv-post">
-    <div class="sub-h"><button class="back" data-back>‹</button><div><b>Публикация</b><small id="pdSub"></small></div></div>
+    <div class="sub-h"><button class="back" data-back aria-label="Назад">‹</button><div><b>Публикация</b><small id="pdSub"></small></div></div>
     <div id="pdBody"><div class="spin"></div></div>
   </div>
 
@@ -259,72 +322,88 @@
   <!-- ============ CHATS ============ -->
   <div class="view" id="v-chats">
     <div class="cr-title">Сообщения</div>
-    <div class="seg" id="chSeg"><button data-t="chats" class="on">Чаты</button><button data-t="friends">Друзья</button><button data-t="requests">Заявки <span class="mini-badge hidden" id="reqBadge"></span></button></div>
-    <button class="search" data-open="sv-find">🔍 Найти людей по имени</button>
+    <div class="seg" id="chSeg"><button data-t="chats" class="on">Чаты</button><button data-t="requests">Запросы <span class="mini-badge hidden" id="reqBadge"></span></button><button data-t="friends">Друзья</button></div>
+    <button class="search" data-open="sv-find">🔍 Найти людей по никнейму</button>
     <div id="chBody"><div class="spin"></div></div>
   </div>
 
   <!-- FIND PEOPLE -->
   <div class="view" id="sv-find">
-    <div class="sub-h"><button class="back" data-back>‹</button><div><b>Найти людей</b><small>по имени и фамилии</small></div></div>
-    <input class="qin" id="fq" type="search" placeholder="Например: Айдана" autocomplete="off">
+    <div class="sub-h"><button class="back" data-back aria-label="Назад">‹</button><div><b>Найти людей</b><small>по никнейму</small></div></div>
+    <input class="qin" id="fq" type="search" placeholder="Например: Aidana_92" autocomplete="off" autocapitalize="off">
     <div id="fRes"></div>
   </div>
 
   <!-- USER PROFILE -->
   <div class="view" id="sv-user">
-    <div class="sub-h"><button class="back" data-back>‹</button><div><b>Профиль</b><small id="uSub"></small></div></div>
+    <div class="sub-h"><button class="back" data-back aria-label="Назад">‹</button><div><b>Профиль</b><small id="uSub"></small></div></div>
     <div id="uBody"><div class="spin"></div></div>
   </div>
 
   <!-- CONVERSATION -->
   <div class="view" id="sv-conv">
     <div class="conv-h">
-      <button class="back" data-back>‹</button>
+      <button class="back" data-back aria-label="Назад">‹</button>
       <button class="conv-who" id="convWho"></button>
-      <button class="iconbtn" id="convMenu">⋯</button>
+      <button class="iconbtn" id="convMenu" aria-label="Меню переписки">⋯</button>
     </div>
     <div class="warn-banner hidden" id="convWarn"></div>
     <div class="conv-msgs" id="convMsgs"></div>
     <div class="rec-bar hidden" id="recBar"><span class="rec-dot"></span><span id="recTime">0:00</span><span class="dim">Запись голосового...</span><button id="recCancel">✕</button><button class="send" id="recSend">➤</button></div>
     <form class="composer" id="composer">
-      <button type="button" class="cbtn" id="attachBtn">📎</button>
+      <button type="button" class="cbtn" id="attachBtn" aria-label="Прикрепить фото или видео">📎</button>
       <input type="file" id="chatFile" accept="image/*,video/*" hidden>
-      <input id="msgIn" placeholder="Сообщение..." autocomplete="off" maxlength="2000">
-      <button type="button" class="cbtn mic" id="micBtn">🎤</button>
-      <button type="submit" class="cbtn send hidden" id="sendBtn">➤</button>
+      <input id="msgIn" placeholder="Сообщение..." autocomplete="off" maxlength="2000" aria-label="Сообщение" enterkeyhint="send">
+      <button type="button" class="cbtn mic" id="micBtn" aria-label="Голосовое сообщение">🎤</button>
+      <button type="submit" class="cbtn send hidden" id="sendBtn" aria-label="Отправить">➤</button>
     </form>
     <div class="progress" id="convProg"></div>
   </div>
 
   <!-- MODERATION -->
   <div class="view" id="sv-mod">
-    <div class="sub-h"><button class="back" data-back>‹</button><div><b>🛡 Модерация</b><small id="modSub">жалобы пользователей</small></div></div>
+    <div class="sub-h"><button class="back" data-back aria-label="Назад">‹</button><div><b>🛡 Модерация</b><small id="modSub">жалобы пользователей</small></div></div>
+    <div class="seg seg4" id="modSeg"><button data-t="reports" class="on">Жалобы</button><button data-t="posts">Публикации</button><button data-t="appeals">Апелляции</button><button data-t="health" class="hidden">Состояние</button></div>
     <div id="modList"><div class="spin"></div></div>
   </div>
 
   <!-- IMAGE VIEWER -->
-  <div class="viewer hidden" id="viewer"><img id="viewerImg" alt=""><button id="viewerX">✕</button></div>
+  <!-- комментарии: нижняя панель -->
+  <div class="cs-bg" id="csBg"></div>
+  <div class="csheet" id="csheet" role="dialog" aria-label="Комментарии">
+    <div class="cs-head" id="csHead"><div class="cs-grab"></div><div class="cs-h"><b id="csTitle">Комментарии</b><button id="csX" aria-label="Закрыть">✕</button></div></div>
+    <div class="cs-list" id="csList"></div>
+    <div class="cs-reply hidden" id="csReply"><span></span><button id="csReplyX" aria-label="Отменить ответ">✕</button></div>
+    <form class="cs-form" id="csForm"><span id="csAva"></span><input id="csIn" placeholder="Добавьте комментарий..." maxlength="500" autocomplete="off" enterkeyhint="send"><button type="submit" aria-label="Отправить">➤</button></form>
+    <button class="btn btn-main cs-login hidden" id="csLogin">Войдите, чтобы комментировать</button>
+  </div>
 
   <!-- COMMUNITIES -->
           <div class="view" id="v-com">
             <div class="sub-h"><button class="back" data-back>‹</button><div><b>Сообщества рядом</b><small>пример раздела</small></div></div>
+            <div class="demo-strip">🧪 Пример раздела: данные ниже ненастоящие и нигде не сохраняются</div>
             <div class="lbl">Мой дом</div>
-            <div class="com"><span class="cv" style="background:linear-gradient(135deg,#2bd47d,#1a8f6a)">🏢</span><div><b>ЖК "Тау Самал" 🔒</b><span>Вода, лифты, парковка, УК</span><small>312 жителей · только для жильцов</small></div><button class="jn">Войти</button></div>
+            <div class="com"><span class="cv" style="background:linear-gradient(135deg,#2bd47d,#1a8f6a)">🏢</span><div><b>ЖК "Тау Самал" 🔒</b><span>Вода, лифты, парковка, УК</span><small>пример</small></div><button class="jn">Войти</button></div>
             <div class="lbl">Районы</div>
-            <div class="com"><span class="cv" style="background:linear-gradient(135deg,#ff7a3d,#ff2e88)">🏙️</span><div><b>Алмалинский район</b><span>Новости, вопросы и жизнь района</span><small>2 450 участников</small></div><button class="jn">+</button></div>
-            <div class="com"><span class="cv" style="background:linear-gradient(135deg,#3da5ff,#a63cff)">⛰️</span><div><b>Медеуский район</b><span>Горы, прогулки, соседи</span><small>1 140 участников</small></div><button class="jn">+</button></div>
+            <div class="com"><span class="cv" style="background:linear-gradient(135deg,#ff7a3d,#ff2e88)">🏙️</span><div><b>Алмалинский район</b><span>Новости, вопросы и жизнь района</span><small>пример</small></div><button class="jn">+</button></div>
+            <div class="com"><span class="cv" style="background:linear-gradient(135deg,#3da5ff,#a63cff)">⛰️</span><div><b>Медеуский район</b><span>Горы, прогулки, соседи</span><small>пример</small></div><button class="jn">+</button></div>
             <div class="lbl">Интересы</div>
-            <div class="com"><span class="cv" style="background:linear-gradient(135deg,#00b4a6,#3da5ff)">🏐</span><div><b>Спорт Алматы</b><span>Футбол, бег, теннис</span><small>1 820 участников</small></div><button class="jn">+</button></div>
-            <div class="com"><span class="cv" style="background:linear-gradient(135deg,#ffb020,#ff6a3d)">🍜</span><div><b>Куда сходить? Алматы</b><span>Заведения, встречи, события</span><small>5 300 участников</small></div><button class="jn">+</button></div>
+            <div class="com"><span class="cv" style="background:linear-gradient(135deg,#00b4a6,#3da5ff)">🏐</span><div><b>Спорт Алматы</b><span>Футбол, бег, теннис</span><small>пример</small></div><button class="jn">+</button></div>
+            <div class="com"><span class="cv" style="background:linear-gradient(135deg,#ffb020,#ff6a3d)">🍜</span><div><b>Куда сходить? Алматы</b><span>Заведения, встречи, события</span><small>пример</small></div><button class="jn">+</button></div>
           </div>
 
   <!-- ============ PROFILE ============ -->
   <div class="view" id="v-prof"><div id="profBody"></div></div>
 
+  <!-- НАСТРОЙКИ -->
+  <div class="view" id="sv-settings">
+    <div class="sub-h"><button class="back" data-back aria-label="Назад">‹</button><div><b>Настройки</b><small>аккаунт, приватность, уведомления</small></div></div>
+    <div id="setBody"></div>
+  </div>
+
   <!-- SEARCH -->
   <div class="view" id="sv-search">
-    <div class="sub-h"><button class="back" data-back>‹</button><div><b>Поиск</b><small>по публикациям в радиусе 10 км</small></div></div>
+    <div class="sub-h"><button class="back" data-back aria-label="Назад">‹</button><div><b>Поиск</b><small>по публикациям в радиусе 10 км</small></div></div>
     <input class="qin" id="q" type="search" placeholder="Например: футбол, кошелек, кофе" autocomplete="off">
     <div class="qtags" id="qTags"><button>футбол</button><button>кофе</button><button>кошелек</button><button>ДТП</button><button>собака</button></div>
     <div id="qRes"></div>
@@ -332,38 +411,28 @@
 
   <!-- NOTIFICATIONS -->
   <div class="view" id="sv-notif">
-    <div class="sub-h"><button class="back" data-back>‹</button><div><b>Уведомления</b><small id="nfSub"></small></div></div>
+    <div class="sub-h"><button class="back" data-back aria-label="Назад">‹</button><div><b>Уведомления</b><small id="nfSub"></small></div></div>
     <div id="nfList"></div>
   </div>
 
-  <!-- CHAT -->
-          <div class="view" id="sv-chat">
-            <div class="sub-h"><button class="back" data-back>‹</button><div><b id="chatName">Чат</b><small>личные сообщения · номер скрыт</small></div></div>
-            <div class="chat-msgs" id="chatMsgs"></div>
-            <form class="inrow chat-in" id="chatForm"><input id="chatIn" placeholder="Сообщение..." autocomplete="off"><button type="submit">➤</button></form>
-          </div>
 
   <div class="sheet-bg" id="sheetBg"></div>
   <div class="bsheet" id="bsheet"><div class="grip"></div><h4 id="bsTitle"></h4><div class="bs-list" id="bsList"></div></div>
   <div class="toast" id="toast"></div>
 
-  <!-- ============ TABBAR ============ -->
-  <div class="tabbar">
-    <div class="tb-pill">
-      <button class="tb on" data-v="v-feed" title="Лента"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="18" height="7" rx="2"/><rect x="3" y="14" width="18" height="7" rx="2"/></svg></button>
-      <button class="tb" data-v="v-map" title="Карта"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linejoin="round"><path d="M9 4 3 6v14l6-2 6 2 6-2V4l-6 2-6-2z"/><path d="M9 4v14M15 6v14"/></svg></button>
-      <button class="tb" data-v="v-disc" title="Открытия"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="m15.5 8.5-2 5-5 2 2-5z"/></svg></button>
-    </div>
-    <button class="tb-plus" data-v="v-create" title="Создать"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.6" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></button>
-    <div class="tb-pill">
-      <button class="tb" data-v="v-chats" title="Сообщения"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linejoin="round"><path d="M4 5h16v11H9l-5 4z"/></svg><span class="dot hidden" id="chatBadge">0</span></button>
-      <button class="tb" data-v="v-prof" title="Профиль"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4.4 3.6-8 8-8s8 3.6 8 8"/></svg></button>
-    </div>
+  <!-- ============ TABBAR: 5 равных колонок (лента, карта, +, чаты, профиль) ============ -->
+  <div class="tabbar" role="navigation" aria-label="Навигация">
+    <button class="tb on" data-v="v-feed" title="Лента" aria-label="Лента"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="18" height="7" rx="2"/><rect x="3" y="14" width="18" height="7" rx="2"/></svg></button>
+    <button class="tb" data-v="v-map" title="Карта" aria-label="Карта"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M9 4 3 6v14l6-2 6 2 6-2V4l-6 2-6-2z"/><path d="M9 4v14M15 6v14"/></svg></button>
+    <button class="tb-plus" id="plusBtn" data-v="v-create" title="Создать" aria-label="Создать" aria-haspopup="dialog" aria-expanded="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></button>
+    <button class="tb" data-v="v-chats" title="Сообщения" aria-label="Сообщения"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M4 5h16v11H9l-5 4z"/></svg><span class="dot hidden" id="chatBadge">0</span></button>
+    <button class="tb" data-v="v-prof" title="Профиль" aria-label="Профиль"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4.4 3.6-8 8-8s8 3.6 8 8"/></svg></button>
   </div>
 </div>
 
-<script src="js/config.js"></script>
-<script src="js/data.js"></script>
-<script src="js/app.js"></script>
+<script src="js/config.min.js"></script>
+<script src="js/i18n.min.js"></script>
+<script src="js/data.min.js"></script>
+<script src="js/app.min.js"></script>
 </body>
 </html>

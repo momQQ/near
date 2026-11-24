@@ -1,3 +1,7 @@
+@font-face{font-family:"NEAR Inter";src:url(../fonts/inter-Regular.woff2) format("woff2"),url(../fonts/inter-Regular.woff) format("woff");font-weight:100 450;font-style:normal;font-display:optional}
+@font-face{font-family:"NEAR Inter";src:url(../fonts/inter-SemiBold.woff2) format("woff2"),url(../fonts/inter-SemiBold.woff) format("woff");font-weight:500 650;font-style:normal;font-display:optional}
+@font-face{font-family:"NEAR Inter";src:url(../fonts/inter-Bold.woff2) format("woff2"),url(../fonts/inter-Bold.woff) format("woff");font-weight:651 750;font-style:normal;font-display:optional}
+@font-face{font-family:"NEAR Inter";src:url(../fonts/inter-ExtraBold.woff2) format("woff2"),url(../fonts/inter-ExtraBold.woff) format("woff");font-weight:751 1000;font-style:normal;font-display:optional}
 
 :root{
   --bg:#0a0a12; --bg2:#10101b; --card:#161622; --card2:#1f1f2e; --line:#2a2a3c;
@@ -8,9 +12,10 @@
 }
 *{box-sizing:border-box;margin:0;padding:0}
 html{scroll-behavior:smooth;overflow-x:clip}
-body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,Helvetica,Arial,sans-serif;line-height:1.5;-webkit-font-smoothing:antialiased;overflow-x:hidden}
+body{background:var(--bg);color:var(--text);font-family:"NEAR Inter",-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,Helvetica,Arial,sans-serif;line-height:1.5;-webkit-font-smoothing:antialiased;overflow-x:hidden}
 a{color:inherit;text-decoration:none}
 button{font:inherit;color:inherit;border:0;background:none;cursor:pointer}
+input,textarea,select{font-family:inherit}
 .wrap{max-width:1180px;margin:0 auto;padding:0 24px}
 .grad-text{background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent}
 .btn{display:inline-flex;align-items:center;gap:8px;padding:14px 24px;border-radius:999px;font-weight:600;font-size:15px;transition:transform .15s,box-shadow .15s}

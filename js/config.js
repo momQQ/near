@@ -6,11 +6,16 @@
 //  3. Скопируйте "Project URL" и ключ "anon public"
 //     и вставьте их ниже между кавычками.
 //
-//  Пока поля пустые, приложение работает в ДЕМО-режиме:
-//  все данные сохраняются только в памяти этого телефона.
+//  ENV — режим работы:
+//    "demo"    — демо: данные только в памяти телефона, сервер не нужен;
+//    "staging" — тестовый проект Supabase (отдельные ключи);
+//    "prod"    — рабочий проект. В staging/prod приложение НИКОГДА
+//                не переключается на демо: при сбое показывает ошибку.
 // =====================================================
 
 window.NEAR_CONFIG = {
+  ENV: "prod",
+
   SUPABASE_URL: "https://aswcegzkbzuqwfpxwuqw.supabase.co",
   SUPABASE_ANON_KEY: "sb_publishable_Vk2tcpFCdU11x2kemOMB_A_eObypm3O",  // публичный ключ, его можно хранить в коде
 
@@ -24,5 +29,19 @@ window.NEAR_CONFIG = {
   // Ограничения загрузки файлов
   MAX_FILES: 5,
   MAX_IMAGE_MB: 15,   // исходное фото (перед сжатием)
-  MAX_VIDEO_MB: 30
+  MAX_VIDEO_MB: 20,    // пилот: видео до 20 МБ и до 60 секунд
+  MAX_VIDEO_SEC: 60,
+  SUPPORT_EMAIL: "",
+
+  // Push-уведомления: публичный VAPID-ключ (секретная пара — только в Supabase → Edge Functions → Secrets)
+  VAPID_PUBLIC_KEY: "BGLgiT_VBCkSPbZ7U8H_88nKuuuhQnwZ83OJ6Mh6JB5Xqmu6XwbE1xsam2-iNw6w3oTqiizxw0aJkKTYM3IKkhc",
+
+  // Защита от ботов: Site Key из Cloudflare Turnstile (пусто — капча выключена)
+  TURNSTILE_SITE_KEY: "",
+
+  // Разделы-заготовки (услуги, опросы, сообщества, купоны) в рабочей версии скрыты
+  SHOW_DEMO_SECTIONS: false,
+
+  // Аналитика: псевдонимизированные события (без email, текстов и точных координат)
+  ANALYTICS: true
 };

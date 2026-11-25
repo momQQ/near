@@ -1,8 +1,9 @@
-// NEAR service worker (v12): оболочка приложения — сначала сеть, без интернета — сохраненная копия;
+// NEAR service worker (v14): оболочка приложения — сначала сеть, без интернета — сохраненная копия;
 // фото публикаций, шрифты и библиотеки — из кэша; push-уведомления.
 // Все кэши NEAR называются "near-*": при обновлении удаляются только старые кэши NEAR, чужие кэши сайта не трогаем.
-const V = "v15";  // v14.9: закрытые медиа (staging, подписанные ссылки) и видео не кэшируются
-const CACHE = "near-shell-" + V, IMG = "near-img-v2", LIB = "near-lib-v1";
+const V = "v16";
+// v14: кэш фото — новое имя: при обновлении старый кэш (v12) удаляется целиком
+const CACHE = "near-shell-" + V, IMG = "near-img-v3", LIB = "near-lib-v1";
 const IMG_MAX = 300, IMG_BYTES = 60 * 1048576, IMG_TTL = 7 * 86400e3; // фото: до 300 файлов, 60 МБ и 7 дней
 const SHELL = ["./app.html", "./css/app.min.css", "./css/near.min.css", "./js/config.min.js", "./js/i18n.min.js", "./js/data.min.js", "./js/app.min.js",
   "./manifest.json", "./icon-192.png", "./icon-512.png", "./apple-touch-icon.png",
@@ -53,7 +54,9 @@ self.addEventListener("fetch", (e) => {
   const u = new URL(e.request.url);
   if (e.request.method !== "GET") return;
   // фото и обложки публикаций из публичного бакета Supabase (подписанные ссылки и чаты не кэшируются)
-  if (/\/storage\/v1\/object\/public\/post-media\//.test(u.pathname) && !e.request.headers.has("range") && !/\.(mp4|mov|webm|m4v)$/i.test(u.pathname)) {
+  // приватные файлы (подписанные ссылки, карантин, чаты) никогда не кэшируются
+  if (/\/storage\/v1\/object\/(sign|authenticated)\//.test(u.pathname) || /post-quarantine|chat-media/.test(u.pathname)) return;
+  if (/\/storage\/v1\/object\/public\/post-media\//.test(u.pathname) && !u.search && !e.request.headers.has("range") && !/\.(mp4|mov|webm|m4v)$/i.test(u.pathname)) {
     e.respondWith(cacheFirst(e.request, IMG, { max: IMG_MAX, bytes: IMG_BYTES, ttl: IMG_TTL })); return;
   }
   if (u.origin === location.origin && u.pathname.includes("/fonts/")) { e.respondWith(cacheFirst(e.request, CACHE)); return; }
@@ -84,7 +87,7 @@ self.addEventListener("push", (e) => {
     if (wins.some((w) => w.visibilityState === "visible" && w.focused)) return;
     await self.registration.showNotification(String(d.title || "NEAR").slice(0, 80), {
       body: String(d.body || "").slice(0, 200), tag: d.tag || undefined, renotify: false,
-      icon: "icon-192.png", badge: "icon-192.png", data: { url: /^#[\w=-]+$/.test(d.url || "") ? d.url : "" }, lang: "ru"
+      icon: "icon-192.png", badge: "icon-192.png", silent: !!d.silent, data: { url: /^#[\w=-]+$/.test(d.url || "") ? d.url : "" }, lang: "ru"
     });
   })());
 });

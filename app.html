@@ -29,54 +29,42 @@
 
     <form id="f-login" class="auth-p" novalidate>
       <h1>С возвращением!</h1>
-      <p class="sub">Войдите, чтобы видеть и публиковать, что происходит рядом</p>
+      <p class="sub">Войдите по никнейму или почте</p>
       <div class="err" data-err></div>
       <button type="button" class="g-btn" data-google><svg width="18" height="18" viewBox="0 0 48 48"><path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.7 32.7 29.2 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.2-.1-2.3-.4-3.5z"/><path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.7 15.1 19 12 24 12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 16.3 4 9.7 8.3 6.3 14.7z"/><path fill="#4CAF50" d="M24 44c5.2 0 9.9-2 13.4-5.2l-6.2-5.2C29.2 35.1 26.7 36 24 36c-5.2 0-9.6-3.3-11.3-8l-6.5 5C9.5 39.6 16.2 44 24 44z"/><path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.2-2.2 4.2-4.1 5.6l6.2 5.2C37 39.2 44 34 44 24c0-1.2-.1-2.3-.4-3.5z"/></svg>Продолжить с Google</button><div class="or"><span>или</span></div>
-      <div class="fld"><label>Никнейм или почта</label><input name="email" type="text" autocomplete="username" autocapitalize="off" spellcheck="false" placeholder="@AlmatyUser" required></div>
+      <div class="fld"><label for="liLogin">Никнейм или email</label><input name="login" id="liLogin" autocomplete="username" autocapitalize="off" spellcheck="false" placeholder="@AlmatyUser или you@mail.kz" required></div>
       <div class="fld"><label>Пароль</label><div class="pw"><input name="password" type="password" autocomplete="current-password" placeholder="Пароль" required><button type="button" data-eye>👁</button></div></div>
       <div class="auth-line"><span></span><button type="button" class="lnk" data-auth="forgot">Забыли пароль?</button></div>
       <div class="cap" data-cap></div>
       <button class="btn btn-main big" type="submit">Войти</button>
-      <button class="btn btn-ghost big mt8" type="button" data-auth="signup">Создать аккаунт</button>
-      <button class="lnk guest-lnk" type="button" data-guest>Продолжить как гость</button>
+      <div class="auth-foot">Нет аккаунта? <button type="button" class="lnk" data-auth="signup">Зарегистрироваться</button> · <button type="button" class="lnk" data-guest>Продолжить гостем</button></div>
     </form>
 
     <form id="f-signup" class="auth-p hidden" novalidate>
-      <div class="steps"><i class="on"></i><i></i></div>
-      <div class="err" data-err></div>
-      <div class="st" data-st="1">
-        <h1>Создать аккаунт</h1>
-        <p class="sub">Имя, фамилия и пол не нужны — только никнейм</p>
-        <div class="fld"><label>Никнейм</label><div class="nick"><span>@</span><input name="nickname" autocomplete="username" autocapitalize="off" spellcheck="false" maxlength="21" placeholder="AlmatyUser"></div>
-          <div class="hint" id="nickHint">3–20 символов: латинские буквы, цифры, точка и _</div></div>
-        <div class="fld"><label>Электронная почта</label><input name="email" type="email" autocomplete="email" inputmode="email" placeholder="example@mail.com"><div class="hint">Почту видите только вы</div></div>
-        <div class="fld"><label>Пароль</label><div class="pw"><input name="password" type="password" autocomplete="new-password" placeholder="Не короче 8 символов"><button type="button" data-eye aria-label="Показать пароль">👁</button></div>
-          <div class="pw-meter"><i></i><i></i><i></i><i></i></div><div class="hint" id="pwHint">Минимум 8 символов, буквы и цифры</div></div>
-        <label class="rules-check"><input type="checkbox" name="rules"> <span>Принимаю <button type="button" class="lnk" data-rules>правила NEAR</button></span></label>
-        <div class="cap" data-cap></div>
-        <button class="btn btn-main big" type="button" data-next>Создать аккаунт</button>
-      </div>
-      <div class="st hidden" data-st="2">
-        <h1>Последний штрих</h1>
-        <p class="sub">Необязательно · можно добавить позже</p>
-        <label class="su-ava" id="suAvaBox"><input type="file" accept="image/*" id="suAva" hidden><span id="suAvaPrev">📷</span><b>Добавить фото</b><small>Людям проще доверять, когда видно лицо</small></label>
-        <div class="fld"><label for="suDistrict">Ваш район</label><select name="district" id="suDistrict"></select></div>
-        <div class="fld"><label>Instagram</label><input name="instagram" placeholder="@nickname" autocapitalize="off"></div>
-        <div class="row2"><button class="btn btn-ghost big" type="button" data-skip>Пропустить</button><button class="btn btn-main big" type="submit">Готово</button></div>
-        <button class="lnk su-back" type="button" data-prev>← Назад</button>
-      </div>
-      <div class="auth-foot">Уже есть аккаунт? <button type="button" class="lnk" data-auth="login">Войти</button></div>
+      <h1>Присоединяйтесь</h1>
+      <p class="sub">NEAR · ваш город, ваш район. Нужны только никнейм, пароль и почта для восстановления доступа</p>
+      <div class="err" data-err role="alert"></div>
+      <div class="fld"><label for="suNick">Никнейм</label><div class="nick-in"><span>@</span><input name="nickname" id="suNick" autocomplete="username" autocapitalize="off" spellcheck="false" maxlength="20" placeholder="например, AlmatyUser"></div>
+        <div class="hint" id="suNickHint" aria-live="polite">3–20 символов: буквы, цифры и _. Так вас увидят соседи</div></div>
+      <div class="fld"><label for="suPw">Пароль</label><div class="pw"><input name="password" id="suPw" type="password" autocomplete="new-password" placeholder="Не короче 8 символов"><button type="button" data-eye aria-label="Показать пароль">👁</button></div>
+        <div class="pw-meter"><i></i><i></i><i></i><i></i></div><div class="hint" id="pwHint">Минимум 8 символов, буквы и цифры</div></div>
+      <div class="fld"><label for="suEmail">Электронная почта</label><input name="email" id="suEmail" type="email" autocomplete="email" inputmode="email" placeholder="you@mail.kz"><div class="hint">Только для подтверждения и восстановления доступа. Никому не показывается</div></div>
+      <label class="rules-check"><input type="checkbox" name="rules"> <span>Я принимаю <button type="button" class="lnk" data-rules>правила сообщества NEAR</button> (обязательно)</span></label>
+      <div class="cap" data-cap></div>
+      <button class="btn btn-main big" type="submit">Создать аккаунт</button>
+      <div class="auth-foot">Уже есть аккаунт? <button type="button" class="lnk" data-auth="login">Войти</button> · <button type="button" class="lnk" data-guest>Продолжить гостем</button></div>
     </form>
 
     <form id="f-complete" class="auth-p hidden" novalidate>
-      <h1>Почти готово</h1>
-      <p class="sub">Вы вошли через Google. Заполните пару полей</p>
-      <div class="err" data-err></div>
-      <div class="fld"><label>Никнейм</label><div class="nick"><span>@</span><input name="nickname" autocapitalize="off" spellcheck="false" maxlength="21" placeholder="AlmatyUser"></div></div>
-      <div class="fld hidden"><label>Пол</label><div class="gender" data-gender><button type="button" data-g="m">👨 Мужской</button><button type="button" data-g="f">👩 Женский</button></div></div>
-      <div class="fld"><label for="cpDistrict">Ваш район</label><select name="district" id="cpDistrict"></select></div>
-      <label class="rules-check"><input type="checkbox" name="rules"> <span>Я принимаю <button type="button" class="lnk" data-rules>правила сообщества NEAR</button></span></label>
-      <button class="btn btn-main big" type="submit">Продолжить</button>
+      <div class="steps"><i class="on"></i><i class="on"></i></div>
+      <h1>Выберите никнейм</h1>
+      <p class="sub">Шаг 2 из 2 · так вас увидят соседи. Имя и фамилия не нужны</p>
+      <div class="err" data-err role="alert"></div>
+      <div class="fld"><label for="cpNick">Никнейм</label><div class="nick-in"><span>@</span><input name="nickname" id="cpNick" autocomplete="username" autocapitalize="off" spellcheck="false" maxlength="20" placeholder="например, Aidana_92"></div>
+        <div class="hint" id="cpNickHint" aria-live="polite">3–20 символов: буквы, цифры и _. Менять можно раз в 30 дней</div></div>
+      <label class="rules-check" id="cpRules"><input type="checkbox" name="rules"> <span>Я принимаю <button type="button" class="lnk" data-rules>правила сообщества NEAR</button></span></label>
+      <button class="btn btn-main big" type="submit">Готово</button>
+      <p class="hint center mt12">Фото, район и Instagram — потом, в настройках профиля</p>
     </form>
 
     <form id="f-forgot" class="auth-p hidden" novalidate>
@@ -99,12 +87,12 @@
 
     <div id="f-sent" class="auth-p hidden">
       <div class="sent-ico">📬</div>
-      <h1>Подтвердите почту</h1>
+      <h1>Проверьте почту</h1>
       <div class="ok-box" id="sentText"></div>
-      <p class="sub">Письмо приходит за 1-2 минуты. Не видите? Проверьте "Спам" и "Промоакции".</p>
+      <p class="sub">Письмо приходит за 1–2 минуты. Не видите? Проверьте "Спам" и "Промоакции".</p>
       <div class="cap" data-cap></div>
       <button class="btn btn-ghost big" type="button" id="resendBtn">Отправить письмо еще раз</button>
-      <button class="btn btn-main big mt12" type="button" data-auth="login">Я подтвердил(а), войти</button>
+      <button class="btn btn-main big mt12" type="button" data-auth="login">Войти или восстановить пароль</button>
     </div>
 
     <button class="guest" type="button" id="guestBtn">Смотреть без входа →</button>
@@ -121,8 +109,15 @@
   <div class="view" id="v-feed">
     <div class="demo-strip hidden" id="demoStrip">🧪 <span>Демо-режим: данные хранятся только на этом устройстве. Подключите Supabase, чтобы все видели публикации друг друга.</span></div>
     <div class="guest-bar hidden" id="guestBar" role="note"><span>👋 Вы смотрите как гость</span><button type="button" data-auth-open="login">Войти</button></div>
-    <div class="restrict-bar hidden" id="restrictBar" role="status"></div>
-    <div class="feed-tools"><button class="search" data-search>🔍 Поиск по публикациям рядом</button><button class="iconbtn" id="refreshBtn" title="Обновить" aria-label="Обновить">↻</button></div>
+    <div class="feed-tools"><button class="search" data-search><span data-ic="search"></span> Что происходит рядом? Поиск по району</button><button class="iconbtn" id="refreshBtn" title="Обновить" aria-label="Обновить">↻</button></div>
+    <div class="quick" id="quick" role="navigation" aria-label="Быстрые разделы">
+      <button type="button" data-open="sv-meets"><span class="qi" style="--q:#A54EE7" data-ic="meetup"></span>Встречи</button>
+      <button type="button" data-open="sv-events"><span class="qi" style="--q:#3da5ff" data-ic="event"></span>События</button>
+      <button type="button" data-open="sv-lost"><span class="qi" style="--q:#2bd47d" data-ic="help"></span>Помощь</button>
+      <button type="button" data-open="sv-deals"><span class="qi" style="--q:#ffb020" data-ic="deal"></span>Акции</button>
+      <button type="button" class="q-sos" data-open="sv-sos"><span class="qi" style="--q:#e5243b">SOS</span>SOS</button>
+      <button type="button" data-open="v-disc"><span class="qi" style="--q:#8a8aa3" data-ic="other"></span>Еще</button>
+    </div>
     <div class="feed-loc" id="feedLoc" aria-live="polite">📍 Определяем место...</div>
     <div class="radius" id="radius">
       <button data-r="500">500 м</button><button data-r="1000">1 км</button><button data-r="3000" class="on">3 км</button><button data-r="5000">5 км</button><button data-r="10000">10 км</button>
@@ -154,6 +149,7 @@
 
   <!-- ============ DISCOVER ============ -->
   <div class="view" id="v-disc">
+    <div class="sub-h"><button class="back" data-back aria-label="Назад">‹</button><div><b>Все разделы</b><small>радар, события, акции, находки</small></div></div>
     <button class="search" data-search>🔍 Поиск: события, находки, акции</button>
     <button class="sos-banner" data-open="sv-sos"><span class="sb">SOS</span><div><b>Нужна срочная помощь рядом?</b><span>Сообщить людям поблизости · не заменяет 112</span></div></button>
     <div class="disc-grid">
@@ -186,7 +182,7 @@
 
   <!-- EVENTS -->
   <div class="view" id="sv-events">
-    <div class="sub-h"><button class="back" data-back aria-label="Назад">‹</button><div><b>События</b><small>ближайшие в радиусе 10 км</small></div></div>
+    <div class="sub-h"><button class="back" data-back aria-label="Назад">‹</button><div><b id="evTitle">События</b><small>ближайшие в радиусе 10 км</small></div></div>
     <div class="seg" id="evSeg"><button data-ev="all" class="on">Все</button><button data-ev="today">Сегодня</button><button data-ev="week">Неделя</button></div>
     <div id="eventsList"></div>
     <button class="btn btn-main full mt8" data-create="event">+ Создать событие</button>
@@ -202,10 +198,10 @@
 
   <!-- LOST & FOUND -->
   <div class="view" id="sv-lost">
-    <div class="sub-h"><button class="back" data-back aria-label="Назад">‹</button><div><b>Потеряно / найдено</b><small>в радиусе 10 км</small></div></div>
-    <div class="seg" id="lfSeg"><button class="on" data-lf="lost">Потеряли</button><button data-lf="found">Нашли</button></div>
+    <div class="sub-h"><button class="back" data-back aria-label="Назад">‹</button><div><b>Помощь рядом</b><small>соседи в радиусе 10 км</small></div></div>
+    <div class="seg" id="lfSeg"><button class="on" data-lf="help">Помощь</button><button data-lf="lost">Потеряли</button><button data-lf="found">Нашли</button></div>
     <div class="lf-grid" id="lfGrid"></div>
-    <button class="btn btn-main full" id="lfAdd">+ Я потерял / нашел</button>
+    <button class="btn btn-main full" id="lfAdd">+ Попросить или предложить помощь</button>
   </div>
 
   <!-- SOS -->
@@ -263,42 +259,53 @@
 
   <!-- ============ CREATE ============ -->
   <div class="view" id="v-create">
-    <div class="sub-h"><button class="back hidden" id="crBack">‹</button><div><b id="crTitle">Новая публикация</b><small id="crSub">что происходит рядом?</small></div></div>
+    <div class="sub-h"><button class="back" id="crBack" aria-label="Назад">‹</button><div><b id="crTitle">Новая публикация</b><small id="crSub">что происходит рядом?</small></div></div>
+    <!-- ТЗ 04: назад → автор и видимость → тип → текст → медиа → место → приватность → лимит → действие -->
+    <div class="cr-author" id="crAuthor"></div>
     <div class="type-grid" id="typeGrid"></div>
-    <div id="crMediaBlock">
-      <div class="media-row" id="mediaRow">
-        <button class="m-add" id="addCamera" type="button"><span>📷</span>Камера</button>
-        <button class="m-add" id="addGallery" type="button"><span>🖼️</span>Галерея</button>
-      </div>
-      <input type="file" id="fileGallery" accept="image/*,video/*" multiple hidden>
-      <input type="file" id="fileCamera" accept="image/*,video/*" capture="environment" hidden>
-    </div>
-    <div class="fld"><textarea id="crText" maxlength="1000" placeholder="Опишите, что произошло, где и когда"></textarea><div class="counter"><span id="crCount">0</span>/1000</div></div>
+    <div id="crMeta"></div>
+    <div class="fld"><textarea id="crText" maxlength="2000" placeholder="Опишите, что произошло, где и когда"></textarea><div class="counter"><span id="crCount">0</span>/1000</div></div>
     <div id="crEvent" class="hidden">
-      <div id="crMeetBox" class="hidden"><div class="lbl">Категория встречи</div><div class="meet-cats" id="crMeetCat"></div></div>
       <div class="row2">
-        <div class="fld"><label>Начало</label><input type="datetime-local" id="crWhen"></div>
-        <div class="fld"><label>Мест</label><input type="number" id="crCap" min="1" max="10000" placeholder="без лимита" inputmode="numeric"></div>
+        <div class="fld"><label for="crWhen">Начало</label><input type="datetime-local" id="crWhen"></div>
+        <div class="fld"><label for="crEnd">Конец</label><input type="datetime-local" id="crEnd"></div>
       </div>
-      <div class="fld" id="crEndBox"><label>Окончание (необязательно)</label><input type="datetime-local" id="crEnd"></div>
-      <p class="dim" id="crPilot" style="font-size:12px">Встречи сейчас доступны участникам закрытого пилота. Возрастная проверка появится до открытого запуска.</p>
+      <div class="fld"><label for="crCap">Мест</label><input type="number" id="crCap" min="1" max="10000" placeholder="без лимита" inputmode="numeric"></div>
+    </div>
+    <div id="crMediaBlock">
+      <div class="lbl">Фото или видео <small class="dim">до 5 · видео до 30 с</small></div>
+      <div class="media-row two" id="mediaRow">
+        <button class="m-add" id="addCamera" type="button">Камера</button>
+        <button class="m-add" id="addGallery" type="button">Галерея</button>
+      </div>
+      <div class="media-prev" id="mediaPrev"></div>
+      <input type="file" id="fileGallery" accept="image/*,video/*" multiple hidden>
+      <input type="file" id="fileCamera" accept="image/*" capture="environment" hidden>
     </div>
     <div id="crLocBlock">
-      <div class="loc-box"><span class="e">📍</span><div><b id="crLocT">Место не выбрано</b><span id="crLocS">нажмите кнопку ниже</span></div></div>
-      <div class="loc-btns"><button type="button" id="crHere">📍 Где я сейчас</button><button type="button" id="crPick">🗺️ На карте</button></div>
-      <div class="sw-row"><span>Скрыть точное место (±200 м)</span><button class="tg on" id="crFuzzy" type="button"></button></div>
+      <div class="lbl">Место публикации</div>
+      <div class="loc-box"><span class="e"></span><div><b id="crLocT">Место не выбрано</b><span id="crLocS">нажмите кнопку ниже</span></div></div>
+      <div class="loc-btns"><button type="button" id="crHere">Где я сейчас</button><button type="button" id="crPick">На карте</button></div>
+      <div class="sw-row"><span>Скрыть точное место<small class="dim"> · приблизительная точка (±200 м)</small></span><button class="tg on" id="crFuzzy" type="button" aria-label="Скрыть точное место"></button></div>
     </div>
     <div class="err" id="crErr"></div>
-    <button class="btn btn-main big" id="pubBtn" type="button">Опубликовать</button>
-    <div class="progress" id="crProg"></div>
+    <div class="action-bar">
+      <div class="lim" id="crLim"></div>
+      <button class="btn btn-main big" id="pubBtn" type="button">Опубликовать</button>
+      <button class="btn btn-ghost big hidden" id="crSaveDraft" type="button">Сохранить черновик</button>
+      <div class="progress" id="crProg"></div>
+    </div>
   </div>
 
   <!-- PICK LOCATION -->
   <div class="view" id="sv-pick">
     <div class="mapbox"><div id="pickMap"></div></div>
-    <div class="sub-h"><button class="back" id="pickBack">‹</button><div><b>Выберите место</b><small>двигайте карту</small></div></div>
-    <div class="cross">📍</div>
-    <div class="pick-bar"><div class="hint2" id="pickHint">Метка в центре карты</div><button class="btn btn-main big" id="pickOk" type="button">Готово</button></div>
+    <div class="pick-top"><button class="back" id="pickBack" aria-label="Назад">‹</button><b>Выберите место</b><button type="button" class="pk-btn" id="pickSearchBtn" aria-label="Найти адрес">🔍</button></div>
+    <div class="pick-search hidden" id="pickSearch"><input id="pickQ" type="search" enterkeyhint="search" autocomplete="off" maxlength="100" placeholder="Улица, дом или место в Алматы"><div id="pickRes"></div></div>
+    <div class="pin" id="pickPin" aria-hidden="true"><svg viewBox="0 0 40 52" width="36" height="48"><defs><linearGradient id="pinG" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#FF7848"/><stop offset=".5" stop-color="#EC398E"/><stop offset="1" stop-color="#A54EE7"/></linearGradient></defs><path d="M20 51C20 51 3 32.5 3 20a17 17 0 0 1 34 0c0 12.5-17 31-17 31z" fill="url(#pinG)" stroke="#fff" stroke-width="2.5"/><circle cx="20" cy="20" r="6.5" fill="#fff"/></svg></div>
+    <i class="pin-shadow" aria-hidden="true"></i>
+    <button type="button" class="pick-gps" id="pickGps" aria-label="Мое местоположение">◎</button>
+    <div class="pick-card"><b id="pickAddr">Двигайте карту</b><span id="pickSub">метка показывает выбранную точку</span><button class="btn btn-main big" id="pickOk" type="button">Подтвердить место</button></div>
   </div>
 
   <!-- POST DETAIL -->
@@ -311,15 +318,39 @@
   <!-- ============ CHATS ============ -->
   <div class="view" id="v-chats">
     <div class="cr-title">Чаты</div>
-    <div class="seg" id="chSeg"><button data-t="chats" class="on">Общие чаты</button><button data-t="friends">Друзья <span class="mini-badge hidden" id="reqBadge"></span></button></div>
-    <div id="chBody"><div class="spin"></div></div>
+    <div class="seg" id="chSeg"><button data-t="near" class="on">Рядом</button><button data-t="meet">Встречи</button><button data-t="mine">Мои</button></div>
+    <input class="qin" id="roomQ" type="search" placeholder="Поиск сообщества" autocomplete="off" aria-label="Поиск сообщества">
+    <div id="chBody"></div>
   </div>
 
-  <!-- FIND PEOPLE -->
-  <div class="view" id="sv-find">
-    <div class="sub-h"><button class="back" data-back aria-label="Назад">‹</button><div><b>Найти людей</b><small>по имени и фамилии</small></div></div>
-    <input class="qin" id="fq" type="search" placeholder="Например: Айдана" autocomplete="off">
-    <div id="fRes"></div>
+  <!-- MEETINGS -->
+  <div class="view" id="sv-meets">
+    <div class="sub-h"><button class="back" data-back aria-label="Назад">‹</button><div><b>Встречи рядом</b><small>игры, кино, спорт, горы и другое</small></div><button class="iconbtn" data-mmine aria-label="Мои встречи">☰</button></div>
+    <div class="chips scroll-x" id="mtCats"></div>
+    <div class="chips scroll-x" id="mtWhen"></div>
+    <div id="mtList"></div>
+    <div class="action-bar"><button class="btn btn-main big" data-mnew type="button">Создать встречу</button></div>
+  </div>
+  <div class="view" id="sv-meet">
+    <div class="sub-h"><button class="back" data-back aria-label="Назад">‹</button><div><b id="mtTitle">Встреча</b><small>встреча рядом</small></div></div>
+    <div id="mtBody"></div>
+    <div class="action-bar" id="mtAct"></div>
+  </div>
+  <div class="view" id="sv-manage">
+    <div class="sub-h"><button class="back" data-back aria-label="Назад">‹</button><div><b>Управление встречей</b><small>заявки, участники, готовность</small></div></div>
+    <div id="mgBody"></div>
+  </div>
+  <div class="view" id="sv-review">
+    <div class="sub-h"><button class="back" data-back aria-label="Назад">‹</button><div><b>Оценить встречу</b><small id="rvTitle"></small></div></div>
+    <div id="rvBody"></div>
+  </div>
+  <div class="view" id="sv-meetnew">
+    <div class="sub-h"><button class="back" data-back aria-label="Назад">‹</button><div><b>Создать встречу</b><small>категория → детали → место и время</small></div></div>
+    <div id="mnBody"></div>
+  </div>
+  <div class="view" id="sv-mymeets">
+    <div class="sub-h"><button class="back" data-back aria-label="Назад">‹</button><div><b>Мои встречи</b><small>предстоящие и архив</small></div></div>
+    <div id="myMtList"></div>
   </div>
 
   <!-- USER PROFILE -->
@@ -328,48 +359,33 @@
     <div id="uBody"><div class="spin"></div></div>
   </div>
 
-  <!-- CONVERSATION -->
-  <div class="view" id="sv-conv">
+  <!-- ROOM (общий чат) -->
+  <div class="view" id="sv-room">
     <div class="conv-h">
       <button class="back" data-back aria-label="Назад">‹</button>
-      <div class="conv-who" id="convWho"></div>
-      <button class="iconbtn" id="convMenu" aria-label="Меню чата">⋯</button>
+      <div class="conv-who"><b id="roomTitle"></b><small id="roomSub"></small></div>
+      <button class="iconbtn" id="roomMenu" aria-label="Меню комнаты">⋯</button>
     </div>
-    <div class="conv-msgs" id="convMsgs" aria-live="polite"></div>
-    <div class="clean-note">🛡 NEAR Clean автоматически скрывает ненормативную лексику и опасные ссылки.</div>
-    <div class="cs-reply hidden" id="cvReply"><span></span><button id="cvReplyX" aria-label="Отменить ответ">✕</button></div>
-    <form class="composer" id="composer">
-      <input id="msgIn" placeholder="Написать сообщение..." autocomplete="off" maxlength="1000" aria-label="Сообщение" enterkeyhint="send">
-      <button type="submit" class="cbtn send" id="sendBtn" aria-label="Отправить">➤</button>
+    <div class="room-pin hidden" id="roomPin"><b>Закреплено</b> <span id="roomPinT"></span></div>
+    <div id="roomMeet"></div>
+    <div class="warn-banner hidden" id="roomLive">Переподключаемся... новые сообщения появятся автоматически</div>
+    <div class="conv-msgs" id="roomMsgs"></div>
+    <div class="quick-acts" id="roomQuick"></div>
+    <div class="reply-bar hidden" id="replyBar"><span id="replyT"></span><button type="button" id="replyX" aria-label="Отменить ответ">✕</button></div>
+    <form class="composer hidden" id="composer">
+      <input id="msgIn" placeholder="Написать сообщение..." autocomplete="off" maxlength="2000" aria-label="Сообщение" enterkeyhint="send">
+      <button type="submit" class="cbtn send" id="sendBtn" aria-label="Отправить" disabled>➤</button>
     </form>
-  </div>
-
-  <!-- NEAR SHIELD: центр безопасности -->
-  <div class="view" id="sv-security">
-    <div class="sub-h"><button class="back" data-back aria-label="Назад">‹</button><div><b>Безопасность</b><small>только ваши данные</small></div></div>
-    <div id="secBody"></div>
-  </div>
-
-  <!-- NEAR SHIELD: панель администратора -->
-  <div class="view" id="sv-shield">
-    <div class="sub-h"><button class="back" data-back aria-label="Назад">‹</button><div><b>🛡 NEAR Admin</b><small id="shSub">решения с причиной и журналом</small></div></div>
-    <div id="shBody"><div class="spin"></div></div>
-  </div>
-
-  <!-- отзывы о пользователе -->
-  <div class="view" id="sv-reviews">
-    <div class="sub-h"><button class="back" data-back aria-label="Назад">‹</button><div><b>Отзывы</b><small id="rvSub"></small></div></div>
-    <div id="rvBody"><div class="spin"></div></div>
+    <div class="room-join hidden" id="roomJoin"></div>
   </div>
 
   <!-- MODERATION -->
   <div class="view" id="sv-mod">
     <div class="sub-h"><button class="back" data-back aria-label="Назад">‹</button><div><b>🛡 Модерация</b><small id="modSub">жалобы пользователей</small></div></div>
-    <div class="seg seg4" id="modSeg"><button data-t="reports" class="on">Жалобы</button><button data-t="posts">Публикации</button><button data-t="appeals">Апелляции</button><button data-t="health" class="hidden">Состояние</button></div>
+    <div class="seg seg-scroll" id="modSeg"><button data-t="reports" class="on">Жалобы</button><button data-t="media">Файлы</button><button data-t="posts">Публикации</button><button data-t="appeals">Апелляции</button><button data-t="city">NEAR City</button><button data-t="health" class="hidden">Состояние</button></div>
     <div id="modList"><div class="spin"></div></div>
   </div>
 
-  <div id="shieldOv" class="shield-ov" role="dialog" aria-modal="true"></div>
   <!-- IMAGE VIEWER -->
   <!-- комментарии: нижняя панель -->
   <div class="cs-bg" id="csBg"></div>
@@ -423,18 +439,13 @@
   <div class="bsheet" id="bsheet"><div class="grip"></div><h4 id="bsTitle"></h4><div class="bs-list" id="bsList"></div></div>
   <div class="toast" id="toast"></div>
 
-  <!-- ============ TABBAR ============ -->
-  <div class="tabbar">
-    <div class="tb-pill">
-      <button class="tb on" data-v="v-feed" title="Лента" aria-label="Лента"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="18" height="7" rx="2"/><rect x="3" y="14" width="18" height="7" rx="2"/></svg></button>
-      <button class="tb" data-v="v-map" title="Карта" aria-label="Карта"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M9 4 3 6v14l6-2 6 2 6-2V4l-6 2-6-2z"/><path d="M9 4v14M15 6v14"/></svg></button>
-      <button class="tb" data-v="v-disc" title="Открытия" aria-label="Открытия"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="m15.5 8.5-2 5-5 2 2-5z"/></svg></button>
-    </div>
-    <button class="tb-plus" data-v="v-create" title="Создать" aria-label="Создать"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></button>
-    <div class="tb-pill">
-      <button class="tb" data-v="v-chats" title="Сообщения" aria-label="Сообщения"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M4 5h16v11H9l-5 4z"/></svg><span class="dot hidden" id="chatBadge">0</span></button>
-      <button class="tb" data-v="v-prof" title="Профиль" aria-label="Профиль"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4.4 3.6-8 8-8s8 3.6 8 8"/></svg></button>
-    </div>
+  <!-- ============ TABBAR: 5 равных колонок (лента, карта, +, чаты, профиль) ============ -->
+  <div class="tabbar" role="navigation" aria-label="Навигация">
+    <button class="tb on" data-v="v-feed" title="Лента" aria-label="Лента"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="18" height="7" rx="2"/><rect x="3" y="14" width="18" height="7" rx="2"/></svg><span class="tb-l">Лента</span></button>
+    <button class="tb" data-v="v-map" title="Карта" aria-label="Карта"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M9 4 3 6v14l6-2 6 2 6-2V4l-6 2-6-2z"/><path d="M9 4v14M15 6v14"/></svg><span class="tb-l">Карта</span></button>
+    <button class="tb-plus" id="plusBtn" data-v="v-create" title="Создать" aria-label="Создать" aria-haspopup="dialog" aria-expanded="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></button>
+    <button class="tb" data-v="v-chats" title="Чаты" aria-label="Чаты"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M4 5h16v11H9l-5 4z"/></svg><span class="tb-l">Чаты</span><span class="dot hidden" id="chatBadge">0</span></button>
+    <button class="tb" data-v="v-prof" title="Профиль" aria-label="Профиль"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4.4 3.6-8 8-8s8 3.6 8 8"/></svg><span class="tb-l">Профиль</span></button>
   </div>
 </div>
 

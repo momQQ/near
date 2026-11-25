@@ -29,6 +29,9 @@
     share: '<svg viewBox="0 0 24 24" width="22" height="22"><path d="M21 3 10.2 13.8M21 3l-6.8 18-3.9-7.2L3 9.9 21 3z" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round" stroke-linecap="round"/></svg>',
     save: '<svg viewBox="0 0 24 24" width="22" height="22"><path d="M18.5 21 12 15.8 5.5 21V4.5a1.5 1.5 0 0 1 1.5-1.5h10a1.5 1.5 0 0 1 1.5 1.5z" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"/></svg>',
     saveOn: '<svg viewBox="0 0 24 24" width="22" height="22"><path d="M18.5 21 12 15.8 5.5 21V4.5a1.5 1.5 0 0 1 1.5-1.5h10a1.5 1.5 0 0 1 1.5 1.5z" fill="#ffd166" stroke="#ffd166" stroke-width="1.9" stroke-linejoin="round"/></svg>',
+    mute: '<svg viewBox="0 0 24 24" width="20" height="20"><path d="M4 9h4l5-4v14l-5-4H4z" fill="currentColor"/><path d="m16 9 5 6m0-6-5 6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>',
+    sound: '<svg viewBox="0 0 24 24" width="20" height="20"><path d="M4 9h4l5-4v14l-5-4H4z" fill="currentColor"/><path d="M16.5 8.5a5 5 0 0 1 0 7M19 6a8.5 8.5 0 0 1 0 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>',
+    shield: '<svg viewBox="0 0 24 24" width="30" height="30"><path d="M12 2.8 4.5 5.8v5.6c0 4.6 3.1 8.4 7.5 9.8 4.4-1.4 7.5-5.2 7.5-9.8V5.8z" fill="none" stroke="#A54EE7" stroke-width="1.8"/><path d="m8.6 12.2 2.4 2.3 4.6-4.8" fill="none" stroke="#A54EE7" stroke-width="2" stroke-linecap="round"/></svg>',
     more: '<svg viewBox="0 0 24 24" width="20" height="20"><circle cx="5" cy="12" r="1.8" fill="currentColor"/><circle cx="12" cy="12" r="1.8" fill="currentColor"/><circle cx="19" cy="12" r="1.8" fill="currentColor"/></svg>'
   };
   const fmtDur = (s) => { s = Math.round(s || 0); return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0"); };
@@ -45,8 +48,8 @@
     const r = m0.w && m0.h ? Math.max(0.6, Math.min(1.25, m0.h / m0.w)) : m0.type === "video" ? 1.25 : 1;
     const slides = p.media.map((m, i) => {
       const sh = shieldFor(m, p.user_id);
-      if (m.type === "video") return `<div class="gs vid" data-i="${i}"><video data-src="${esc(m.url)}${m.poster ? "" : "#t=0.3"}"${m.poster ? ` data-poster="${esc(m.poster)}"` : ""} playsinline muted preload="none"></video>
-        <button class="vplay" type="button" aria-label="Смотреть видео">▶</button><span class="vdur${m.duration ? "" : " hidden"}">${m.duration ? fmtDur(m.duration) : ""}</span><button class="vfs" type="button" aria-label="На весь экран">⛶</button><span class="vload hidden"><i class="mini-spin"></i></span></div>`;
+      if (m.type === "video") return videoSlide(p, m, i);
+      if (m.state && m.state !== "approved") return stateSlide(p, m, i);
       if (sh) return `<div class="gs blur-wrap" data-reveal data-i="${i}"><img data-src="${esc(m.thumb || m.url)}" alt="" decoding="async"><div class="shield">${sh}<button type="button">Показать</button></div></div>`;
       return `<div class="gs" data-img data-i="${i}"><img data-src="${esc(m.url)}"${m.thumb && m.thumb !== m.url ? ` data-thumb="${esc(m.thumb)}"` : ""} alt="" decoding="async"></div>`;
     }).join("");
@@ -62,29 +65,42 @@
     const h = (Date.now() - new Date(p.created_at)) / 3600e3;
     return h < 24 ? '<span class="nst live">● Актуально</span>' : "";
   }
+  function meetBar(p) {
+    if (!p.event) return "";
+    const e = p.event, closed = p.status === "closed" || e.status === "cancelled", started = new Date(e.starts_at) < Date.now();
+    const mc = p.category === "meetup" ? N.MEET_CATS[e.meet_cat] || N.MEET_CATS.other : null;
+    const full = e.capacity && e.members >= e.capacity && !e.joined;
+    const btn = closed ? `<span class="mb-st">${e.status === "cancelled" ? "Отменена" : "Завершена"}</span>`
+      : started ? (p.category === "meetup" ? `<button class="mb-go ghost" data-meet="${p.id}">Участники</button>` : "")
+      : `<button class="mb-go${e.joined ? " on" : ""}" data-join="${p.id}"${full ? " disabled" : ""}>${e.joined ? "✓ Вы идете" : full ? "Мест нет" : p.category === "meetup" ? "Вступить" : "Иду"}</button>`;
+    return `<div class="meet-bar"><div class="mb-i">${mc ? `<b>${mc.e} ${mc.n}</b>` : ""}<span>🗓 ${fmtWhen(e.starts_at)}</span><span>👥 <b class="mb-n">${e.members}${e.capacity ? "/" + e.capacity : ""}</b></span></div>${btn}</div>`;
+  }
   function card(p) {
     const c = CATS[p.category] || CATS.talk, closed = p.status === "closed", long = p.text.length > LONG_TEXT || (p.text.match(/\n/g) || []).length > 4;
-    const join = p.event && !closed ? `<button class="act${p.event.joined ? " joined" : ""}" data-join="${p.id}">${p.event.joined ? "✓ Иду" : "Иду"} · ${p.event.members}${p.event.capacity ? "/" + p.event.capacity : ""}</button>` : "";
+    const catName = p.category === "meetup" ? "Встреча" : c.n;
     return `<article class="post${closed || expired(p) ? " closed" : ""}${p.is_sos ? " sos" : ""}" data-post="${p.id}">
       <header class="post-h"><span class="who-link" data-user="${p.user_id}">${ava(p.author, c.c)}</span>
-        <div class="who"><b class="who-link" data-user="${p.user_id}" translate="no">${esc(p.author.name)}${vBadge(p.author)}</b><span>${timeAgo(p.created_at)}${p.updated_at && new Date(p.updated_at) - new Date(p.created_at) > 60000 ? " · изменено" : ""}</span></div>
-        <span class="cat" style="--c:${c.c}">${p.is_sos ? "🆘 SOS" : c.e + " " + c.n}</span><button class="pmenu" data-pmenu="${p.id}" aria-label="Меню публикации">${IC.more}</button></header>
+        <div class="who"><b class="who-link" data-user="${p.user_id}" translate="no">@${esc(p.author.nickname || p.author.name)}${vBadge(p.author)}</b><span>${timeAgo(p.created_at)}${p.updated_at && new Date(p.updated_at) - new Date(p.created_at) > 60000 ? " · изменено" : ""}</span></div>
+        <button class="pmenu" data-pmenu="${p.id}" aria-label="Меню публикации">${IC.more}</button></header>
+      <div class="post-place"><span class="cat" style="--c:${c.c}">${p.is_sos ? "🆘 SOS" : c.e + " " + catName}</span><button data-onmap="${p.id}">📍 ${fmtDist(D(p))} от вас</button>${statusChip(p)}</div>
       <div class="post-d${long ? " clamp" : ""}" translate="no">${esc(p.text)}</div>${long ? '<button class="more-t" data-moretext>Показать полностью</button>' : ""}
       ${galleryHtml(p)}
-      <div class="post-near"><button data-onmap="${p.id}">📍 ${fmtDist(D(p))} от вас</button>${statusChip(p)}${p.event ? `<span>🗓 ${fmtWhen(p.event.starts_at)}</span>` : ""}</div>
-      <div class="post-f"><button class="ab lk${p.liked ? " on" : ""}" data-like="${p.id}" aria-label="Нравится">${p.liked ? IC.heartOn : IC.heart}<b>${p.likes || ""}</b></button>
-        <button class="ab" data-cmt="${p.id}" aria-label="Комментарии">${IC.cmt}<b>${p.comments || ""}</b></button>
-        <button class="ab" data-share="${p.id}" aria-label="Поделиться">${IC.share}</button><span class="sp"></span>${join}
-        <button class="ab sv${p.saved ? " on" : ""}" data-save="${p.id}" aria-label="Сохранить">${p.saved ? IC.saveOn : IC.save}</button></div>
+      ${meetBar(p)}
+      <div class="acts4"><button class="ab4 lk${p.liked ? " on" : ""}" data-like="${p.id}" aria-pressed="${p.liked}" aria-label="Нравится, ${p.likes}">${p.liked ? IC.heartOn : IC.heart}<b>${p.likes}</b></button>
+        <button class="ab4" data-cmt="${p.id}" aria-label="Комментарии, ${p.comments}">${IC.cmt}<b>${p.comments}</b></button>
+        <button class="ab4 sh" data-share="${p.id}" aria-label="Поделиться">${IC.share}<b>&nbsp;</b></button>
+        <button class="ab4 sv${p.saved ? " on" : ""}" data-save="${p.id}" aria-pressed="${p.saved}" aria-label="${p.saved ? "Сохранено" : "Сохранить"}">${p.saved ? IC.saveOn : IC.save}<b>&nbsp;</b></button></div>
+      ${p.comments ? `<button class="cmt-prev" data-cmt="${p.id}">Посмотреть все ${p.comments} ${plural(p.comments, "комментарий", "комментария", "комментариев")}</button>` : ""}
+      <button class="cmt-quick" data-cmt="${p.id}" aria-label="Написать комментарий">${user ? ava(user) : ""}<span>Написать комментарий...</span></button>
     </article>`;
   }
   // обновление счетчиков без перерисовки (галерея и видео не сбрасываются)
   function patchCard(p) {
     qa(`.post[data-post="${p.id}"]`).forEach((el) => {
-      const lk = el.querySelector("[data-like]"); if (lk) { lk.classList.toggle("on", p.liked); lk.innerHTML = (p.liked ? IC.heartOn : IC.heart) + `<b>${p.likes || ""}</b>`; }
-      const cm = el.querySelector("[data-cmt]"); if (cm) cm.innerHTML = IC.cmt + `<b>${p.comments || ""}</b>`;
-      const sv = el.querySelector("[data-save]"); if (sv) { sv.classList.toggle("on", p.saved); sv.innerHTML = p.saved ? IC.saveOn : IC.save; }
-      const jn = el.querySelector("[data-join]"); if (jn && p.event) { jn.classList.toggle("joined", p.event.joined); jn.textContent = `${p.event.joined ? "✓ Иду" : "Иду"} · ${p.event.members}${p.event.capacity ? "/" + p.event.capacity : ""}`; }
+      const lk = el.querySelector("[data-like]"); if (lk) { lk.classList.toggle("on", p.liked); lk.setAttribute("aria-pressed", p.liked); lk.innerHTML = (p.liked ? IC.heartOn : IC.heart) + `<b>${p.likes}</b>`; }
+      const cm = el.querySelector(".ab4[data-cmt]"); if (cm) cm.innerHTML = IC.cmt + `<b>${p.comments}</b>`;
+      const sv = el.querySelector("[data-save]"); if (sv) { sv.classList.toggle("on", p.saved); sv.setAttribute("aria-pressed", p.saved); sv.setAttribute("aria-label", p.saved ? "Сохранено" : "Сохранить"); sv.innerHTML = (p.saved ? IC.saveOn : IC.save) + "<b>&nbsp;</b>"; }
+      const mb = el.querySelector(".meet-bar"); if (mb && p.event) mb.outerHTML = meetBar(p);
     });
     const pb = document.querySelector("#pdBody > [data-cmt]");
     if (pb && openPostId === p.id) pb.textContent = "💬 " + (p.comments ? "Комментарии · " + p.comments : "Написать комментарий");
@@ -108,7 +124,7 @@
       else img.src = full;
       img.removeAttribute("data-src");
     }
-    if (v) { if (v.dataset.poster) v.poster = v.dataset.poster; else v.preload = "metadata"; v.src = v.dataset.src; v.removeAttribute("data-src"); }
+    if (v && v.dataset.poster && !v.poster) v.poster = v.dataset.poster;
   }
   function loadNear(track, i) { const ch = track.children; [i, i + 1].forEach((k) => ch[k] && loadSlide(ch[k])); }
   const lazyIOs = new Map();
@@ -127,28 +143,8 @@
     });
   }
 
-  /* ---------- видео: одно одновременно, пауза вне экрана ---------- */
-  const vio = "IntersectionObserver" in window ? new IntersectionObserver((ents) => ents.forEach((en) => { if (!en.isIntersecting && !en.target.paused) en.target.pause(); }), { threshold: 0.25 }) : null;
-  function wireMedia(root) {
-    lazyMedia(root);
-    qa(".gs.vid video:not([data-w])", root).forEach((v) => {
-      v.dataset.w = "1"; if (vio) vio.observe(v);
-      const box = v.closest(".gs");
-      v.addEventListener("loadedmetadata", () => { const d = box.querySelector(".vdur"); if (d && d.classList.contains("hidden") && isFinite(v.duration)) { d.textContent = fmtDur(v.duration); d.classList.remove("hidden"); } });
-      v.addEventListener("waiting", () => box.querySelector(".vload").classList.remove("hidden"));
-      v.addEventListener("playing", () => { box.querySelector(".vload").classList.add("hidden"); box.classList.add("playing"); });
-      v.addEventListener("pause", () => box.classList.remove("playing"));
-      v.addEventListener("error", () => { box.classList.add("verr"); box.querySelector(".vplay").textContent = "⚠"; });
-    });
-  }
-  document.addEventListener("play", (e) => { if (e.target.tagName !== "VIDEO") return; qa("video").forEach((v) => { if (v !== e.target && !v.paused && !v.closest(".onb")) v.pause(); }); }, true);
-  document.addEventListener("visibilitychange", () => { if (document.hidden) qa(".gs video").forEach((v) => v.pause()); });
-  function playInline(box) {
-    const v = box.querySelector("video"); loadSlide(box);
-    if (box.classList.contains("verr")) return toast("Видео не воспроизводится на этом устройстве");
-    v.controls = true; v.preload = "auto"; box.classList.add("started");
-    v.play().catch(() => { v.muted = true; v.play().catch(() => toast("Не удалось запустить видео")); });
-  }
+  /* ---------- видео: плеер (35-player.js) управляет запуском, жестами и декодерами ---------- */
+  function wireMedia(root) { lazyMedia(root); Player.scan(root); }
   // счетчик галереи при свайпе
   document.addEventListener("scroll", (e) => {
     const t = e.target; if (!t.classList || !t.classList.contains("gal-track")) return;
@@ -156,7 +152,7 @@
     loadNear(t, i);
     const lab = g.querySelector(".gal-n"); if (lab) lab.textContent = `${i + 1}/${n}`;
     qa(".gal-dots i", g).forEach((d, k) => d.classList.toggle("on", k === i));
-    qa("video", t).forEach((v, k) => { if (!v.paused && Math.abs(v.closest(".gs").offsetLeft - t.scrollLeft) > 10) v.pause(); });
+    Player.pick();
   }, true);
 
   /* ---------- полноэкранный просмотр фото и видео ---------- */
@@ -506,9 +502,10 @@
   })();
 
   /* post actions (shared) */
-  async function doLike(id) {
+  async function doLike(id, onlyOn) {
     if (!requireAuth("Войдите, чтобы ставить лайки", { t: "like", a: id })) return;
     const p = cache.get(id); if (!p) return;
+    if (onlyOn && p.liked) return;
     p.liked = !p.liked; p.likes += p.liked ? 1 : -1; patchCard(p);
     if (p.liked) qa(`.post[data-post="${id}"] [data-like]`).forEach((b) => { b.classList.remove("pop"); void b.offsetWidth; b.classList.add("pop"); });
     try { const r = await api.toggleLike(id); p.liked = r.liked; p.likes = r.likes; patchCard(p); }
@@ -524,6 +521,12 @@
   async function doJoin(id) {
     if (!requireAuth("Войдите, чтобы участвовать", { t: "join", a: id })) return;
     const p = cache.get(id); if (!p || !p.event) return;
+    if (p.category === "meetup") {
+      if (p.event.joined) return meetingSheet(id);
+      try { const r = await api.meetingJoin(id); p.event.joined = true; p.event.members++; patchCard(p); toast("🤝 Вы в команде! Чат встречи — во вкладке «Чаты»"); usefulAction("join"); if (r && r.chat_id) refreshChatBadge(); }
+      catch (e) { if (!gateError(e)) toast(e.message); }
+      return;
+    }
     try { const r = await api.toggleJoin(id); p.event.joined = r.joined; p.event.members = r.members; patchCard(p); if (cur() === "sv-events") renderEvents(); toast(r.joined ? "🎉 Вы участвуете! Напомним в календаре" : "Участие отменено"); if (r.joined) usefulAction("join"); }
     catch (e) { toast(e.message); }
   }
@@ -535,16 +538,18 @@
     if ((b = t.closest("[data-like]"))) return doLike(b.dataset.like);
     if ((b = t.closest("[data-save]"))) return doSave(b.dataset.save);
     if ((b = t.closest("[data-join]"))) return doJoin(b.dataset.join);
+    if ((b = t.closest("[data-meet]"))) return meetingSheet(b.dataset.meet);
+    if (t.closest("[data-appeal-media]") && p) return appealSheet("post", p.id);
+    if ((b = t.closest("[data-mretry]"))) { api.mediaRetry(b.dataset.mretry).then(() => toast("Повторяем обработку")).catch((er) => toast(er.message)); return; }
     if ((b = t.closest("[data-onmap]"))) return showOnMap(b.dataset.onmap);
     if ((b = t.closest("[data-cmt]"))) return openComments(b.dataset.cmt);
     if ((b = t.closest("[data-share]"))) { const q = cache.get(b.dataset.share); return q && sharePost(q); }
     if ((b = t.closest("[data-pmenu]"))) { const q = cache.get(b.dataset.pmenu); return q && postMenu(q); }
     if ((b = t.closest("[data-moretext]"))) { b.previousElementSibling.classList.remove("clamp"); b.remove(); return; }
     if ((b = t.closest("[data-reveal]"))) { if (t.closest(".shield button")) { b.classList.remove("blur-wrap"); b.removeAttribute("data-reveal"); b.setAttribute("data-img", ""); b.querySelector(".shield").remove(); } return; }
-    if ((b = t.closest(".vfs"))) { const box = b.closest(".gs"); return p && openMediaViewer(p.media, +box.dataset.i); }
-    if ((b = t.closest(".gs.vid"))) { if (!b.classList.contains("started")) playInline(b); return; }
+    if (t.closest(".gs.vid")) return;   // жесты видео обрабатывает плеер
     if ((b = t.closest("[data-img]"))) return p && photoTap(b, p);
-    if (t.closest(".post-near, .post-f, .gal")) return;
+    if (t.closest(".post-place, .acts4, .gal, .meet-bar, .cmt-prev, .cmt-quick")) return;
     if (art) return openPost(art.dataset.post);
   }
   $("posts").onclick = postClick;

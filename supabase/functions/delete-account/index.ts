@@ -68,6 +68,16 @@ Deno.serve(async (req) => {
     return json({ status: "running", job: job.id }, 202);
   }
   await admin.from("deletion_jobs").update({ status: "running", attempts: job.attempts + 1, updated_at: new Date().toISOString(), error_code: null }).eq("id", job.id);
+  // v14.9: встречи организатора передаются co-host или отменяются, файлы staging удаляются
+  await admin.rpc("account_predelete", { p_user: uid });
+  {
+    const { data: st } = await admin.storage.from("post-staging").list(uid, { limit: 1000 });
+    for (const d of st ?? []) {
+      const { data: inner } = await admin.storage.from("post-staging").list(`${uid}/${d.name}`, { limit: 1000 });
+      const keys = (inner ?? []).map((f: { name: string }) => `${uid}/${d.name}/${f.name}`);
+      if (keys.length) await admin.storage.from("post-staging").remove(keys);
+    }
+  }
 
   try {
     // 1. вложения пользователя в переписках: файлы стираются, сообщение остается без файла

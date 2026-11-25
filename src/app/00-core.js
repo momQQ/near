@@ -1,5 +1,5 @@
   const CFG = window.NEAR_CONFIG || {};
-  const APP_VERSION = "14.0";
+  const APP_VERSION = "14.9";
   const N = window.NEAR;
   const CATS = N.CATS, CITY = N.CITY;
   let api = null, user = null;
@@ -9,7 +9,10 @@
   const qa = (sel, root = document) => [...root.querySelectorAll(sel)];
   const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   let toastT = null;
-  function toast(m) { const t = $("toast"); t.textContent = m; t.classList.add("on"); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove("on"), 2600); }
+  function toast(m) {
+    // отозванная сессия или бан из любого ответа сервера — показываем экран Shield, а не короткое сообщение
+    try { if (/выполнен вход на другом устройстве|Аккаунт заблокирован|Подтвердите вход с этого устройства/.test(m) && Shield.handle({ message: m })) return; } catch (e) {}
+    const t = $("toast"); t.textContent = m; t.classList.add("on"); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove("on"), 2600); }
   function timeAgo(iso) {
     const s = (Date.now() - new Date(iso).getTime()) / 1000;
     if (s < 60) return "только что";
@@ -119,8 +122,7 @@
 
   /* ---------- navigation ---------- */
   let hist = [];
-  // v14: 5 вкладок (лента, карта, +, чаты, профиль); "Все разделы" (v-disc) — из быстрых входов ленты
-  const TABS = ["v-feed", "v-map", "v-create", "v-chats", "v-prof"];
+  const TABS = ["v-feed", "v-map", "v-disc", "v-create", "v-chats", "v-prof"];
   const cur = () => { const v = document.querySelector(".view.on:not(#v-auth)"); return v ? v.id : "v-feed"; };
   function go(id, push = true) {
     const c = cur();
@@ -155,7 +157,7 @@
     if (id === "v-feed" && feedDirty) loadFeed();
   }
   qa("[data-v]").forEach((b) => (b.onclick = () => {
-    if (b.dataset.v === "v-create") { openCreateMenu(); return; }
+    if (b.dataset.v === "v-create") { if (!requireAuth("Войдите, чтобы публиковать", { t: "create" })) return; openCreate({}); return; }
     hist = []; go(b.dataset.v, false);
   }));
   document.addEventListener("click", (e) => {
@@ -167,29 +169,8 @@
   });
 
   /* ---------- bottom sheet ---------- */
-  let sheetBack = null;
-  function openSheet(title, html, cls) {
-    $("bsTitle").textContent = title; $("bsList").innerHTML = html; $("bsheet").className = "bsheet on" + (cls ? " " + cls : "");
-    $("bsheet").setAttribute("role", "dialog"); $("bsheet").setAttribute("aria-modal", "true"); $("bsheet").setAttribute("aria-label", title);
-    $("sheetBg").classList.add("on"); sheetBack = document.activeElement;
-    // фокус внутрь панели: клавиатура и экранный диктор
-    setTimeout(() => { const f = $("bsList").querySelector("button,input,select,textarea,[tabindex]"); if (f && !/^(INPUT|TEXTAREA)$/.test(f.tagName)) f.focus({ preventScroll: true }); }, 60);
-  }
-  function closeSheet() {
-    $("sheetBg").classList.remove("on"); $("bsheet").classList.remove("on"); $("bsheet").classList.remove("cr-sheet");
-    const pb = $("plusBtn"); if (pb) { pb.classList.remove("open"); pb.setAttribute("aria-expanded", "false"); }
-    if (sheetBack && sheetBack.focus && document.contains(sheetBack)) { try { sheetBack.focus({ preventScroll: true }); } catch (e) {} } sheetBack = null;
-  }
-  // Escape закрывает панель; Tab не уходит за ее пределы
-  document.addEventListener("keydown", (e) => {
-    if (!$("bsheet").classList.contains("on")) return;
-    if (e.key === "Escape") { e.preventDefault(); closeSheet(); return; }
-    if (e.key === "Tab") {
-      const f = qa("button:not([disabled]),input,select,textarea,a[href]", $("bsheet")).filter((x) => x.offsetParent !== null); if (!f.length) return;
-      if (e.shiftKey && document.activeElement === f[0]) { e.preventDefault(); f[f.length - 1].focus(); }
-      else if (!e.shiftKey && document.activeElement === f[f.length - 1]) { e.preventDefault(); f[0].focus(); }
-    }
-  });
+  function openSheet(title, html) { $("bsTitle").textContent = title; $("bsList").innerHTML = html; $("sheetBg").classList.add("on"); $("bsheet").classList.add("on"); }
+  function closeSheet() { $("sheetBg").classList.remove("on"); $("bsheet").classList.remove("on"); }
   $("sheetBg").onclick = closeSheet;
   function confirmSheet(title, text, okLabel, danger) {
     return new Promise((res) => {

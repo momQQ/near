@@ -1,18 +1,19 @@
 -- NEAR v12: дополнительные проверки (запускаются после rls_v11.sql на той же базе)
 reset role; select t.as_user(null);
 insert into auth.users (id, email, raw_user_meta_data, email_confirmed_at) values
- ('30000000-0000-0000-0000-000000000001', 'u1@x.kz', '{"nickname":"user_one","accepted_rules":"true"}', null),   -- не подтвердил email
- ('30000000-0000-0000-0000-000000000002', 'u2@x.kz', '{"accepted_rules":"true"}', now()),               -- без никнейма (v14; в v12 — без пола)
- ('30000000-0000-0000-0000-000000000003', 'u3@x.kz', '{"nickname":"user_three","accepted_rules":"true"}', now()),
- ('30000000-0000-0000-0000-000000000004', 'u4@x.kz', '{"nickname":"user_four","accepted_rules":"true"}', now());
+ ('30000000-0000-0000-0000-000000000001', 'u1@x.kz', '{"gender":"m","accepted_rules":"true"}', null),   -- не подтвердил email
+ ('30000000-0000-0000-0000-000000000002', 'u2@x.kz', '{"accepted_rules":"true"}', now()),               -- без пола
+ ('30000000-0000-0000-0000-000000000003', 'u3@x.kz', '{"gender":"f","accepted_rules":"true"}', now()),
+ ('30000000-0000-0000-0000-000000000004', 'u4@x.kz', '{"gender":"m","accepted_rules":"true"}', now());
 update public.profiles set created_at = now() - interval '60 days' where id::text like '30000000%';
 update public.profiles set accepted_rules_at = now() where id::text like '30000000%';
+update public.profiles set nickname = 'u' || right(id::text, 4) where id::text like '30000000%' and id <> '30000000-0000-0000-0000-000000000002';
 
 -- ===== UX-01: email и профиль =====
 set role authenticated; select t.as_user('30000000-0000-0000-0000-000000000001');
 select t.fail('UX-01 без подтвержденного email публиковать нельзя', $$insert into public.posts (user_id, category, text, lat, lng) values ('30000000-0000-0000-0000-000000000001', 'talk', 'x', 43.2, 76.9)$$, 'NR403');
 select t.as_user('30000000-0000-0000-0000-000000000002');
-select t.fail('UX-01 v14: без никнейма публиковать нельзя', $$insert into public.posts (user_id, category, text, lat, lng) values ('30000000-0000-0000-0000-000000000002', 'talk', 'x', 43.2, 76.9)$$, 'NR403');
+select t.fail('UX-01 без никнейма публиковать нельзя (v14.9: пол не нужен)', $$insert into public.posts (user_id, category, text, lat, lng) values ('30000000-0000-0000-0000-000000000002', 'talk', 'x', 43.2, 76.9)$$, 'NR403');
 
 -- ===== SOS-01: срок назначает сервер, закрытый не открывается =====
 select t.as_user('30000000-0000-0000-0000-000000000003');

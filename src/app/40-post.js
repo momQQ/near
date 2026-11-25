@@ -76,72 +76,45 @@
      CREATE / EDIT
      ===================================================== */
   const ORDER = ["incident", "event", "deal", "meetup", "lost", "found", "ad", "talk"];
-  // v14 / 03: семь типов создания — шесть плиток и отдельно SOS. Цвета — как метки на карте (раздел 27)
-  const GROUPS = {
-    post: { t: "Публикация", s: "Новость, вопрос, объявление", e: "📝", c: "#ec398e", types: ["talk", "ad"], title: "Новая публикация" },
-    incident: { t: "Происшествие", s: "ДТП, отключения, перекрытия", e: "🚨", c: "#ff873b", types: ["incident"], title: "Происшествие" },
-    meetup: { t: "Встреча", s: "Группа по интересам", e: "🤝", c: "#9855e9", types: ["meetup"], title: "Новая встреча" },
-    event: { t: "Событие", s: "Открытое мероприятие", e: "🎉", c: "#3da5ff", types: ["event"], title: "Новое событие" },
-    deal: { t: "Акция", s: "Предложение бизнеса", e: "🏷️", c: "#f5b400", types: ["deal"], title: "Новая акция" },
-    help: { t: "Помощь", s: "Потеря, находка, помощь соседям", e: "🔑", c: "#2bd47d", types: ["lost", "found"], title: "Помощь рядом" }
-  };
-  const groupOf = (t) => Object.keys(GROUPS).find((g) => GROUPS[g].types.includes(t)) || "post";
-  // "+" → "Что создать?". Гость сначала входит, затем меню открывается снова
-  function openCreateMenu() {
-    if (!requireAuth("Войдите, чтобы публиковать", { t: "create" })) return;
-    const pb = $("plusBtn");
-    if ($("bsheet").classList.contains("on") && $("bsheet").classList.contains("cr-sheet")) { closeSheet(); return; }
-    openSheet("Что создать?", `<div class="cr-grid">${Object.entries(GROUPS).map(([k, g]) => `<button type="button" class="cr-tile" data-group="${k}" style="--c:${g.c}"><span class="ci">${g.e}</span><b>${g.t}</b><small>${g.s}</small></button>`).join("")}</div>
-      <button type="button" class="cr-sos" id="crSos"><span class="sb">SOS</span><span><b>SOS — срочная помощь</b><small>сообщить людям рядом · не заменяет 112</small></span></button>
-      <div class="cr-note">Черновик сохраняется на телефоне до публикации</div>`, "cr-sheet");
-    if (pb) { pb.classList.add("open"); pb.setAttribute("aria-expanded", "true"); }
-    qa("[data-group]", $("bsList")).forEach((b) => (b.onclick = () => { closeSheet(); openCreate({ group: b.dataset.group }); }));
-    $("crSos").onclick = () => { closeSheet(); go("sv-sos"); };
-  }
-  const cr = { type: null, group: null, files: [], loc: null, edit: null, key: null, started: false };
+  const cr = { type: null, files: [], loc: null, edit: null, key: null, started: false };
   // POST-01: черновик текста хранится на телефоне до публикации
   const draftKey = () => "near_draft_" + (user ? user.id.slice(0, 12) : "guest");
   function saveDraft() { try { if (cr.edit) return; const t = $("crText").value; if (t.trim()) localStorage.setItem(draftKey(), JSON.stringify({ type: cr.type, text: t, t: Date.now() })); else localStorage.removeItem(draftKey()); } catch (e) {} }
-  function renderTypes(types) {
-    $("typeGrid").innerHTML = types.map((k) => `<button type="button" data-type="${k}"><span>${CATS[k].e}</span>${CATS[k].n}</button>`).join("");
-    // один тип — выбирать нечего: плитки скрыты
-    $("typeGrid").classList.toggle("hidden", types.length < 2);
-  }
-  renderTypes(ORDER);
+  $("typeGrid").innerHTML = ORDER.map((k) => `<button type="button" data-type="${k}"><span>${CATS[k].e}</span>${CATS[k].n}</button>`).join("");
   $("typeGrid").onclick = (e) => { const b = e.target.closest("[data-type]"); if (b) setType(b.dataset.type); };
   function setType(t) {
     cr.type = t; qa("#typeGrid [data-type]").forEach((x) => x.classList.toggle("on", x.dataset.type === t));
     $("crEvent").classList.toggle("hidden", !(t === "event" || t === "meetup"));
+    $("crMeetBox").classList.toggle("hidden", t !== "meetup"); $("crPilot").classList.toggle("hidden", t !== "meetup");
+    if (t === "meetup" && !$("crMeetCat").children.length) {
+      $("crMeetCat").innerHTML = Object.entries(N.MEET_CATS).map(([k, v]) => `<button type="button" data-mc="${k}">${v.e} ${v.n}</button>`).join("");
+      $("crMeetCat").onclick = (e) => { const b = e.target.closest("[data-mc]"); if (!b) return; cr.meetCat = b.dataset.mc; qa("#crMeetCat button").forEach((x) => x.classList.toggle("on", x === b)); };
+    }
     const ph = { incident: "Что случилось? Например: ДТП, перекрыта дорога, отключили воду", event: "Что за событие, где и для кого?", deal: "Какая акция, где и до какого времени?", meetup: "Кого ищете и чем займетесь?", lost: "Что потеряли, где и когда? Особые приметы", found: "Что нашли и где? Как с вами связаться", ad: "Продам, отдам, ищу мастера...", talk: "О чем хотите спросить соседей?" };
     $("crText").placeholder = ph[t] || "Опишите, что происходит";
   }
-  function openCreate({ type, edit, group } = {}) {
-    // без типа и группы (например, после входа) — сначала меню "Что создать?"
-    if (!edit && !type && !group) { let dr = null; try { dr = JSON.parse(localStorage.getItem(draftKey()) || "null"); } catch (e) {} if (dr && dr.type) type = dr.type; else { openCreateMenu(); return; } }
-    cr.group = edit ? groupOf(edit.category) : group || groupOf(type);
-    renderTypes(edit ? ORDER : GROUPS[cr.group].types);
+  function openCreate({ type, edit } = {}) {
     cr.files.forEach((f) => f._url && URL.revokeObjectURL(f._url));
     cr.files = []; cr.edit = edit || null; $("crErr").classList.remove("on"); $("crProg").textContent = "";
     $("crFuzzy").classList.toggle("on", prefs.fuzz_default ?? true);
     // незавершенная загрузка прошлой публикации отменяется: файлы и строка удаляются
     if (cr.key && cr.started && !edit) api.abandonDraft && api.abandonDraft(cr.key).catch(() => {});
     cr.key = edit ? null : N.rid() + N.rid(); cr.started = false;
-    $("crTitle").textContent = edit ? "Редактирование" : GROUPS[cr.group].title;
+    $("crTitle").textContent = edit ? "Редактирование" : "Новая публикация";
     $("crSub").textContent = edit ? "фото и место не меняются" : "что происходит рядом?";
     $("crMediaBlock").classList.toggle("hidden", !!edit);
     $("crLocBlock").classList.toggle("hidden", !!edit);
     $("pubBtn").textContent = edit ? "Сохранить изменения" : "Опубликовать";
     $("crBack").classList.toggle("hidden", !edit);
     $("crText").value = edit ? edit.text : ""; $("crCount").textContent = $("crText").value.length;
-    $("crWhen").value = ""; $("crCap").value = "";
+    $("crWhen").value = ""; $("crCap").value = ""; $("crEnd").value = ""; cr.meetCat = null; qa("#crMeetCat button").forEach((x) => x.classList.remove("on"));
     if (edit && edit.event) {
       const d = new Date(edit.event.starts_at); d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
       $("crWhen").value = d.toISOString().slice(0, 16); $("crCap").value = edit.event.capacity || "";
     }
     let dr = null; if (!edit) { try { dr = JSON.parse(localStorage.getItem(draftKey()) || "null"); } catch (e) {} }
     if (dr && dr.text && Date.now() - dr.t < 7 * 86400e3) { $("crText").value = dr.text; $("crCount").textContent = dr.text.length; toast("Восстановлен черновик"); }
-    const gt = GROUPS[cr.group].types;
-    setType(edit ? edit.category : type || (dr && gt.includes(dr.type) ? dr.type : null) || (gt.length === 1 ? gt[0] : null));
+    setType(edit ? edit.category : type || (dr && dr.type) || null);
     if (!edit) { cr.loc = pos.real ? { lat: pos.lat, lng: pos.lng, how: "here" } : null; renderLoc(); }
     renderMedia();
     if (edit) go("v-create"); else { hist = []; go("v-create", false); }
@@ -159,7 +132,12 @@
         if (kind === "video") {
           // проверяем видео сразу, до публикации: формат, длительность, обложка
           f._state = "check";
-          N.probeVideo(f).then((m) => { f._meta = m; f._state = "ok"; renderMedia(); })
+          N.probeVideo(f).then((m) => {
+            f._meta = m; f._state = "ok";
+            try { const sv = JSON.parse(localStorage.getItem("near_vedit_" + [f.name, f.size, f.lastModified].join(":")) || "null"); if (sv) f._edit = sv; } catch (e) {}
+            if (m.duration > 30.05 && !f._edit) { f._edit = { start: 0, end: 30, cover: 0, rotate: 0, aspect: "orig", mute: false }; toast("Видео длиннее 30 секунд: взяли первые 30. Нажмите ✂, чтобы выбрать фрагмент"); }
+            renderMedia();
+          })
             .catch((er) => { cr.files = cr.files.filter((x) => x !== f); URL.revokeObjectURL(f._url); renderMedia(); crError(er.message); });
         }
       } catch (e) { toast(e.message); }
@@ -175,11 +153,13 @@
       const d = document.createElement("div"); d.className = "m-prev";
       if (/^video\//.test(f.type) || /\.(mov|mp4|m4v|webm)$/i.test(f.name)) d.innerHTML = `<video src="${f._url}#t=0.3" muted playsinline preload="metadata"></video><i>${f._state === "check" ? '<span class="mini-spin"></span>' : f._meta ? "▶ " + fmtDur(f._meta.duration) : "🎬"}</i>`;
       else d.style.backgroundImage = `url('${f._url}')`;
-      d.insertAdjacentHTML("beforeend", `<button type="button" data-rm="${i}">✕</button>`);
+      d.insertAdjacentHTML("beforeend", `<button type="button" data-rm="${i}" aria-label="Убрать">✕</button>`);
+      if (f._meta) d.insertAdjacentHTML("beforeend", `<button type="button" class="m-edit" data-ved="${i}" aria-label="Редактировать видео">✂ ${f._edit && f._edit.end ? fmtDur(editLen(f)) : "Изменить"}</button>`);
       row.insertBefore(d, $("addCamera"));
     });
   }
   $("mediaRow").addEventListener("click", (e) => {
+    const ve = e.target.closest("[data-ved]"); if (ve) { const f = cr.files[+ve.dataset.ved]; return openEditor(f, () => renderMedia()); }
     const b = e.target.closest("[data-rm]"); if (!b) return;
     const f = cr.files.splice(+b.dataset.rm, 1)[0]; if (f && f._url) URL.revokeObjectURL(f._url); renderMedia();
   });
@@ -209,13 +189,20 @@
         const d = new Date($("crWhen").value);
         if (isNaN(d)) return crError("Проверьте дату");
         if (!cr.edit && d < Date.now() - 3600e3) return crError("Дата события уже прошла");
-        const cap = parseInt($("crCap").value, 10);
-        event = { starts_at: d.toISOString(), capacity: cap > 0 ? cap : null };
+        const cap = parseInt($("crCap").value, 10), end = $("crEnd").value ? new Date($("crEnd").value) : null;
+        if (end && end <= d) return crError("Окончание должно быть позже начала");
+        event = { starts_at: d.toISOString(), ends_at: end ? end.toISOString() : null, capacity: cap > 0 ? cap : null, meet_cat: cr.meetCat || null };
+      }
+      if (cr.type === "meetup" && !cr.edit) {
+        if (!event) return crError("Укажите дату и время встречи");
+        if (!cr.meetCat) return crError("Выберите категорию встречи");
       }
     }
+    // видео: итоговая длительность до 30 секунд (длинное можно обрезать в редакторе)
+    const long = cr.files.find((f) => f._meta && f._meta.duration && editLen(f) > 30.05);
+    if (long) return crError("Видео длиннее 30 секунд. Нажмите ✂ на превью и обрежьте его");
     if (cr.files.some((f) => f._state === "check")) return crError("Подождите, проверяем видео...");
-    if (N.isThreat(text)) return crError("Угрозы запрещены правилами NEAR. Измените текст");
-    if (N.hasBad(text)) toast("Грубые слова будут скрыты: " + N.mask(text).slice(0, 60));
+    if (N.hasBad(text)) toast("🤬 Грубые слова будут скрыты звездочками");
     const btn = $("pubBtn"); btn.disabled = true;
     try {
       if (cr.edit) {
@@ -229,16 +216,17 @@
       // место по умолчанию приблизительное (~200 м, округляет сервер); точное — только если переключатель выключен
       const exact = !$("crFuzzy").classList.contains("on");
       cr.started = true;
-      const p = await api.createPost({ category: cr.type, text, lat, lng, files: cr.files, event, exact, clientKey: cr.key }, (m, frac) => { $("crProg").innerHTML = `<div>${esc(m)}</div>${frac != null ? `<div class="pbar"><i style="width:${Math.round(Math.min(1, frac) * 100)}%"></i></div>` : ""}`; });
+      const p = await api.createPost({ category: cr.type, text, lat, lng, files: cr.files, edits: cr.files.map((f) => f._edit || {}), event, exact, clientKey: cr.key }, (m, frac) => { $("crProg").innerHTML = `<div>${esc(m)}</div>${frac != null ? `<div class="pbar"><i style="width:${Math.round(Math.min(1, frac) * 100)}%"></i></div>` : ""}`; });
       cache.set(p.id, p); cr.started = false; cr.key = N.rid() + N.rid();
       cr.files.forEach((f) => f._url && URL.revokeObjectURL(f._url)); cr.files = [];
       $("crProg").textContent = ""; $("crText").value = ""; saveDraft();
       Obs.track("post_created", { category: p.category, count: p.media.length }); usefulAction("post");
-      toast("✓ Опубликовано! Публикация уже в ленте и на карте");
+      const waits = p.status === "draft" || p.media.some((m) => m.state && m.state !== "approved");
+      toast(waits ? "⏳ Отправлено. Видео обрабатывается и проверяется — опубликуем, когда все файлы пройдут проверку" : "✓ Опубликовано! Публикация уже в ленте и на карте");
       feedCat = "all"; $("cats").innerHTML = chipsHtml("all"); wide = null;
       if (N.dist(pos, p) > R) setRadius(Math.min(10000, Math.max(R, Math.ceil(N.dist(pos, p) / 1000) * 1000)));
       hist = []; go("v-feed", false); await loadFeed(); if (mapReady) loadMapPosts();
-    } catch (e) { if (gateError(e)) { $("crProg").textContent = ""; return; } crError(e.message + (cr.started && !/^NR\d/.test(e.code || "") ? " · Нажмите \"Опубликовать\" еще раз — загрузка продолжится без дублей" : "")); $("crProg").textContent = ""; }
+    } catch (e) { if (gateError(e)) { $("crProg").textContent = ""; return; } crError(e.message + (cr.started ? " · Нажмите \"Опубликовать\" еще раз — загрузка продолжится без дублей" : "")); $("crProg").textContent = ""; }
     finally { btn.disabled = false; }
   };
   $("crText").addEventListener("input", () => { clearTimeout(cr.dt); cr.dt = setTimeout(saveDraft, 400); });

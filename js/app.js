@@ -3,7 +3,7 @@
   "use strict";
 /* ===== 00-core.js ===== */
   const CFG = window.NEAR_CONFIG || {};
-  const APP_VERSION = "14.0";
+  const APP_VERSION = "14.9";
   const N = window.NEAR;
   const CATS = N.CATS, CITY = N.CITY;
   let api = null, user = null;
@@ -13,7 +13,10 @@
   const qa = (sel, root = document) => [...root.querySelectorAll(sel)];
   const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   let toastT = null;
-  function toast(m) { const t = $("toast"); t.textContent = m; t.classList.add("on"); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove("on"), 2600); }
+  function toast(m) {
+    // отозванная сессия или бан из любого ответа сервера — показываем экран Shield, а не короткое сообщение
+    try { if (/выполнен вход на другом устройстве|Аккаунт заблокирован|Подтвердите вход с этого устройства/.test(m) && Shield.handle({ message: m })) return; } catch (e) {}
+    const t = $("toast"); t.textContent = m; t.classList.add("on"); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove("on"), 2600); }
   function timeAgo(iso) {
     const s = (Date.now() - new Date(iso).getTime()) / 1000;
     if (s < 60) return "только что";
@@ -123,8 +126,7 @@
 
   /* ---------- navigation ---------- */
   let hist = [];
-  // v14: 5 вкладок (лента, карта, +, чаты, профиль); "Все разделы" (v-disc) — из быстрых входов ленты
-  const TABS = ["v-feed", "v-map", "v-create", "v-chats", "v-prof"];
+  const TABS = ["v-feed", "v-map", "v-disc", "v-create", "v-chats", "v-prof"];
   const cur = () => { const v = document.querySelector(".view.on:not(#v-auth)"); return v ? v.id : "v-feed"; };
   function go(id, push = true) {
     const c = cur();
@@ -159,7 +161,7 @@
     if (id === "v-feed" && feedDirty) loadFeed();
   }
   qa("[data-v]").forEach((b) => (b.onclick = () => {
-    if (b.dataset.v === "v-create") { openCreateMenu(); return; }
+    if (b.dataset.v === "v-create") { if (!requireAuth("Войдите, чтобы публиковать", { t: "create" })) return; openCreate({}); return; }
     hist = []; go(b.dataset.v, false);
   }));
   document.addEventListener("click", (e) => {
@@ -171,29 +173,8 @@
   });
 
   /* ---------- bottom sheet ---------- */
-  let sheetBack = null;
-  function openSheet(title, html, cls) {
-    $("bsTitle").textContent = title; $("bsList").innerHTML = html; $("bsheet").className = "bsheet on" + (cls ? " " + cls : "");
-    $("bsheet").setAttribute("role", "dialog"); $("bsheet").setAttribute("aria-modal", "true"); $("bsheet").setAttribute("aria-label", title);
-    $("sheetBg").classList.add("on"); sheetBack = document.activeElement;
-    // фокус внутрь панели: клавиатура и экранный диктор
-    setTimeout(() => { const f = $("bsList").querySelector("button,input,select,textarea,[tabindex]"); if (f && !/^(INPUT|TEXTAREA)$/.test(f.tagName)) f.focus({ preventScroll: true }); }, 60);
-  }
-  function closeSheet() {
-    $("sheetBg").classList.remove("on"); $("bsheet").classList.remove("on"); $("bsheet").classList.remove("cr-sheet");
-    const pb = $("plusBtn"); if (pb) { pb.classList.remove("open"); pb.setAttribute("aria-expanded", "false"); }
-    if (sheetBack && sheetBack.focus && document.contains(sheetBack)) { try { sheetBack.focus({ preventScroll: true }); } catch (e) {} } sheetBack = null;
-  }
-  // Escape закрывает панель; Tab не уходит за ее пределы
-  document.addEventListener("keydown", (e) => {
-    if (!$("bsheet").classList.contains("on")) return;
-    if (e.key === "Escape") { e.preventDefault(); closeSheet(); return; }
-    if (e.key === "Tab") {
-      const f = qa("button:not([disabled]),input,select,textarea,a[href]", $("bsheet")).filter((x) => x.offsetParent !== null); if (!f.length) return;
-      if (e.shiftKey && document.activeElement === f[0]) { e.preventDefault(); f[f.length - 1].focus(); }
-      else if (!e.shiftKey && document.activeElement === f[f.length - 1]) { e.preventDefault(); f[0].focus(); }
-    }
-  });
+  function openSheet(title, html) { $("bsTitle").textContent = title; $("bsList").innerHTML = html; $("sheetBg").classList.add("on"); $("bsheet").classList.add("on"); }
+  function closeSheet() { $("sheetBg").classList.remove("on"); $("bsheet").classList.remove("on"); }
   $("sheetBg").onclick = closeSheet;
   function confirmSheet(title, text, okLabel, danger) {
     return new Promise((res) => {
@@ -488,12 +469,6 @@
       return true;
     }
     if (/Заполните профиль/.test(m)) { showComplete(); return true; }
-    // v14: личные сообщения незнакомым — после проверки возраста; до этого — через друзей
-    if (e && e.hint === "age_gate") {
-      openSheet("Пока только через друзей", `<p class="muted" style="font-size:13.5px;margin-bottom:12px">Личные сообщения незнакомым людям пока недоступны: это защита от спама и мошенников. Добавьте человека в друзья — после принятия заявки можно писать. Обсудить публикацию можно в комментариях.</p>
-        <div class="sheet-btns"><button class="btn btn-main" id="agOk">Понятно</button></div>`);
-      $("agOk").onclick = closeSheet; return true;
-    }
     return false;
   }
   function runIntent() {
@@ -516,84 +491,77 @@
 
   $("f-login").onsubmit = async (e) => {
     e.preventDefault(); const f = e.target, fd = new FormData(f);
-    if (!fd.get("email") || !fd.get("password")) return formErr(f, "Заполните email и пароль");
-    try { await busy(f.querySelector("[type=submit]"), async () => api.signIn({ email: fd.get("email"), password: fd.get("password"), captchaToken: await Cap.token(capOf(f)) })); user = api.user(); afterLogin(); }
-    catch (err) { if (/не подтверждена/.test(err.message)) { showSent(String(fd.get("email")).trim(), false); return; } formErr(f, err.message); }
+    if (!fd.get("email") || !fd.get("password")) return formErr(f, "Введите никнейм или почту и пароль");
+    try {
+      await busy(f.querySelector("[type=submit]"), async () => api.signIn({ login: fd.get("email"), password: fd.get("password"), captchaToken: await Cap.token(capOf(f)) }));
+      user = api.user(); await afterLogin();
+    }
+    catch (err) { if (/не подтверждена/.test(err.message)) { showSent(String(fd.get("email")).trim(), false); return; } formErr(f, err.message); if (err.captcha) Cap.mount(capOf(f)); }
     finally { Cap.reset(capOf(f)); }
   };
-  /* ---------- регистрация в 3 шага ---------- */
-  const SU = $("f-signup"); let suStep = 1, suAvatar = null, pendingEmail = "";
+  qa("[data-guest]").forEach((b) => (b.onclick = () => { hideAuth(); guestBar(); }));
+  /* ---------- регистрация: никнейм, почта, пароль, правила (имя и пол не нужны) ---------- */
+  const SU = $("f-signup"); let suStep = 1, suAvatar = null, pendingEmail = "", nickT = null;
   const distOpts = (sel) => `<option value="">Не указывать</option>` + DISTRICTS.map(([n]) => `<option${n === sel ? " selected" : ""}>${n}</option>`).join("");
   $("suDistrict").innerHTML = distOpts(""); $("cpDistrict").innerHTML = distOpts("");
-  // v14: живая проверка никнейма (формат — сразу, занятость — запросом через 400 мс)
-  function nickLive(input, hint) {
-    let t = null, seq = 0; const base = hint.textContent;
-    input.addEventListener("input", () => {
-      clearTimeout(t); const v = input.value.trim(), my = ++seq;
-      hint.className = "hint"; if (!v) { hint.textContent = base; return; }
-      const p = N.nickProblem(v); if (p) { hint.textContent = p; hint.classList.add("bad"); return; }
-      hint.textContent = "Проверяем...";
-      t = setTimeout(async () => { try { const r = await api.nicknameCheck(v); if (my !== seq) return; hint.textContent = r.ok ? "✓ Никнейм свободен" : r.error; hint.classList.add(r.ok ? "ok" : "bad"); } catch (e) { hint.textContent = base; } }, 400);
-    });
-  }
-  nickLive($("suNick"), $("suNickHint")); nickLive($("cpNick"), $("cpNickHint"));
-  function pwScore(pw) { let n = 0; if (pw.length >= 8) n++; if (/\d/.test(pw) && /[a-zа-я]/i.test(pw)) n++; if (/[A-ZА-Я]/.test(pw) && /[a-zа-я]/.test(pw)) n++; if (/[^\w\s]/.test(pw) || pw.length >= 12) n++; return pw.length < 8 ? Math.min(n, 1) : Math.max(n, 1); }
+  function pwScore(pw) { let n = 0; if (pw.length >= 8) n++; if (/\d/.test(pw) && /\p{L}/u.test(pw)) n++; if (/\p{Lu}/u.test(pw) && /\p{Ll}/u.test(pw)) n++; if (/[^\w\s]/.test(pw) || pw.length >= 12) n++; return pw.length < 8 ? Math.min(n, 1) : Math.max(n, 1); }
   SU.password.oninput = () => {
     const sc = pwScore(SU.password.value), L = ["", "слабый", "средний", "хороший", "надежный"];
     qa(".pw-meter i", SU).forEach((x, i) => (x.className = i < sc ? "s" + sc : ""));
     $("pwHint").textContent = SU.password.value ? "Пароль: " + L[sc] + (SU.password.value.length < 8 ? " · нужно минимум 8 символов" : "") : "Минимум 8 символов, буквы и цифры";
   };
+  // проверка никнейма на сервере, пока человек печатает
+  function nickInput(inp, hint) {
+    inp.addEventListener("input", () => {
+      inp.value = inp.value.replace(/^@+/, "").replace(/\s/g, "");
+      clearTimeout(nickT); hint.className = "hint"; hint.textContent = "Проверяем...";
+      const v = inp.value; if (v.length < 3) { hint.textContent = "3–20 символов: латинские буквы, цифры, точка и _"; return; }
+      nickT = setTimeout(async () => { try { const r = await api.nicknameAvailable(v); if (inp.value !== v) return; hint.className = "hint " + (r.ok ? "ok" : "bad"); hint.textContent = r.ok ? "✓ Никнейм доступен" : r.reason; } catch (e) { hint.textContent = ""; } }, 350);
+    });
+  }
+  nickInput(SU.nickname, $("nickHint"));
   function suGo(n) {
     suStep = n; qa(".st", SU).forEach((x) => x.classList.toggle("hidden", +x.dataset.st !== n));
     qa(".steps i", SU).forEach((x, i) => x.classList.toggle("on", i < n));
     SU.querySelector("[data-err]").classList.remove("on"); $("v-auth").scrollTop = 0;
     const st = SU.querySelector(`[data-st="${n}"]`); st.classList.remove("st-in"); void st.offsetWidth; st.classList.add("st-in");
   }
-  function suCheck(n) {
-    const email = SU.email.value.trim(), pw = SU.password.value;
-    if (n === 1) {
-      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return "Проверьте правильность email";
-      if (pw.length < 8) return "Пароль должен быть не короче 8 символов";
-      if (!/\d/.test(pw) || !/[a-zа-я]/i.test(pw)) return "В пароле нужны и буквы, и цифры";
-      if (pw !== SU.password2.value) return "Пароли не совпадают";
-    }
-    if (n === 2) {
-      const np = N.nickProblem(SU.nickname.value); if (np) return np;
-      if ($("suNickHint").classList.contains("bad")) return $("suNickHint").textContent;
-      if (!SU.rules.checked) return "Чтобы продолжить, примите правила сообщества";
-    }
+  function suCheck() {
+    const email = SU.email.value.trim(), pw = SU.password.value, nick = SU.nickname.value.trim();
+    if (!/^[A-Za-z0-9_.]{3,20}$/.test(nick) || /^[._]|[._]$|\.\./.test(nick)) return "Никнейм: 3–20 символов, латинские буквы, цифры, точка и _";
+    if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) === false) return "Проверьте правильность почты";
+    if (pw.length < 8) return "Пароль должен быть не короче 8 символов";
+    if (!/\d/.test(pw) || !/\p{L}/u.test(pw)) return "В пароле нужны и буквы, и цифры";
+    if (!SU.rules.checked) return "Чтобы продолжить, примите правила NEAR";
     return "";
   }
+  async function suCreate(btn) {
+    const er = suCheck(); if (er) return formErr(SU, er);
+    try {
+      const r = await busy(btn, async () => api.signUp({ nickname: SU.nickname.value.trim(), email: SU.email.value.trim(), password: SU.password.value, captchaToken: await Cap.token(capOf(SU)) }));
+      Obs.track("signup");
+      if (r.needsConfirm) { showSent(SU.email.value.trim(), true); resetSignup(); return; }
+      user = api.user();
+      const g = await Shield.gate(); if (g !== "active") return;
+      suGo(2);   // необязательный шаг: фото и район
+    } catch (err) { formErr(SU, err.message); } finally { Cap.reset(capOf(SU)); }
+  }
   SU.addEventListener("click", (e) => {
-    if (e.target.closest("[data-next]")) { const er = suCheck(suStep); if (er) return formErr(SU, er); suGo(suStep + 1); }
-    else if (e.target.closest("[data-prev]")) suGo(suStep - 1);
-    else if (e.target.closest("[data-skip]")) { SU.dataset.skip = "1"; SU.requestSubmit ? SU.requestSubmit() : SU.onsubmit(new Event("submit")); }
+    const nx = e.target.closest("[data-next]"); if (nx) return suCreate(nx);
+    if (e.target.closest("[data-prev]")) return suGo(1);
+    if (e.target.closest("[data-skip]")) { resetSignup(); afterLogin(true); }
   });
   SU.addEventListener("input", () => SU.querySelector("[data-err]").classList.remove("on"));
-  SU.addEventListener("keydown", (e) => { if (e.key === "Enter" && suStep < 3) { e.preventDefault(); const b = SU.querySelector(`[data-st="${suStep}"] [data-next]`); b && b.click(); } });
-  $("suAva").onchange = (e) => { const f = e.target.files[0]; if (!f) return; try { N.validateFile(f); } catch (er) { return toast(er.message); } suAvatar = f; $("suAvaPrev").style.backgroundImage = `url(${URL.createObjectURL(f)})`; $("suAvaPrev").textContent = ""; $("suAvaBox").querySelector("b").textContent = "Фото выбрано ✓"; };
+  SU.addEventListener("keydown", (e) => { if (e.key === "Enter" && suStep === 1) { e.preventDefault(); suCreate(SU.querySelector("[data-next]")); } });
+  $("suAva").onchange = (e) => { const f = e.target.files[0]; if (!f) return; try { N.validateFile(f); } catch (er) { return toast(er.message); } suAvatar = f; $("suAvaPrev").style.backgroundImage = `url(${URL.createObjectURL(f)})`; $("suAvaPrev").textContent = ""; $("suAvaBox").querySelector("b").textContent = "Фото выбрано"; };
   SU.onsubmit = async (e) => {
     e.preventDefault();
-    for (const n of [1, 2]) { const er = suCheck(n); if (er) { suGo(n); return formErr(SU, er); } }
-    // шаг 3 необязательный: "Пропустить" — без района, фото и Instagram
-    const skip = SU.dataset.skip === "1"; delete SU.dataset.skip;
-    const data = { nickname: SU.nickname.value.trim(), email: SU.email.value.trim(), password: SU.password.value, district: skip ? "" : SU.district.value };
-    const insta = skip ? "" : SU.instagram.value.trim();
-    if (skip) suAvatar = null;
-    try {
-      const r = await busy(SU.querySelector("[type=submit]"), async () => api.signUp({ ...data, captchaToken: await Cap.token(capOf(SU)) }));
-      if (r.needsConfirm) {
-        try { if (insta) localStorage.setItem("near_pending_insta", insta); } catch (er) {}
-        showSent(data.email, true);
-      } else {
-        user = api.user();
-        if (suAvatar || insta) { try { user = await api.updateProfile({ avatarFile: suAvatar || undefined, instagram: insta || undefined }); } catch (er) { toast(er.message); } }
-        afterLogin(true);
-      }
-      resetSignup();
-    } catch (err) { formErr(SU, err.message); if (/email/i.test(err.message)) suGo(1); else if (/[Нн]икнейм/.test(err.message)) suGo(2); } finally { Cap.reset(capOf(SU)); }
+    const insta = SU.instagram.value.trim();
+    try { if (suAvatar || insta || SU.district.value) user = await busy(SU.querySelector("[type=submit]"), () => api.updateProfile({ avatarFile: suAvatar || undefined, instagram: insta || undefined, district: SU.district.value || null })); }
+    catch (er) { toast(er.message); }
+    resetSignup(); afterLogin(true);
   };
-  function resetSignup() { SU.reset(); suAvatar = null; $("suAvaPrev").style.backgroundImage = ""; $("suAvaPrev").textContent = "📷"; $("suAvaBox").querySelector("b").textContent = "Добавить фото"; $("suNickHint").className = "hint"; suGo(1); SU.password.oninput(); }
+  function resetSignup() { SU.reset(); suGo(1); $("nickHint").className = "hint"; $("nickHint").textContent = "3–20 символов: латинские буквы, цифры, точка и _"; suAvatar = null; $("suAvaPrev").style.backgroundImage = ""; $("suAvaPrev").textContent = "📷"; $("suAvaBox").querySelector("b").textContent = "Добавить фото"; qa("[data-gender]").forEach((g) => { delete g.dataset.val; qa("[data-g]", g).forEach((x) => x.classList.remove("on")); }); suGo(1); SU.password.oninput(); }
   /* ---------- подтверждение почты ---------- */
   let resendT = 0;
   function showSent(email, fresh) {
@@ -614,26 +582,20 @@
   qa("[data-google]").forEach((b) => (b.onclick = async () => {
     try { b.disabled = true; await api.signInWithGoogle(); } catch (er) { formErr(b.closest("form"), er.message); } finally { setTimeout(() => (b.disabled = false), 1500); }
   }));
-  // после Google или для аккаунта v12: выбрать никнейм (имя, фамилия и пол больше не нужны), район, правила
+  // после Google (или старого аккаунта): дозаполнить пол, район, правила
   function needsCompletion(u) { return u && (!u.nickname || !u.accepted_rules); }
   function showComplete() {
-    const f = $("f-complete"); f.nickname.value = (user && user.nickname) || ""; $("cpNickHint").className = "hint"; $("cpDistrict").innerHTML = distOpts((user && user.district) || "");
-    f.querySelector("h1").textContent = user && user.nickname ? "Почти готово" : "Выберите никнейм";
-    f.querySelector(".sub").textContent = user && user.provider === "google" ? "Вы вошли через Google. Имя из Google мы не показываем — соседи увидят только никнейм"
-      : "Мы обновили профиль: вместо имени и пола теперь никнейм. Старые имя и пол удаляются";
+    const f = $("f-complete"); f.nickname.value = (user && user.nickname) || ""; $("cpDistrict").innerHTML = distOpts((user && user.district) || "");
+    f.querySelector(".sub").textContent = user && user.provider === "google" ? "Вы вошли через Google. Выберите никнейм" : "Мы обновили NEAR: теперь у каждого есть никнейм";
     showAuth("complete"); $("guestBtn").classList.add("hidden");
   }
   $("f-complete").onsubmit = async (e) => {
-    e.preventDefault(); const f = e.target, nick = f.nickname.value.trim();
-    const np = N.nickProblem(nick); if (np) return formErr(f, np);
+    e.preventDefault(); const f = e.target;
+    const r = await api.nicknameAvailable(f.nickname.value.trim()).catch((er) => ({ ok: false, reason: er.message }));
+    if (!r.ok && !(user && user.nickname === f.nickname.value.trim().toLowerCase())) return formErr(f, r.reason);
     if (!f.rules.checked) return formErr(f, "Чтобы продолжить, примите правила сообщества");
-    try {
-      user = await busy(f.querySelector("[type=submit]"), async () => {
-        await api.updateProfile({ district: f.district.value || null, acceptRules: true });
-        return user && user.nickname === nick ? api.user() : api.setNickname(nick);
-      });
-      afterLogin(true);
-    } catch (er) { formErr(f, er.message); }
+    try { user = await busy(f.querySelector("[type=submit]"), () => api.updateProfile({ nickname: f.nickname.value.trim(), district: f.district.value || null, acceptRules: true })); afterLogin(true); }
+    catch (er) { formErr(f, er.message); }
   };
   $("f-forgot").onsubmit = async (e) => {
     e.preventDefault(); const f = e.target, email = (new FormData(f).get("email") || "").trim();
@@ -649,13 +611,15 @@
     try { await busy(f.querySelector("[type=submit]"), () => api.updatePassword(pw, resetEmail)); resetEmail = null; history.replaceState(null, "", location.pathname); user = api.user(); afterLogin(); toast("✓ Пароль изменен"); }
     catch (err) { formErr(f, err.message); }
   };
-  function afterLogin(isNew) {
+  async function afterLogin(isNew) {
+    if (!user) return;
+    const g = await Shield.gate().catch((e) => { toast(e.message); return "error"; });
+    if (g !== "active") return;
     if (needsCompletion(user)) return showComplete();
     hideAuth(); qa(".auth-p").forEach((f) => f.reset && f.reset());
     applyPendingInsta(); startSeen(); Push.sync(true);
-    toast(isNew ? "🎉 Добро пожаловать в NEAR, " + (user && user.name) + "!" : "👋 Привет, " + (user && user.name) + "!");
-    if (isNew) Obs.track("signup");
-    onUserChange(); runIntent();
+    toast(isNew ? "🎉 Добро пожаловать в NEAR, @" + (user && user.nickname) + "!" : "👋 Привет, @" + (user && (user.nickname || user.name)) + "!");
+    onUserChange(); runIntent(); setTimeout(promptReviews, 1500);
   }
   function onUserChange() {
     loadHidden(); loadPrefs(); profCounts = null; Push.lastLoc = null; Push.sync(true); pushInvite(); guestBar(); chatSeen = -1;
@@ -663,6 +627,258 @@
     feedDirty = true; wide = null; loadFeed(); refreshBadge(); refreshChatBadge(); if (cur() === "v-prof") renderProfile(); if (cur() === "v-chats") renderChats();
     if (mapReady) loadMapPosts();
   }
+
+/* ===== 15-shield.js ===== */
+  /* =====================================================
+     NEAR SHIELD: вход с нового устройства, экран блокировки, центр безопасности
+     Все решения принимает сервер; приложение только показывает состояние.
+     ===================================================== */
+  const Shield = {
+    busy: null, acc: null, offset: 0, timer: null,
+    // проверка после входа, при запуске и при возвращении в приложение
+    gate() {
+      if (!user || !api || !api.sessionBegin) return Promise.resolve("guest");
+      if (this.busy) return this.busy;
+      this.busy = (async () => {
+        let r;
+        try { r = await api.sessionBegin(); }
+        catch (e) {
+          if (!navigator.onLine) { const last = this.lastKnown(); if (last && /banned/.test(last.state)) { this.banScreen(last, true); return "banned"; } return "offline"; }
+          throw e;
+        }
+        if (!r) return "active";
+        if (r.state === "banned") { this.banScreen(r.account); return "banned"; }
+        if (r.state === "revoked") { await this.revoked(r.reason); return "revoked"; }
+        if (r.state === "challenge") { this.deviceScreen(r); return "challenge"; }
+        this.closeOverlay();
+        this.applyAccount(r.account);
+        return "active";
+      })().finally(() => setTimeout(() => (this.busy = null), 50));
+      return this.busy;
+    },
+    lastKey: () => "near_acc_" + (user ? user.id : ""),
+    lastKnown() { try { return JSON.parse(localStorage.getItem(this.lastKey()) || "null"); } catch (e) { return null; } },
+    remember(acc) { try { if (acc) localStorage.setItem(this.lastKey(), JSON.stringify(acc)); } catch (e) {} },
+    applyAccount(acc) {
+      this.acc = acc || null; this.remember(acc);
+      const b = $("restrictBar"); if (!b) return;
+      const on = acc && acc.state === "restricted";
+      b.classList.toggle("hidden", !on);
+      if (on) b.innerHTML = `⚠️ Действия ограничены до ${acc.expires_at ? fmtWhen(acc.expires_at) : "решения модератора"} · решение ${esc(acc.decision_no || "")} <button class="lnk" id="rbMore">Подробнее</button>`;
+      if (on) $("rbMore").onclick = () => this.banScreen(acc);
+    },
+    overlay(cls, html) {
+      const o = $("shieldOv");
+      o.className = "shield-ov " + cls; o.innerHTML = `<div class="sh-card">${html}</div>`;
+      document.body.classList.add("shielded");
+      requestAnimationFrame(() => o.classList.add("on"));
+      return o;
+    },
+    closeOverlay() { const o = $("shieldOv"); clearInterval(this.timer); if (o && o.classList.contains("on")) { o.classList.remove("on"); setTimeout(() => { if (!o.classList.contains("on")) { o.innerHTML = ""; o.className = "shield-ov"; } }, 220); } document.body.classList.remove("shielded"); },
+
+    /* ---------- вход с нового устройства ---------- */
+    deviceScreen(ch) {
+      const o = this.overlay("device", `
+        <div class="sh-ico">${IC.shield || "🛡"}</div>
+        <h2>Вход с нового устройства</h2>
+        <p class="sh-sub">Ваш аккаунт уже используется на другом устройстве.</p>
+        <div class="dev-card"><span class="dev-i">📱</span><div><b>${esc(ch.old_device || "Другое устройство")}</b><small>Последняя активность: ${ch.old_last_seen ? timeAgo(ch.old_last_seen) : "недавно"}</small><em>● Активная сессия</em></div></div>
+        <div class="dev-swap" aria-hidden="true"><span class="ph old">✕</span><i></i><span class="ph new">✓</span></div>
+        <div class="dev-lbl" aria-hidden="true"><span>Старое</span><span>Новое</span></div>
+        <p class="sh-note">Мы отправили код на вашу почту. Введите его — предыдущая сессия будет автоматически завершена.</p>
+        ${ch.demo_code ? `<p class="demo-code">🧪 Демо-режим: код <b>${esc(ch.demo_code)}</b></p>` : ""}
+        <form id="devForm" class="code-form" autocomplete="one-time-code">
+          <input id="devCode" inputmode="numeric" pattern="[0-9]*" maxlength="6" placeholder="••••••" aria-label="Код из письма" autocomplete="one-time-code">
+          <div class="err" id="devErr"></div>
+          <button class="btn btn-main big" type="submit" id="devOk">Подтвердить вход</button>
+        </form>
+        <div class="row2"><button class="btn btn-ghost" id="devResend" disabled>Отправить код еще раз</button><button class="btn btn-ghost" id="devCancel">Отмена</button></div>
+        <p class="sh-foot">Если подтверждение не пройдено, старая сессия продолжает работать.</p>`);
+      const resend = $("devResend"); let left = Math.max(0, Math.round((new Date(ch.resend_at) - new Date(ch.server_now || Date.now())) / 1000));
+      clearInterval(this.timer);
+      const tick = () => { if (left > 0) { resend.disabled = true; resend.textContent = `Еще раз через ${left} с`; left--; } else { resend.disabled = false; resend.textContent = "Отправить код еще раз"; } };
+      tick(); this.timer = setInterval(tick, 1000);
+      setTimeout(() => $("devCode") && $("devCode").focus(), 300);
+      $("devCode").oninput = (e) => { e.target.value = e.target.value.replace(/\D/g, "").slice(0, 6); $("devErr").classList.remove("on"); };
+      $("devForm").onsubmit = async (e) => {
+        e.preventDefault(); const code = $("devCode").value;
+        if (code.length !== 6) { $("devErr").textContent = "Введите 6 цифр из письма"; $("devErr").classList.add("on"); return; }
+        let r; try { r = await busy($("devOk"), () => api.sessionConfirm(ch.challenge_id, code)); } catch (er) { $("devErr").textContent = er.message; $("devErr").classList.add("on"); return; }
+        if (r.state === "banned") return this.banScreen(r.account);
+        if (!r.ok) {
+          $("devErr").textContent = r.error + (r.attempts_left != null && !r.final ? ` · осталось попыток: ${r.attempts_left}` : ""); $("devErr").classList.add("on");
+          if (r.final) setTimeout(() => this.abandon(), 1600);
+          return;
+        }
+        o.classList.add("confirmed");
+        $("devOk").innerHTML = '<span class="okmark" aria-hidden="true"></span> Вход подтвержден';
+        setTimeout(() => { this.closeOverlay(); Obs.track("session_confirmed"); afterLogin(false); }, 650);
+      };
+      resend.onclick = async () => { const r = await api.sessionResend(ch.challenge_id).catch((er) => ({ ok: false, error: er.message })); toast(r.ok ? "📬 Новый код отправлен" + (r.demo_code ? ` (демо: ${r.demo_code})` : "") : r.error); if (r.ok) { left = 60; tick(); } };
+      $("devCancel").onclick = () => this.abandon();
+    },
+    async abandon() { await api.sessionCancel().catch(() => {}); user = null; this.closeOverlay(); showAuth("login", "Вход отменен. Старая сессия продолжает работать"); },
+    // старое устройство: сессию завершил вход на другом
+    async revoked(reason) {
+      const txt = reason === "new_device" ? "Вы вышли из аккаунта: выполнен вход на другом устройстве"
+        : reason === "banned" ? "Сессия завершена решением модератора" : reason === "password_changed" ? "Пароль изменен. Войдите снова" : "Сессия завершена. Войдите снова";
+      const was = user && user.id;
+      try { await api.signOut(); } catch (e) {}
+      user = null; Cache.wipe(was); cache.clear(); onUserChange();
+      this.closeOverlay(); showAuth("login", txt);
+    },
+    // любая ошибка сервера с признаком отозванной сессии или бана
+    handle(e) {
+      const m = (e && e.message) || "";
+      if (/выполнен вход на другом устройстве|session_revoked/.test(m)) { this.revoked("new_device"); return true; }
+      if (/Аккаунт заблокирован/.test(m)) { api.accountState().then((a) => this.banScreen(a)).catch(() => {}); return true; }
+      if (/Подтвердите вход с этого устройства/.test(m)) { this.gate(); return true; }
+      return false;
+    },
+
+    /* ---------- экран блокировки ---------- */
+    banScreen(acc, offline) {
+      if (!acc) return;
+      this.acc = acc; this.remember(acc);
+      this.offset = acc.server_now ? new Date(acc.server_now).getTime() - Date.now() : 0;
+      const perm = acc.state === "banned_permanent", restricted = acc.state === "restricted";
+      const term = perm ? "Бессрочно" : acc.expires_at ? durWords(new Date(acc.expires_at) - new Date(acc.starts_at || acc.server_now)) : "";
+      this.overlay("ban", `
+        <div class="sh-ico red">⛔</div>
+        <h2>${restricted ? "Действия ограничены" : "Аккаунт заблокирован"}</h2>
+        <p class="sh-sub">Доступ к функциям NEAR ${restricted ? "частично " : ""}ограничен за нарушение правил сообщества.</p>
+        <div class="ban-box"><small>Причина</small><b>${esc(acc.reason || acc.rule_title || "Нарушение правил")}</b>
+          <div class="ban-row"><span><small>Срок блокировки</small><b>${esc(term)}</b></span><span><small>Номер решения</small><b>${esc(acc.decision_no || "—")}</b></span></div></div>
+        ${perm ? "" : `<div class="ban-timer" aria-live="off"><small>До окончания блокировки</small><div class="tm"><span><b id="tD">0</b><i>Дней</i></span><span><b id="tH">0</b><i>Часов</i></span><span><b id="tM">0</b><i>Минут</i></span><span><b id="tS">0</b><i>Секунд</i></span></div></div>`}
+        ${offline ? '<p class="sh-note">Нет связи. Показано последнее известное состояние.</p>' : ""}
+        <p class="sh-note">Создание новых аккаунтов для обхода блокировки запрещено.</p>
+        <button class="btn btn-main big" id="banAppeal">${acc.appeal ? "Апелляция: " + ({ pending: "на рассмотрении", in_review: "на рассмотрении", upheld: "решение оставлено", overturned: "решение отменено" }[acc.appeal] || acc.appeal) : "Подать апелляцию"}</button>
+        <button class="btn btn-ghost big" id="banRules">Правила сообщества</button>
+        <div class="ban-links"><button class="lnk" id="banHelp">Связаться с поддержкой</button>${restricted ? '<button class="lnk" id="banClose">Продолжить просмотр</button>' : '<button class="lnk" id="banOut">Выйти</button><button class="lnk danger" id="banDel">Удалить аккаунт</button>'}</div>`);
+      $("banAppeal").disabled = !!acc.appeal && acc.appeal !== "pending" && acc.appeal !== "in_review" ? false : !!acc.appeal;
+      $("banAppeal").onclick = () => this.appealForm(acc);
+      $("banRules").onclick = () => showRules();
+      $("banHelp").onclick = () => { if (CFG.SUPPORT_EMAIL) location.href = "mailto:" + CFG.SUPPORT_EMAIL + "?subject=" + encodeURIComponent("NEAR: решение " + (acc.decision_no || "")); else bugSheet(); };
+      if ($("banOut")) $("banOut").onclick = async () => { this.closeOverlay(); const was = user && user.id; await api.signOut().catch(() => {}); user = null; Cache.wipe(was); onUserChange(); showAuth("login"); };
+      if ($("banDel")) $("banDel").onclick = () => deleteAccountFlow();
+      if ($("banClose")) $("banClose").onclick = () => { this.closeOverlay(); this.applyAccount(acc); };
+      clearInterval(this.timer);
+      if (!perm && acc.expires_at) {
+        const end = new Date(acc.expires_at).getTime();
+        const tick = () => {
+          const left = Math.max(0, end - (Date.now() + this.offset));
+          const d = Math.floor(left / 864e5), h = Math.floor(left / 36e5) % 24, mi = Math.floor(left / 6e4) % 60, s = Math.floor(left / 1e3) % 60;
+          [["tD", d], ["tH", h], ["tM", mi], ["tS", s]].forEach(([id, v]) => { const el = $(id); if (el && el.textContent !== String(v).padStart(2, "0")) el.textContent = String(v).padStart(2, "0"); });
+          // срок истек: разблокирует только сервер (повторная проверка), локально — нет
+          if (left <= 0 && !offline) { clearInterval(this.timer); setTimeout(() => this.gate(), 800); }
+        };
+        tick(); this.timer = setInterval(tick, 1000);
+      }
+    },
+    appealForm(acc) {
+      if (acc.appeal) return toast("Апелляция уже подана. Ответ придет в уведомлениях, обычно в течение 72 часов");
+      openSheet("Апелляция", `<p class="muted" style="font-size:13.5px;margin-bottom:10px">Решение ${esc(acc.decision_no || "")}. Опишите, почему считаете его ошибочным. Апелляцию рассмотрит другой модератор, обычно в течение 72 часов.</p>
+        <textarea id="apTx" maxlength="1000" rows="5" placeholder="Например: это было объявление о потере, а не реклама"></textarea>
+        <div class="sheet-btns"><button class="btn btn-ghost" id="apNo">Отмена</button><button class="btn btn-main" id="apYes">Отправить</button></div>`);
+      $("apNo").onclick = closeSheet;
+      $("apYes").onclick = async () => {
+        try { const r = await busy($("apYes"), () => api.appealSubmit(acc.ban_id, $("apTx").value)); closeSheet(); toast("✅ Апелляция отправлена"); this.banScreen({ ...acc, appeal: r.status }); }
+        catch (e) { toast(e.message); }
+      };
+    },
+
+    /* ---------- центр безопасности ---------- */
+    async center() {
+      go("sv-security");
+      const box = $("secBody"); box.innerHTML = '<div class="spin"></div>';
+      let sessions = [], acc = null;
+      try { [sessions, acc] = await Promise.all([api.sessionList(), api.accountState()]); } catch (e) { box.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+      const curS = sessions.find((s) => s.current) || sessions.find((s) => s.status === "active");
+      const ok = acc && acc.state === "active" && user.verified;
+      const row = (k, ico, t, sub) => `<button class="sec-row" data-sec="${k}"><span class="sec-i">${ico}</span><div><b>${t}</b><small>${sub}</small></div><span class="chev">›</span></button>`;
+      box.innerHTML = `
+        <div class="sec-top${ok ? "" : " warn"}"><span>${ok ? "✅" : "⚠️"}</span><div><b>${ok ? "Аккаунт защищен" : acc.state === "restricted" ? "Действия ограничены" : /banned/.test(acc.state) ? "Аккаунт заблокирован" : "Подтвердите почту"}</b><small>${user.verified ? "Электронная почта подтверждена" : "Почта не подтверждена"}</small></div></div>
+        ${curS ? `<div class="sec-dev"><span>📱</span><div><b>${esc(curS.device_label || "Это устройство")}</b><small>Текущее устройство</small></div><em>Активно</em></div>` : ""}
+        ${row("secPw", "🔑", "Изменить пароль", "Управление доступом")}
+        ${row("secMail", "✉️", "Электронная почта", user.verified ? "Подтверждена" : "Не подтверждена")}
+        ${row("secHist", "🕘", "История входов", "Последние авторизации")}
+        ${row("secBlock", "🚫", "Заблокированные пользователи", "Управление списком")}
+        ${row("secReports", "🚩", "Мои жалобы", "Статусы рассмотрения")}
+        ${row("secViol", "🛡", "Мои нарушения", "Предупреждения и ограничения")}
+        ${row("secAppeals", "📄", "Апелляции", "Обжалование решений")}
+        ${row("secHelp", "🎧", "Поддержка NEAR", "Связаться с нами")}
+        <button class="btn btn-ghost big danger-o mt12" id="secEnd">Завершить активную сессию</button>
+        <p class="dim center" style="font-size:11.5px;margin-top:10px">Активной может быть только одна сессия. Вход с нового устройства подтверждается кодом из письма.</p>`;
+      const A = { secPw: () => changePasswordSheet(), secMail: () => this.changeEmail(), secHist: () => this.history(sessions), secBlock: () => blockedSheet(),
+        secReports: () => this.myReports(), secViol: () => this.violations(false), secAppeals: () => this.violations(true),
+        secHelp: () => (CFG.SUPPORT_EMAIL ? (location.href = "mailto:" + CFG.SUPPORT_EMAIL) : bugSheet()) };
+      qa("[data-sec]", box).forEach((b) => (b.onclick = () => A[b.dataset.sec]()));
+      $("secEnd").onclick = async () => { if (!(await confirmSheet("Завершить сессию?", "Вы выйдете из NEAR на этом устройстве.", "Выйти", true))) return; await logout(); };
+    },
+    history(list) {
+      const R = { new_device: "вход на другом устройстве", logout: "выход", banned: "решение модератора", password_changed: "смена пароля", same_device: "повторный вход", cancelled: "вход отменен", deleted: "удаление" };
+      openSheet("История входов", list.length ? list.map((s) => `<div class="hist-row"><b>${esc(s.device_label || "Устройство")}${s.current ? " · это устройство" : ""}</b>
+        <small>${fmtWhen(s.created_at)} · ${s.status === "active" ? '<em class="ok">активна</em>' : s.status === "pending" ? "ждет подтверждения" : "завершена" + (s.revoke_reason ? ": " + (R[s.revoke_reason] || s.revoke_reason) : "")}</small></div>`).join("")
+        : '<div class="dim">История пуста</div>');
+    },
+    async violations(appealsOnly) {
+      const list = (await api.myDecisions().catch(() => [])).filter((d) => !appealsOnly || d.appeal_status);
+      const K = { warning: "Предупреждение", restricted: "Ограничение", ban: "Блокировка" }, S = { active: "действует", expired: "срок истек", revoked: "отменено" };
+      const A = { pending: "на рассмотрении", in_review: "на рассмотрении", upheld: "решение оставлено", overturned: "решение отменено" };
+      openSheet(appealsOnly ? "Апелляции" : "Мои нарушения", list.length ? list.map((d) => `<div class="dec-row"><div><b>${K[d.kind] || d.kind} · ${esc(d.rule_title || d.rule)}</b>
+        <small>${esc(d.decision_no)} · ${fmtWhen(d.starts_at)}${d.expires_at ? " → " + fmtWhen(d.expires_at) : d.kind === "ban" ? " · бессрочно" : ""} · ${S[d.status] || d.status}</small>
+        <p>${esc(d.reason)}</p>${d.appeal_status ? `<em>Апелляция: ${A[d.appeal_status] || d.appeal_status}${d.appeal_note ? " — " + esc(d.appeal_note) : ""}</em>` : ""}</div>
+        ${d.status === "active" && !d.appeal_status && d.kind !== "warning" ? `<button class="btn btn-ghost sm" data-appeal="${d.id}">Обжаловать</button>` : ""}</div>`).join("")
+        : `<div class="empty-mini">${appealsOnly ? "Апелляций нет" : "Нарушений нет — спасибо, что соблюдаете правила 💜"}</div>`);
+      qa("[data-appeal]", $("bsList")).forEach((b) => (b.onclick = async () => { const acc = await api.accountState(); closeSheet(); this.appealForm({ ...acc, ban_id: b.dataset.appeal, decision_no: (list.find((x) => x.id === b.dataset.appeal) || {}).decision_no }); }));
+    },
+    async myReports() {
+      const list = await (api.myReports ? api.myReports() : Promise.resolve([])).catch(() => []);
+      openSheet("Мои жалобы", list.length ? list.map((r) => `<div class="hist-row"><b>${esc(REASON_TXT(r.reason))}</b><small>${fmtWhen(r.created_at)} · ${{ open: "на рассмотрении", resolved: "приняты меры", dismissed: "нарушений не найдено" }[r.status] || r.status}</small></div>`).join("")
+        : '<div class="empty-mini">Вы еще не отправляли жалоб</div>');
+    },
+    changeEmail() {
+      // повторное подтверждение личности, затем письмо на новую почту
+      openSheet("Изменить почту", `<p class="muted" style="font-size:13px;margin-bottom:10px">Сначала подтвердите, что это вы: введите текущий пароль.</p>
+        <input id="ceOld" type="password" placeholder="Текущий пароль" autocomplete="current-password"><input id="ceNew" type="email" class="mt8" placeholder="Новая почта" autocomplete="email">
+        <div class="sheet-btns"><button class="btn btn-ghost" id="ceNo">Отмена</button><button class="btn btn-main" id="ceYes">Изменить</button></div>`);
+      $("ceNo").onclick = closeSheet;
+      $("ceYes").onclick = async () => {
+        try {
+          await busy($("ceYes"), async () => { await api.reauth($("ceOld").value); await api.changeEmail($("ceNew").value); });
+          closeSheet(); toast("📬 Подтвердите новую почту по ссылке из письма");
+        } catch (e) { toast(e.message); }
+      };
+    }
+  };
+  const REASON_TXT = (r) => (N.REASON_LABELS && N.REASON_LABELS[r]) || r;
+  function durWords(ms) {
+    const h = Math.round(ms / 36e5);
+    if (h <= 24) return h + " " + plural(h, "час", "часа", "часов");
+    const d = Math.round(h / 24); return d + " " + plural(d, "день", "дня", "дней");
+  }
+  function changePasswordSheet() {
+    openSheet("Изменить пароль", `<input id="cpOld" type="password" placeholder="Текущий пароль" autocomplete="current-password"><input id="cpNew" type="password" class="mt8" placeholder="Новый пароль (минимум 8 символов)" autocomplete="new-password">
+      <p class="dim" style="font-size:11.5px;margin-top:8px">После смены пароля все остальные сессии завершатся.</p>
+      <div class="sheet-btns"><button class="btn btn-ghost" id="cpNo">Отмена</button><button class="btn btn-main" id="cpYes">Сохранить</button></div>`);
+    $("cpNo").onclick = closeSheet;
+    $("cpYes").onclick = async () => {
+      const nw = $("cpNew").value; if (nw.length < 8 || !/\d/.test(nw) || !/\p{L}/u.test(nw)) return toast("Пароль: минимум 8 символов, буквы и цифры");
+      try { await busy($("cpYes"), async () => { await api.reauth($("cpOld").value); await api.updatePassword(nw); }); closeSheet(); toast("🔑 Пароль изменен"); Shield.gate(); }
+      catch (e) { toast(e.message); }
+    };
+  }
+  // возвращение в приложение: сервер мог завершить сессию или вынести решение
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden || !user || !api || !api.sessionState) return;
+    api.sessionState().then((s) => {
+      if (!s) return;
+      if (s.state === "revoked") return Shield.revoked(s.reason);
+      if (s.account && /banned/.test(s.account.state)) return Shield.banScreen(s.account);
+      if ($("shieldOv").classList.contains("ban") && s.account && !/banned/.test(s.account.state)) Shield.closeOverlay();
+      Shield.applyAccount(s.account);
+    }).catch(() => {});
+  });
 
 /* ===== 20-location.js ===== */
   /* =====================================================
@@ -765,6 +981,9 @@
     share: '<svg viewBox="0 0 24 24" width="22" height="22"><path d="M21 3 10.2 13.8M21 3l-6.8 18-3.9-7.2L3 9.9 21 3z" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round" stroke-linecap="round"/></svg>',
     save: '<svg viewBox="0 0 24 24" width="22" height="22"><path d="M18.5 21 12 15.8 5.5 21V4.5a1.5 1.5 0 0 1 1.5-1.5h10a1.5 1.5 0 0 1 1.5 1.5z" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"/></svg>',
     saveOn: '<svg viewBox="0 0 24 24" width="22" height="22"><path d="M18.5 21 12 15.8 5.5 21V4.5a1.5 1.5 0 0 1 1.5-1.5h10a1.5 1.5 0 0 1 1.5 1.5z" fill="#ffd166" stroke="#ffd166" stroke-width="1.9" stroke-linejoin="round"/></svg>',
+    mute: '<svg viewBox="0 0 24 24" width="20" height="20"><path d="M4 9h4l5-4v14l-5-4H4z" fill="currentColor"/><path d="m16 9 5 6m0-6-5 6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>',
+    sound: '<svg viewBox="0 0 24 24" width="20" height="20"><path d="M4 9h4l5-4v14l-5-4H4z" fill="currentColor"/><path d="M16.5 8.5a5 5 0 0 1 0 7M19 6a8.5 8.5 0 0 1 0 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>',
+    shield: '<svg viewBox="0 0 24 24" width="30" height="30"><path d="M12 2.8 4.5 5.8v5.6c0 4.6 3.1 8.4 7.5 9.8 4.4-1.4 7.5-5.2 7.5-9.8V5.8z" fill="none" stroke="#A54EE7" stroke-width="1.8"/><path d="m8.6 12.2 2.4 2.3 4.6-4.8" fill="none" stroke="#A54EE7" stroke-width="2" stroke-linecap="round"/></svg>',
     more: '<svg viewBox="0 0 24 24" width="20" height="20"><circle cx="5" cy="12" r="1.8" fill="currentColor"/><circle cx="12" cy="12" r="1.8" fill="currentColor"/><circle cx="19" cy="12" r="1.8" fill="currentColor"/></svg>'
   };
   const fmtDur = (s) => { s = Math.round(s || 0); return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0"); };
@@ -781,8 +1000,8 @@
     const r = m0.w && m0.h ? Math.max(0.6, Math.min(1.25, m0.h / m0.w)) : m0.type === "video" ? 1.25 : 1;
     const slides = p.media.map((m, i) => {
       const sh = shieldFor(m, p.user_id);
-      if (m.type === "video") return `<div class="gs vid" data-i="${i}"><video data-src="${esc(m.url)}${m.poster ? "" : "#t=0.3"}"${m.poster ? ` data-poster="${esc(m.poster)}"` : ""} playsinline muted preload="none"></video>
-        <button class="vplay" type="button" aria-label="Смотреть видео">▶</button><span class="vdur${m.duration ? "" : " hidden"}">${m.duration ? fmtDur(m.duration) : ""}</span><button class="vfs" type="button" aria-label="На весь экран">⛶</button><span class="vload hidden"><i class="mini-spin"></i></span></div>`;
+      if (m.type === "video") return videoSlide(p, m, i);
+      if (m.state && m.state !== "approved") return stateSlide(p, m, i);
       if (sh) return `<div class="gs blur-wrap" data-reveal data-i="${i}"><img data-src="${esc(m.thumb || m.url)}" alt="" decoding="async"><div class="shield">${sh}<button type="button">Показать</button></div></div>`;
       return `<div class="gs" data-img data-i="${i}"><img data-src="${esc(m.url)}"${m.thumb && m.thumb !== m.url ? ` data-thumb="${esc(m.thumb)}"` : ""} alt="" decoding="async"></div>`;
     }).join("");
@@ -798,29 +1017,42 @@
     const h = (Date.now() - new Date(p.created_at)) / 3600e3;
     return h < 24 ? '<span class="nst live">● Актуально</span>' : "";
   }
+  function meetBar(p) {
+    if (!p.event) return "";
+    const e = p.event, closed = p.status === "closed" || e.status === "cancelled", started = new Date(e.starts_at) < Date.now();
+    const mc = p.category === "meetup" ? N.MEET_CATS[e.meet_cat] || N.MEET_CATS.other : null;
+    const full = e.capacity && e.members >= e.capacity && !e.joined;
+    const btn = closed ? `<span class="mb-st">${e.status === "cancelled" ? "Отменена" : "Завершена"}</span>`
+      : started ? (p.category === "meetup" ? `<button class="mb-go ghost" data-meet="${p.id}">Участники</button>` : "")
+      : `<button class="mb-go${e.joined ? " on" : ""}" data-join="${p.id}"${full ? " disabled" : ""}>${e.joined ? "✓ Вы идете" : full ? "Мест нет" : p.category === "meetup" ? "Вступить" : "Иду"}</button>`;
+    return `<div class="meet-bar"><div class="mb-i">${mc ? `<b>${mc.e} ${mc.n}</b>` : ""}<span>🗓 ${fmtWhen(e.starts_at)}</span><span>👥 <b class="mb-n">${e.members}${e.capacity ? "/" + e.capacity : ""}</b></span></div>${btn}</div>`;
+  }
   function card(p) {
     const c = CATS[p.category] || CATS.talk, closed = p.status === "closed", long = p.text.length > LONG_TEXT || (p.text.match(/\n/g) || []).length > 4;
-    const join = p.event && !closed ? `<button class="act${p.event.joined ? " joined" : ""}" data-join="${p.id}">${p.event.joined ? "✓ Иду" : "Иду"} · ${p.event.members}${p.event.capacity ? "/" + p.event.capacity : ""}</button>` : "";
+    const catName = p.category === "meetup" ? "Встреча" : c.n;
     return `<article class="post${closed || expired(p) ? " closed" : ""}${p.is_sos ? " sos" : ""}" data-post="${p.id}">
       <header class="post-h"><span class="who-link" data-user="${p.user_id}">${ava(p.author, c.c)}</span>
-        <div class="who"><b class="who-link" data-user="${p.user_id}" translate="no">${esc(p.author.name)}${vBadge(p.author)}</b><span>${timeAgo(p.created_at)}${p.updated_at && new Date(p.updated_at) - new Date(p.created_at) > 60000 ? " · изменено" : ""}</span></div>
-        <span class="cat" style="--c:${c.c}">${p.is_sos ? "🆘 SOS" : c.e + " " + c.n}</span><button class="pmenu" data-pmenu="${p.id}" aria-label="Меню публикации">${IC.more}</button></header>
+        <div class="who"><b class="who-link" data-user="${p.user_id}" translate="no">@${esc(p.author.nickname || p.author.name)}${vBadge(p.author)}</b><span>${timeAgo(p.created_at)}${p.updated_at && new Date(p.updated_at) - new Date(p.created_at) > 60000 ? " · изменено" : ""}</span></div>
+        <button class="pmenu" data-pmenu="${p.id}" aria-label="Меню публикации">${IC.more}</button></header>
+      <div class="post-place"><span class="cat" style="--c:${c.c}">${p.is_sos ? "🆘 SOS" : c.e + " " + catName}</span><button data-onmap="${p.id}">📍 ${fmtDist(D(p))} от вас</button>${statusChip(p)}</div>
       <div class="post-d${long ? " clamp" : ""}" translate="no">${esc(p.text)}</div>${long ? '<button class="more-t" data-moretext>Показать полностью</button>' : ""}
       ${galleryHtml(p)}
-      <div class="post-near"><button data-onmap="${p.id}">📍 ${fmtDist(D(p))} от вас</button>${statusChip(p)}${p.event ? `<span>🗓 ${fmtWhen(p.event.starts_at)}</span>` : ""}</div>
-      <div class="post-f"><button class="ab lk${p.liked ? " on" : ""}" data-like="${p.id}" aria-label="Нравится">${p.liked ? IC.heartOn : IC.heart}<b>${p.likes || ""}</b></button>
-        <button class="ab" data-cmt="${p.id}" aria-label="Комментарии">${IC.cmt}<b>${p.comments || ""}</b></button>
-        <button class="ab" data-share="${p.id}" aria-label="Поделиться">${IC.share}</button><span class="sp"></span>${join}
-        <button class="ab sv${p.saved ? " on" : ""}" data-save="${p.id}" aria-label="Сохранить">${p.saved ? IC.saveOn : IC.save}</button></div>
+      ${meetBar(p)}
+      <div class="acts4"><button class="ab4 lk${p.liked ? " on" : ""}" data-like="${p.id}" aria-pressed="${p.liked}" aria-label="Нравится, ${p.likes}">${p.liked ? IC.heartOn : IC.heart}<b>${p.likes}</b></button>
+        <button class="ab4" data-cmt="${p.id}" aria-label="Комментарии, ${p.comments}">${IC.cmt}<b>${p.comments}</b></button>
+        <button class="ab4 sh" data-share="${p.id}" aria-label="Поделиться">${IC.share}<b>&nbsp;</b></button>
+        <button class="ab4 sv${p.saved ? " on" : ""}" data-save="${p.id}" aria-pressed="${p.saved}" aria-label="${p.saved ? "Сохранено" : "Сохранить"}">${p.saved ? IC.saveOn : IC.save}<b>&nbsp;</b></button></div>
+      ${p.comments ? `<button class="cmt-prev" data-cmt="${p.id}">Посмотреть все ${p.comments} ${plural(p.comments, "комментарий", "комментария", "комментариев")}</button>` : ""}
+      <button class="cmt-quick" data-cmt="${p.id}" aria-label="Написать комментарий">${user ? ava(user) : ""}<span>Написать комментарий...</span></button>
     </article>`;
   }
   // обновление счетчиков без перерисовки (галерея и видео не сбрасываются)
   function patchCard(p) {
     qa(`.post[data-post="${p.id}"]`).forEach((el) => {
-      const lk = el.querySelector("[data-like]"); if (lk) { lk.classList.toggle("on", p.liked); lk.innerHTML = (p.liked ? IC.heartOn : IC.heart) + `<b>${p.likes || ""}</b>`; }
-      const cm = el.querySelector("[data-cmt]"); if (cm) cm.innerHTML = IC.cmt + `<b>${p.comments || ""}</b>`;
-      const sv = el.querySelector("[data-save]"); if (sv) { sv.classList.toggle("on", p.saved); sv.innerHTML = p.saved ? IC.saveOn : IC.save; }
-      const jn = el.querySelector("[data-join]"); if (jn && p.event) { jn.classList.toggle("joined", p.event.joined); jn.textContent = `${p.event.joined ? "✓ Иду" : "Иду"} · ${p.event.members}${p.event.capacity ? "/" + p.event.capacity : ""}`; }
+      const lk = el.querySelector("[data-like]"); if (lk) { lk.classList.toggle("on", p.liked); lk.setAttribute("aria-pressed", p.liked); lk.innerHTML = (p.liked ? IC.heartOn : IC.heart) + `<b>${p.likes}</b>`; }
+      const cm = el.querySelector(".ab4[data-cmt]"); if (cm) cm.innerHTML = IC.cmt + `<b>${p.comments}</b>`;
+      const sv = el.querySelector("[data-save]"); if (sv) { sv.classList.toggle("on", p.saved); sv.setAttribute("aria-pressed", p.saved); sv.setAttribute("aria-label", p.saved ? "Сохранено" : "Сохранить"); sv.innerHTML = (p.saved ? IC.saveOn : IC.save) + "<b>&nbsp;</b>"; }
+      const mb = el.querySelector(".meet-bar"); if (mb && p.event) mb.outerHTML = meetBar(p);
     });
     const pb = document.querySelector("#pdBody > [data-cmt]");
     if (pb && openPostId === p.id) pb.textContent = "💬 " + (p.comments ? "Комментарии · " + p.comments : "Написать комментарий");
@@ -844,7 +1076,7 @@
       else img.src = full;
       img.removeAttribute("data-src");
     }
-    if (v) { if (v.dataset.poster) v.poster = v.dataset.poster; else v.preload = "metadata"; v.src = v.dataset.src; v.removeAttribute("data-src"); }
+    if (v && v.dataset.poster && !v.poster) v.poster = v.dataset.poster;
   }
   function loadNear(track, i) { const ch = track.children; [i, i + 1].forEach((k) => ch[k] && loadSlide(ch[k])); }
   const lazyIOs = new Map();
@@ -863,28 +1095,8 @@
     });
   }
 
-  /* ---------- видео: одно одновременно, пауза вне экрана ---------- */
-  const vio = "IntersectionObserver" in window ? new IntersectionObserver((ents) => ents.forEach((en) => { if (!en.isIntersecting && !en.target.paused) en.target.pause(); }), { threshold: 0.25 }) : null;
-  function wireMedia(root) {
-    lazyMedia(root);
-    qa(".gs.vid video:not([data-w])", root).forEach((v) => {
-      v.dataset.w = "1"; if (vio) vio.observe(v);
-      const box = v.closest(".gs");
-      v.addEventListener("loadedmetadata", () => { const d = box.querySelector(".vdur"); if (d && d.classList.contains("hidden") && isFinite(v.duration)) { d.textContent = fmtDur(v.duration); d.classList.remove("hidden"); } });
-      v.addEventListener("waiting", () => box.querySelector(".vload").classList.remove("hidden"));
-      v.addEventListener("playing", () => { box.querySelector(".vload").classList.add("hidden"); box.classList.add("playing"); });
-      v.addEventListener("pause", () => box.classList.remove("playing"));
-      v.addEventListener("error", () => { box.classList.add("verr"); box.querySelector(".vplay").textContent = "⚠"; });
-    });
-  }
-  document.addEventListener("play", (e) => { if (e.target.tagName !== "VIDEO") return; qa("video").forEach((v) => { if (v !== e.target && !v.paused && !v.closest(".onb")) v.pause(); }); }, true);
-  document.addEventListener("visibilitychange", () => { if (document.hidden) qa(".gs video").forEach((v) => v.pause()); });
-  function playInline(box) {
-    const v = box.querySelector("video"); loadSlide(box);
-    if (box.classList.contains("verr")) return toast("Видео не воспроизводится на этом устройстве");
-    v.controls = true; v.preload = "auto"; box.classList.add("started");
-    v.play().catch(() => { v.muted = true; v.play().catch(() => toast("Не удалось запустить видео")); });
-  }
+  /* ---------- видео: плеер (35-player.js) управляет запуском, жестами и декодерами ---------- */
+  function wireMedia(root) { lazyMedia(root); Player.scan(root); }
   // счетчик галереи при свайпе
   document.addEventListener("scroll", (e) => {
     const t = e.target; if (!t.classList || !t.classList.contains("gal-track")) return;
@@ -892,7 +1104,7 @@
     loadNear(t, i);
     const lab = g.querySelector(".gal-n"); if (lab) lab.textContent = `${i + 1}/${n}`;
     qa(".gal-dots i", g).forEach((d, k) => d.classList.toggle("on", k === i));
-    qa("video", t).forEach((v, k) => { if (!v.paused && Math.abs(v.closest(".gs").offsetLeft - t.scrollLeft) > 10) v.pause(); });
+    Player.pick();
   }, true);
 
   /* ---------- полноэкранный просмотр фото и видео ---------- */
@@ -1242,9 +1454,10 @@
   })();
 
   /* post actions (shared) */
-  async function doLike(id) {
+  async function doLike(id, onlyOn) {
     if (!requireAuth("Войдите, чтобы ставить лайки", { t: "like", a: id })) return;
     const p = cache.get(id); if (!p) return;
+    if (onlyOn && p.liked) return;
     p.liked = !p.liked; p.likes += p.liked ? 1 : -1; patchCard(p);
     if (p.liked) qa(`.post[data-post="${id}"] [data-like]`).forEach((b) => { b.classList.remove("pop"); void b.offsetWidth; b.classList.add("pop"); });
     try { const r = await api.toggleLike(id); p.liked = r.liked; p.likes = r.likes; patchCard(p); }
@@ -1260,6 +1473,12 @@
   async function doJoin(id) {
     if (!requireAuth("Войдите, чтобы участвовать", { t: "join", a: id })) return;
     const p = cache.get(id); if (!p || !p.event) return;
+    if (p.category === "meetup") {
+      if (p.event.joined) return meetingSheet(id);
+      try { const r = await api.meetingJoin(id); p.event.joined = true; p.event.members++; patchCard(p); toast("🤝 Вы в команде! Чат встречи — во вкладке «Чаты»"); usefulAction("join"); if (r && r.chat_id) refreshChatBadge(); }
+      catch (e) { if (!gateError(e)) toast(e.message); }
+      return;
+    }
     try { const r = await api.toggleJoin(id); p.event.joined = r.joined; p.event.members = r.members; patchCard(p); if (cur() === "sv-events") renderEvents(); toast(r.joined ? "🎉 Вы участвуете! Напомним в календаре" : "Участие отменено"); if (r.joined) usefulAction("join"); }
     catch (e) { toast(e.message); }
   }
@@ -1271,19 +1490,216 @@
     if ((b = t.closest("[data-like]"))) return doLike(b.dataset.like);
     if ((b = t.closest("[data-save]"))) return doSave(b.dataset.save);
     if ((b = t.closest("[data-join]"))) return doJoin(b.dataset.join);
+    if ((b = t.closest("[data-meet]"))) return meetingSheet(b.dataset.meet);
+    if (t.closest("[data-appeal-media]") && p) return appealSheet("post", p.id);
+    if ((b = t.closest("[data-mretry]"))) { api.mediaRetry(b.dataset.mretry).then(() => toast("Повторяем обработку")).catch((er) => toast(er.message)); return; }
     if ((b = t.closest("[data-onmap]"))) return showOnMap(b.dataset.onmap);
     if ((b = t.closest("[data-cmt]"))) return openComments(b.dataset.cmt);
     if ((b = t.closest("[data-share]"))) { const q = cache.get(b.dataset.share); return q && sharePost(q); }
     if ((b = t.closest("[data-pmenu]"))) { const q = cache.get(b.dataset.pmenu); return q && postMenu(q); }
     if ((b = t.closest("[data-moretext]"))) { b.previousElementSibling.classList.remove("clamp"); b.remove(); return; }
     if ((b = t.closest("[data-reveal]"))) { if (t.closest(".shield button")) { b.classList.remove("blur-wrap"); b.removeAttribute("data-reveal"); b.setAttribute("data-img", ""); b.querySelector(".shield").remove(); } return; }
-    if ((b = t.closest(".vfs"))) { const box = b.closest(".gs"); return p && openMediaViewer(p.media, +box.dataset.i); }
-    if ((b = t.closest(".gs.vid"))) { if (!b.classList.contains("started")) playInline(b); return; }
+    if (t.closest(".gs.vid")) return;   // жесты видео обрабатывает плеер
     if ((b = t.closest("[data-img]"))) return p && photoTap(b, p);
-    if (t.closest(".post-near, .post-f, .gal")) return;
+    if (t.closest(".post-place, .acts4, .gal, .meet-bar, .cmt-prev, .cmt-quick")) return;
     if (art) return openPost(art.dataset.post);
   }
   $("posts").onclick = postClick;
+
+/* ===== 35-player.js ===== */
+  /* =====================================================
+     ВИДЕОПЛЕЕР (ТЗ плеера v14.9): автозапуск без звука, одно активное видео,
+     жесты (тап, двойной тап, удержание края 2×, перемотка), полный экран, просмотры.
+     Декодер создается только у видео на экране; остальным src не выдается.
+     ===================================================== */
+  const vpPref = (k, d) => (prefs[k] === undefined ? d : !!prefs[k]);
+  const saveData = () => vpPref("v_saver", false) || !!(navigator.connection && navigator.connection.saveData);
+  const autoplayOn = () => vpPref("v_autoplay", true) && !saveData();
+  function videoSlide(p, m, i) {
+    const dur = m.duration ? fmtDur(m.duration) : "0:00";
+    const tall = m.w && m.h && m.h > m.w;
+    return `<div class="gs vid${tall ? " tall" : ""}" data-i="${i}" data-mid="${esc(m.id || "")}" data-post="${p.id}" tabindex="0" role="group" aria-label="Видео, ${dur}. Пробел — пауза, стрелки — перемотка">
+      <video data-src="${esc(m.url)}"${m.poster ? ` poster="${esc(m.poster)}"` : ""} playsinline muted loop preload="none" disablepictureinpicture></video>
+      <div class="vp-hit" aria-hidden="true"></div>
+      <button class="vp-big" type="button" aria-label="Смотреть видео">▶</button>
+      <span class="vp-rate" aria-hidden="true">2× »</span>
+      <span class="vp-load hidden" aria-hidden="true"><i class="mini-spin"></i></span>
+      <div class="vp-net hidden"><span>Нет связи</span><button type="button" class="vp-retry">Повторить</button></div>
+      <div class="vp-ctl"><button type="button" class="vp-snd" aria-label="Включить звук">${IC.mute || "🔇"}</button><button type="button" class="vp-fs" aria-label="На весь экран">⛶</button></div>
+      <div class="vp-bar" role="slider" aria-label="Перемотка" aria-valuemin="0" aria-valuemax="${Math.round(m.duration || 0)}" aria-valuenow="0" tabindex="-1"><div class="vp-track"><i class="vp-fill"></i><b class="vp-knob"></b></div><span class="vp-time">0:00 / ${dur}</span></div>
+      <div class="heart-burst">${IC.heartOn}</div>
+    </div>`;
+  }
+  // свои вложения в обработке: другие их не видят (сервер не выдает), автор видит статус
+  function stateSlide(p, m, i) {
+    const T = { uploading: "Загрузка...", processing: "Обрабатываем видео", pending_review: "На проверке", rejected: "Отклонено" + (m.error ? ": " + m.error : ""), failed: "Не удалось обработать" };
+    const bad = m.state === "rejected" || m.state === "failed";
+    return `<div class="gs vstate${bad ? " bad" : ""}" data-i="${i}">${m.poster || m.thumb ? `<img src="${esc(m.poster || m.thumb)}" alt="">` : ""}
+      <div class="mstate${bad ? " bad" : ""}">${bad ? "⚠️" : '<i class="mini-spin"></i>'} <span>${esc(T[m.state] || m.state)}</span>${m.state === "failed" && m.id ? `<button type="button" data-mretry="${esc(m.id)}">Повторить</button>` : ""}${m.state === "rejected" ? '<button type="button" data-appeal-media>Обжаловать</button>' : ""}</div></div>`;
+  }
+  const Player = {
+    vis: new Map(), manual: new WeakSet(), active: null, io: null, seen: new Set(),
+    init() {
+      if (this.io || !("IntersectionObserver" in window)) return;
+      this.io = new IntersectionObserver((en) => {
+        en.forEach((x) => this.vis.set(x.target, x.isIntersecting ? x.intersectionRatio : 0));
+        this.pick();
+      }, { threshold: [0, 0.2, 0.4, 0.55, 0.7, 0.85, 1] });
+      document.addEventListener("visibilitychange", () => { if (document.hidden) this.pauseAll(true); else this.pick(); });
+      window.addEventListener("pagehide", () => this.pauseAll(true));
+    },
+    scan(root) {
+      this.init();
+      qa(".gs.vid:not([data-pw])", root).forEach((box) => { box.dataset.pw = "1"; if (this.io) this.io.observe(box); this.wire(box); });
+    },
+    // видимость ≥70% — запуск, <40% — пауза, между — без изменений; только одно видео с максимальной видимостью
+    pick() {
+      if (document.hidden || document.querySelector(".vfull")) return;
+      let best = null, br = 0;
+      this.vis.forEach((r, box) => {
+        if (!box.isConnected) { this.vis.delete(box); return; }
+        const slideOn = this.slideVisible(box);
+        const ratio = slideOn ? r : 0;
+        if (ratio < 0.4) { this.stop(box); return; }
+        if (ratio >= 0.7 && ratio > br && !this.manual.has(box)) { best = box; br = ratio; }
+      });
+      const view = best && best.closest(".view");
+      if (best && best !== this.active && autoplayOn() && (!view || view.classList.contains("on"))) this.play(best, true);
+      if (best) this.prefetchNext(best);
+    },
+    slideVisible(box) { const tr = box.parentElement; if (!tr || !tr.classList.contains("gal-track")) return true; return Math.abs(box.offsetLeft - tr.scrollLeft) < box.clientWidth / 2; },
+    // метаданные — максимум у одного следующего видео
+    prefetchNext(box) {
+      const all = qa(".gs.vid", box.closest(".view") || document); const k = all.indexOf(box), nx = all[k + 1];
+      all.forEach((b) => { const v = b.querySelector("video"); if (b !== box && b !== nx && v.dataset.pre) { v.preload = "none"; delete v.dataset.pre; } });
+      if (nx && !saveData()) { const v = nx.querySelector("video"); if (!v.src && !v.dataset.pre) { v.dataset.pre = "1"; v.preload = "metadata"; } }
+    },
+    attach(box) { const v = box.querySelector("video"); if (!v.src && v.dataset.src) { v.src = v.dataset.src; if (v.dataset.t) v.currentTime = +v.dataset.t; } return v; },
+    // освобождаем декодер: позиция сохраняется
+    release(box) { const v = box.querySelector("video"); if (!v.src) return; v.dataset.t = v.currentTime || 0; v.pause(); v.removeAttribute("src"); v.load(); box.classList.remove("playing", "started"); },
+    async play(box, auto) {
+      if (this.active && this.active !== box) this.stop(this.active);
+      this.active = box; const v = this.attach(box);
+      // первый запуск — без звука (muted + playsinline); звук включает человек кнопкой или настройкой
+      if (auto || v.dataset.snd !== "1") v.muted = !(vpPref("v_sound", false) && !auto) && v.dataset.snd !== "1";
+      v.playbackRate = 1;
+      try { await v.play(); box.classList.add("started", "playing"); box.classList.remove("needs-tap"); this.showCtl(box); }
+      catch (e) { box.classList.add("needs-tap"); }   // отказ play(): показываем кнопку Play
+    },
+    stop(box) {
+      const v = box.querySelector("video"); if (!v.paused) v.pause(); v.playbackRate = 1; box.classList.remove("playing", "fast");
+      if (this.active === box) this.active = null;
+      // далеко за экраном — отдаем декодер
+      if ((this.vis.get(box) || 0) === 0 && v.src) this.release(box);
+    },
+    pauseAll(reset) { qa(".gs.vid video").forEach((v) => { if (!v.paused) v.pause(); if (reset) v.playbackRate = 1; v.closest(".gs").classList.remove("playing", "fast"); }); this.active = null; },
+    showCtl(box) { box.classList.add("ctl-on"); clearTimeout(box._ct); box._ct = setTimeout(() => { if (!box.querySelector("video").paused) box.classList.remove("ctl-on"); }, 2500); },
+    toggle(box) {
+      const v = this.attach(box);
+      if (v.paused) { this.manual.delete(box); this.play(box, false); }
+      else { v.pause(); this.manual.add(box); box.classList.remove("playing"); box.classList.add("ctl-on"); flash(box, "pause"); }
+    },
+    seekBy(box, s) { const v = this.attach(box); if (isFinite(v.duration)) v.currentTime = Math.max(0, Math.min(v.duration - 0.05, v.currentTime + s)); this.showCtl(box); },
+    wire(box) {
+      const v = box.querySelector("video"), hit = box.querySelector(".vp-hit"), bar = box.querySelector(".vp-bar"), fill = box.querySelector(".vp-fill"), knob = box.querySelector(".vp-knob"), time = box.querySelector(".vp-time");
+      let watched = 0, lastT = null;
+      const upd = () => {
+        const d = isFinite(v.duration) ? v.duration : 0, f = d ? v.currentTime / d : 0;
+        fill.style.width = f * 100 + "%"; knob.style.left = f * 100 + "%";
+        time.textContent = fmtDur(v.currentTime) + " / " + fmtDur(d); bar.setAttribute("aria-valuenow", Math.round(v.currentTime));
+      };
+      v.addEventListener("timeupdate", () => {
+        upd();
+        // просмотр: 3 секунды видимого воспроизведения, один раз за сутки на зрителя (сервер считает уникальных)
+        if (!v.paused && lastT != null && v.currentTime > lastT) watched += Math.min(1, v.currentTime - lastT);
+        lastT = v.currentTime;
+        const mid = box.dataset.mid; if (mid && watched >= 3 && !this.seen.has(mid)) { this.seen.add(mid); api.mediaView(mid, watched).catch(() => {}); }
+      });
+      v.addEventListener("loadedmetadata", upd);
+      v.addEventListener("waiting", () => box.querySelector(".vp-load").classList.remove("hidden"));
+      v.addEventListener("playing", () => { box.querySelector(".vp-load").classList.add("hidden"); box.querySelector(".vp-net").classList.add("hidden"); });
+      // потеря сети: обложка и "Повторить" с восстановлением позиции
+      v.addEventListener("error", () => { if (!v.src) return; v.dataset.t = v.currentTime || v.dataset.t || 0; box.querySelector(".vp-net").classList.remove("hidden"); box.classList.remove("playing"); });
+      box.querySelector(".vp-retry").onclick = (e) => { e.stopPropagation(); const t = +v.dataset.t || 0; v.removeAttribute("src"); v.load(); v.src = v.dataset.src; v.currentTime = t; this.play(box, false); };
+      box.querySelector(".vp-big").onclick = (e) => { e.stopPropagation(); this.manual.delete(box); this.play(box, false); };
+      box.querySelector(".vp-snd").onclick = (e) => { e.stopPropagation(); const vv = this.attach(box); vv.muted = !vv.muted; e.currentTarget.innerHTML = vv.muted ? IC.mute || "🔇" : IC.sound || "🔊"; e.currentTarget.setAttribute("aria-label", vv.muted ? "Включить звук" : "Выключить звук"); vv.dataset.snd = vv.muted ? "" : "1"; if (vv.paused) this.play(box, false); this.showCtl(box); };
+      box.querySelector(".vp-fs").onclick = (e) => { e.stopPropagation(); openVideoFs(box); };
+      // полоска: тап и перетаскивание меняют currentTime; свайп галереи при этом не срабатывает
+      const seekAt = (x) => { const r = bar.querySelector(".vp-track").getBoundingClientRect(), vv = this.attach(box); if (!isFinite(vv.duration)) return; vv.currentTime = Math.max(0, Math.min(1, (x - r.left) / r.width)) * vv.duration; upd(); };
+      bar.addEventListener("pointerdown", (e) => { e.stopPropagation(); bar.setPointerCapture(e.pointerId); box.classList.add("seeking"); seekAt(e.clientX); });
+      bar.addEventListener("pointermove", (e) => { if (bar.hasPointerCapture(e.pointerId)) seekAt(e.clientX); });
+      const endSeek = (e) => { if (bar.hasPointerCapture && bar.hasPointerCapture(e.pointerId)) bar.releasePointerCapture(e.pointerId); box.classList.remove("seeking"); this.showCtl(box); };
+      bar.addEventListener("pointerup", endSeek); bar.addEventListener("pointercancel", endSeek);
+      bar.addEventListener("click", (e) => e.stopPropagation());
+      // жесты: тап (через 250 мс) — пауза; двойной тап — лайк (не снимает); удержание края 350 мс — 2×
+      let x0 = 0, y0 = 0, holdT = null, holding = false, tapT = null, lastTap = 0, moved = false;
+      hit.addEventListener("pointerdown", (e) => {
+        x0 = e.clientX; y0 = e.clientY; moved = false; holding = false;
+        const r = box.getBoundingClientRect(), edge = (e.clientX - r.left) / r.width;
+        clearTimeout(holdT);
+        if (edge < 0.25 || edge > 0.75) holdT = setTimeout(() => { const vv = this.attach(box); if (vv.paused) return; holding = true; vv.playbackRate = 2; box.classList.add("fast"); }, 350);
+      });
+      hit.addEventListener("pointermove", (e) => { if (Math.hypot(e.clientX - x0, e.clientY - y0) > 10) { moved = true; clearTimeout(holdT); if (holding) this.endHold(box); holding = false; } });
+      const up = (e, cancel) => {
+        clearTimeout(holdT);
+        if (holding) { holding = false; this.endHold(box); return; }
+        if (cancel || moved) return;
+        const now = Date.now();
+        if (now - lastTap < 250) { clearTimeout(tapT); lastTap = 0; const pid = box.dataset.post; heartBurst(box); doLike(pid, true); return; }
+        lastTap = now;
+        tapT = setTimeout(() => { if (box.classList.contains("started") || !v.paused) this.toggle(box); else this.play(box, false); }, 250);
+      };
+      hit.addEventListener("pointerup", (e) => up(e, false));
+      hit.addEventListener("pointercancel", (e) => up(e, true));
+      hit.addEventListener("contextmenu", (e) => e.preventDefault());
+      box.addEventListener("keydown", (e) => {
+        if (e.target !== box) return;
+        if (e.key === " " || e.key === "k") { e.preventDefault(); this.toggle(box); }
+        else if (e.key === "ArrowRight") { e.preventDefault(); this.seekBy(box, 5); }
+        else if (e.key === "ArrowLeft") { e.preventDefault(); this.seekBy(box, -5); }
+        else if (e.key === "m") box.querySelector(".vp-snd").click();
+        else if (e.key === "f") openVideoFs(box);
+      });
+    },
+    endHold(box) { const v = box.querySelector("video"); v.playbackRate = 1; box.classList.remove("fast"); }
+  };
+  function flash(box, kind) { box.classList.remove("fl-pause"); void box.offsetWidth; if (kind === "pause") box.classList.add("fl-pause"); }
+  function heartBurst(box) {
+    if (matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    const hb = box.querySelector(".heart-burst") || (box.closest(".gal") || box).querySelector(".heart-burst"); if (!hb) return;
+    hb.classList.remove("go"); void hb.offsetWidth; hb.classList.add("go");
+  }
+
+  /* ---------- полный экран внутри приложения: без нижней навигации, оригинальные пропорции ---------- */
+  function openVideoFs(box) {
+    const v0 = Player.attach(box), pid = box.dataset.post, p = cache.get(pid);
+    const t0 = v0.currentTime || 0, wasMuted = v0.muted; Player.stop(box);
+    const o = document.createElement("div"); o.className = "vfull"; o.id = "vfull"; o.setAttribute("role", "dialog"); o.setAttribute("aria-label", "Видео на весь экран");
+    o.innerHTML = `<div class="vfs-top"><button class="vfs-x" aria-label="Закрыть">‹</button><span>${p && p.media.length > 1 ? (+box.dataset.i + 1) + " из " + p.media.length : ""}</span><button class="vfs-more" aria-label="Пожаловаться">⋯</button></div>
+      ${videoSlide(p || { id: pid }, { id: box.dataset.mid, url: v0.dataset.src || v0.src, poster: v0.poster, duration: v0.duration })}
+      <div class="vfs-acts"><button class="vfs-c" aria-label="Комментарии">${IC.cmt}<span>${p ? p.comments : ""}</span></button><button class="vfs-l${p && p.liked ? " on" : ""}" aria-label="Нравится">${p && p.liked ? IC.heartOn : IC.heart}<span>${p ? p.likes : ""}</span></button></div>`;
+    document.body.appendChild(o); document.body.classList.add("in-vfs");
+    const fb = o.querySelector(".gs.vid"); fb.classList.add("fs"); Player.wire(fb);
+    const v = Player.attach(fb); v.currentTime = t0; v.muted = wasMuted; v.play().then(() => fb.classList.add("started", "playing")).catch(() => fb.classList.add("needs-tap"));
+    requestAnimationFrame(() => o.classList.add("on"));
+    const close = () => {
+      const t = v.currentTime; v.pause(); o.classList.remove("on"); document.body.classList.remove("in-vfs"); document.removeEventListener("keydown", key);
+      setTimeout(() => o.remove(), 200);
+      // позиция возвращается в карточку
+      v0.dataset.t = t; if (v0.src) v0.currentTime = t; Player.manual.add(box);
+    };
+    const key = (e) => { if (e.key === "Escape") close(); };
+    document.addEventListener("keydown", key);
+    o.querySelector(".vfs-x").onclick = close;
+    // комментарии поверх полноэкранного видео: панель переносится на верхний уровень (видео продолжает играть)
+    o.querySelector(".vfs-c").onclick = () => { if ($("csheet").parentElement !== document.body) document.body.append($("csBg"), $("csheet")); openComments(pid); };
+    o.querySelector(".vfs-l").onclick = async (e) => { await doLike(pid); const q = cache.get(pid); if (q) e.currentTarget.innerHTML = (q.liked ? IC.heartOn : IC.heart) + `<span>${q.likes}</span>`; e.currentTarget.classList.toggle("on", !!(q && q.liked)); };
+    o.querySelector(".vfs-more").onclick = () => { if (p) reportSheet({ type: "post", id: p.id, user_id: p.user_id, label: "видео", timecode: v.currentTime }); };
+    // свайп вниз (вне полоски) закрывает
+    let y0 = null;
+    o.addEventListener("touchstart", (e) => { if (e.target.closest(".vp-bar")) return; if (e.touches.length === 1) y0 = e.touches[0].clientY; }, { passive: true });
+    o.addEventListener("touchend", (e) => { if (y0 == null) return; const dy = e.changedTouches[0].clientY - y0; y0 = null; if (dy > 110) close(); });
+  }
 
 /* ===== 40-post.js ===== */
   /* =====================================================
@@ -1364,72 +1780,45 @@
      CREATE / EDIT
      ===================================================== */
   const ORDER = ["incident", "event", "deal", "meetup", "lost", "found", "ad", "talk"];
-  // v14 / 03: семь типов создания — шесть плиток и отдельно SOS. Цвета — как метки на карте (раздел 27)
-  const GROUPS = {
-    post: { t: "Публикация", s: "Новость, вопрос, объявление", e: "📝", c: "#ec398e", types: ["talk", "ad"], title: "Новая публикация" },
-    incident: { t: "Происшествие", s: "ДТП, отключения, перекрытия", e: "🚨", c: "#ff873b", types: ["incident"], title: "Происшествие" },
-    meetup: { t: "Встреча", s: "Группа по интересам", e: "🤝", c: "#9855e9", types: ["meetup"], title: "Новая встреча" },
-    event: { t: "Событие", s: "Открытое мероприятие", e: "🎉", c: "#3da5ff", types: ["event"], title: "Новое событие" },
-    deal: { t: "Акция", s: "Предложение бизнеса", e: "🏷️", c: "#f5b400", types: ["deal"], title: "Новая акция" },
-    help: { t: "Помощь", s: "Потеря, находка, помощь соседям", e: "🔑", c: "#2bd47d", types: ["lost", "found"], title: "Помощь рядом" }
-  };
-  const groupOf = (t) => Object.keys(GROUPS).find((g) => GROUPS[g].types.includes(t)) || "post";
-  // "+" → "Что создать?". Гость сначала входит, затем меню открывается снова
-  function openCreateMenu() {
-    if (!requireAuth("Войдите, чтобы публиковать", { t: "create" })) return;
-    const pb = $("plusBtn");
-    if ($("bsheet").classList.contains("on") && $("bsheet").classList.contains("cr-sheet")) { closeSheet(); return; }
-    openSheet("Что создать?", `<div class="cr-grid">${Object.entries(GROUPS).map(([k, g]) => `<button type="button" class="cr-tile" data-group="${k}" style="--c:${g.c}"><span class="ci">${g.e}</span><b>${g.t}</b><small>${g.s}</small></button>`).join("")}</div>
-      <button type="button" class="cr-sos" id="crSos"><span class="sb">SOS</span><span><b>SOS — срочная помощь</b><small>сообщить людям рядом · не заменяет 112</small></span></button>
-      <div class="cr-note">Черновик сохраняется на телефоне до публикации</div>`, "cr-sheet");
-    if (pb) { pb.classList.add("open"); pb.setAttribute("aria-expanded", "true"); }
-    qa("[data-group]", $("bsList")).forEach((b) => (b.onclick = () => { closeSheet(); openCreate({ group: b.dataset.group }); }));
-    $("crSos").onclick = () => { closeSheet(); go("sv-sos"); };
-  }
-  const cr = { type: null, group: null, files: [], loc: null, edit: null, key: null, started: false };
+  const cr = { type: null, files: [], loc: null, edit: null, key: null, started: false };
   // POST-01: черновик текста хранится на телефоне до публикации
   const draftKey = () => "near_draft_" + (user ? user.id.slice(0, 12) : "guest");
   function saveDraft() { try { if (cr.edit) return; const t = $("crText").value; if (t.trim()) localStorage.setItem(draftKey(), JSON.stringify({ type: cr.type, text: t, t: Date.now() })); else localStorage.removeItem(draftKey()); } catch (e) {} }
-  function renderTypes(types) {
-    $("typeGrid").innerHTML = types.map((k) => `<button type="button" data-type="${k}"><span>${CATS[k].e}</span>${CATS[k].n}</button>`).join("");
-    // один тип — выбирать нечего: плитки скрыты
-    $("typeGrid").classList.toggle("hidden", types.length < 2);
-  }
-  renderTypes(ORDER);
+  $("typeGrid").innerHTML = ORDER.map((k) => `<button type="button" data-type="${k}"><span>${CATS[k].e}</span>${CATS[k].n}</button>`).join("");
   $("typeGrid").onclick = (e) => { const b = e.target.closest("[data-type]"); if (b) setType(b.dataset.type); };
   function setType(t) {
     cr.type = t; qa("#typeGrid [data-type]").forEach((x) => x.classList.toggle("on", x.dataset.type === t));
     $("crEvent").classList.toggle("hidden", !(t === "event" || t === "meetup"));
+    $("crMeetBox").classList.toggle("hidden", t !== "meetup"); $("crPilot").classList.toggle("hidden", t !== "meetup");
+    if (t === "meetup" && !$("crMeetCat").children.length) {
+      $("crMeetCat").innerHTML = Object.entries(N.MEET_CATS).map(([k, v]) => `<button type="button" data-mc="${k}">${v.e} ${v.n}</button>`).join("");
+      $("crMeetCat").onclick = (e) => { const b = e.target.closest("[data-mc]"); if (!b) return; cr.meetCat = b.dataset.mc; qa("#crMeetCat button").forEach((x) => x.classList.toggle("on", x === b)); };
+    }
     const ph = { incident: "Что случилось? Например: ДТП, перекрыта дорога, отключили воду", event: "Что за событие, где и для кого?", deal: "Какая акция, где и до какого времени?", meetup: "Кого ищете и чем займетесь?", lost: "Что потеряли, где и когда? Особые приметы", found: "Что нашли и где? Как с вами связаться", ad: "Продам, отдам, ищу мастера...", talk: "О чем хотите спросить соседей?" };
     $("crText").placeholder = ph[t] || "Опишите, что происходит";
   }
-  function openCreate({ type, edit, group } = {}) {
-    // без типа и группы (например, после входа) — сначала меню "Что создать?"
-    if (!edit && !type && !group) { let dr = null; try { dr = JSON.parse(localStorage.getItem(draftKey()) || "null"); } catch (e) {} if (dr && dr.type) type = dr.type; else { openCreateMenu(); return; } }
-    cr.group = edit ? groupOf(edit.category) : group || groupOf(type);
-    renderTypes(edit ? ORDER : GROUPS[cr.group].types);
+  function openCreate({ type, edit } = {}) {
     cr.files.forEach((f) => f._url && URL.revokeObjectURL(f._url));
     cr.files = []; cr.edit = edit || null; $("crErr").classList.remove("on"); $("crProg").textContent = "";
     $("crFuzzy").classList.toggle("on", prefs.fuzz_default ?? true);
     // незавершенная загрузка прошлой публикации отменяется: файлы и строка удаляются
     if (cr.key && cr.started && !edit) api.abandonDraft && api.abandonDraft(cr.key).catch(() => {});
     cr.key = edit ? null : N.rid() + N.rid(); cr.started = false;
-    $("crTitle").textContent = edit ? "Редактирование" : GROUPS[cr.group].title;
+    $("crTitle").textContent = edit ? "Редактирование" : "Новая публикация";
     $("crSub").textContent = edit ? "фото и место не меняются" : "что происходит рядом?";
     $("crMediaBlock").classList.toggle("hidden", !!edit);
     $("crLocBlock").classList.toggle("hidden", !!edit);
     $("pubBtn").textContent = edit ? "Сохранить изменения" : "Опубликовать";
     $("crBack").classList.toggle("hidden", !edit);
     $("crText").value = edit ? edit.text : ""; $("crCount").textContent = $("crText").value.length;
-    $("crWhen").value = ""; $("crCap").value = "";
+    $("crWhen").value = ""; $("crCap").value = ""; $("crEnd").value = ""; cr.meetCat = null; qa("#crMeetCat button").forEach((x) => x.classList.remove("on"));
     if (edit && edit.event) {
       const d = new Date(edit.event.starts_at); d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
       $("crWhen").value = d.toISOString().slice(0, 16); $("crCap").value = edit.event.capacity || "";
     }
     let dr = null; if (!edit) { try { dr = JSON.parse(localStorage.getItem(draftKey()) || "null"); } catch (e) {} }
     if (dr && dr.text && Date.now() - dr.t < 7 * 86400e3) { $("crText").value = dr.text; $("crCount").textContent = dr.text.length; toast("Восстановлен черновик"); }
-    const gt = GROUPS[cr.group].types;
-    setType(edit ? edit.category : type || (dr && gt.includes(dr.type) ? dr.type : null) || (gt.length === 1 ? gt[0] : null));
+    setType(edit ? edit.category : type || (dr && dr.type) || null);
     if (!edit) { cr.loc = pos.real ? { lat: pos.lat, lng: pos.lng, how: "here" } : null; renderLoc(); }
     renderMedia();
     if (edit) go("v-create"); else { hist = []; go("v-create", false); }
@@ -1447,7 +1836,12 @@
         if (kind === "video") {
           // проверяем видео сразу, до публикации: формат, длительность, обложка
           f._state = "check";
-          N.probeVideo(f).then((m) => { f._meta = m; f._state = "ok"; renderMedia(); })
+          N.probeVideo(f).then((m) => {
+            f._meta = m; f._state = "ok";
+            try { const sv = JSON.parse(localStorage.getItem("near_vedit_" + [f.name, f.size, f.lastModified].join(":")) || "null"); if (sv) f._edit = sv; } catch (e) {}
+            if (m.duration > 30.05 && !f._edit) { f._edit = { start: 0, end: 30, cover: 0, rotate: 0, aspect: "orig", mute: false }; toast("Видео длиннее 30 секунд: взяли первые 30. Нажмите ✂, чтобы выбрать фрагмент"); }
+            renderMedia();
+          })
             .catch((er) => { cr.files = cr.files.filter((x) => x !== f); URL.revokeObjectURL(f._url); renderMedia(); crError(er.message); });
         }
       } catch (e) { toast(e.message); }
@@ -1463,11 +1857,13 @@
       const d = document.createElement("div"); d.className = "m-prev";
       if (/^video\//.test(f.type) || /\.(mov|mp4|m4v|webm)$/i.test(f.name)) d.innerHTML = `<video src="${f._url}#t=0.3" muted playsinline preload="metadata"></video><i>${f._state === "check" ? '<span class="mini-spin"></span>' : f._meta ? "▶ " + fmtDur(f._meta.duration) : "🎬"}</i>`;
       else d.style.backgroundImage = `url('${f._url}')`;
-      d.insertAdjacentHTML("beforeend", `<button type="button" data-rm="${i}">✕</button>`);
+      d.insertAdjacentHTML("beforeend", `<button type="button" data-rm="${i}" aria-label="Убрать">✕</button>`);
+      if (f._meta) d.insertAdjacentHTML("beforeend", `<button type="button" class="m-edit" data-ved="${i}" aria-label="Редактировать видео">✂ ${f._edit && f._edit.end ? fmtDur(editLen(f)) : "Изменить"}</button>`);
       row.insertBefore(d, $("addCamera"));
     });
   }
   $("mediaRow").addEventListener("click", (e) => {
+    const ve = e.target.closest("[data-ved]"); if (ve) { const f = cr.files[+ve.dataset.ved]; return openEditor(f, () => renderMedia()); }
     const b = e.target.closest("[data-rm]"); if (!b) return;
     const f = cr.files.splice(+b.dataset.rm, 1)[0]; if (f && f._url) URL.revokeObjectURL(f._url); renderMedia();
   });
@@ -1497,13 +1893,20 @@
         const d = new Date($("crWhen").value);
         if (isNaN(d)) return crError("Проверьте дату");
         if (!cr.edit && d < Date.now() - 3600e3) return crError("Дата события уже прошла");
-        const cap = parseInt($("crCap").value, 10);
-        event = { starts_at: d.toISOString(), capacity: cap > 0 ? cap : null };
+        const cap = parseInt($("crCap").value, 10), end = $("crEnd").value ? new Date($("crEnd").value) : null;
+        if (end && end <= d) return crError("Окончание должно быть позже начала");
+        event = { starts_at: d.toISOString(), ends_at: end ? end.toISOString() : null, capacity: cap > 0 ? cap : null, meet_cat: cr.meetCat || null };
+      }
+      if (cr.type === "meetup" && !cr.edit) {
+        if (!event) return crError("Укажите дату и время встречи");
+        if (!cr.meetCat) return crError("Выберите категорию встречи");
       }
     }
+    // видео: итоговая длительность до 30 секунд (длинное можно обрезать в редакторе)
+    const long = cr.files.find((f) => f._meta && f._meta.duration && editLen(f) > 30.05);
+    if (long) return crError("Видео длиннее 30 секунд. Нажмите ✂ на превью и обрежьте его");
     if (cr.files.some((f) => f._state === "check")) return crError("Подождите, проверяем видео...");
-    if (N.isThreat(text)) return crError("Угрозы запрещены правилами NEAR. Измените текст");
-    if (N.hasBad(text)) toast("Грубые слова будут скрыты: " + N.mask(text).slice(0, 60));
+    if (N.hasBad(text)) toast("🤬 Грубые слова будут скрыты звездочками");
     const btn = $("pubBtn"); btn.disabled = true;
     try {
       if (cr.edit) {
@@ -1517,19 +1920,113 @@
       // место по умолчанию приблизительное (~200 м, округляет сервер); точное — только если переключатель выключен
       const exact = !$("crFuzzy").classList.contains("on");
       cr.started = true;
-      const p = await api.createPost({ category: cr.type, text, lat, lng, files: cr.files, event, exact, clientKey: cr.key }, (m, frac) => { $("crProg").innerHTML = `<div>${esc(m)}</div>${frac != null ? `<div class="pbar"><i style="width:${Math.round(Math.min(1, frac) * 100)}%"></i></div>` : ""}`; });
+      const p = await api.createPost({ category: cr.type, text, lat, lng, files: cr.files, edits: cr.files.map((f) => f._edit || {}), event, exact, clientKey: cr.key }, (m, frac) => { $("crProg").innerHTML = `<div>${esc(m)}</div>${frac != null ? `<div class="pbar"><i style="width:${Math.round(Math.min(1, frac) * 100)}%"></i></div>` : ""}`; });
       cache.set(p.id, p); cr.started = false; cr.key = N.rid() + N.rid();
       cr.files.forEach((f) => f._url && URL.revokeObjectURL(f._url)); cr.files = [];
       $("crProg").textContent = ""; $("crText").value = ""; saveDraft();
       Obs.track("post_created", { category: p.category, count: p.media.length }); usefulAction("post");
-      toast("✓ Опубликовано! Публикация уже в ленте и на карте");
+      const waits = p.status === "draft" || p.media.some((m) => m.state && m.state !== "approved");
+      toast(waits ? "⏳ Отправлено. Видео обрабатывается и проверяется — опубликуем, когда все файлы пройдут проверку" : "✓ Опубликовано! Публикация уже в ленте и на карте");
       feedCat = "all"; $("cats").innerHTML = chipsHtml("all"); wide = null;
       if (N.dist(pos, p) > R) setRadius(Math.min(10000, Math.max(R, Math.ceil(N.dist(pos, p) / 1000) * 1000)));
       hist = []; go("v-feed", false); await loadFeed(); if (mapReady) loadMapPosts();
-    } catch (e) { if (gateError(e)) { $("crProg").textContent = ""; return; } crError(e.message + (cr.started && !/^NR\d/.test(e.code || "") ? " · Нажмите \"Опубликовать\" еще раз — загрузка продолжится без дублей" : "")); $("crProg").textContent = ""; }
+    } catch (e) { if (gateError(e)) { $("crProg").textContent = ""; return; } crError(e.message + (cr.started ? " · Нажмите \"Опубликовать\" еще раз — загрузка продолжится без дублей" : "")); $("crProg").textContent = ""; }
     finally { btn.disabled = false; }
   };
   $("crText").addEventListener("input", () => { clearTimeout(cr.dt); cr.dt = setTimeout(saveDraft, 400); });
+
+/* ===== 45-editor.js ===== */
+  /* =====================================================
+     РЕДАКТОР ВИДЕО: обрезка, обложка, поворот, пропорции, без звука, возврат оригинала.
+     Оригинал не меняется: параметры уходят на сервер, где их применяет FFmpeg worker.
+     ===================================================== */
+  const ASPECTS = [["orig", "Оригинал"], ["9:16", "9:16"], ["1:1", "1:1"], ["4:5", "4:5"]];
+  const editLen = (f) => { const d = (f._meta && f._meta.duration) || 0, e = f._edit || {}; return Math.max(0, (e.end || d) - (e.start || 0)); };
+  const edKey = (f) => "near_vedit_" + [f.name, f.size, f.lastModified].join(":");
+  function openEditor(f, onDone) {
+    const dur = (f._meta && f._meta.duration) || 0;
+    let saved = null; try { saved = JSON.parse(localStorage.getItem(edKey(f)) || "null"); } catch (e) {}
+    const st = { start: 0, end: Math.min(dur, 30), cover: 0, rotate: 0, aspect: "orig", mute: false, ...(f._edit || saved || {}) };
+    let mode = "trim";
+    const o = document.createElement("div"); o.className = "ved"; o.id = "ved"; o.setAttribute("role", "dialog"); o.setAttribute("aria-label", "Редактирование видео");
+    o.innerHTML = `<div class="ved-top"><button class="ved-x" aria-label="Закрыть без сохранения">✕</button><b>Редактирование</b><button class="ved-done lnk">Готово</button></div>
+      <div class="ved-stage"><div class="ved-frame"><video src="${f._url}" playsinline muted preload="auto"></video></div><button class="ved-play" aria-label="Воспроизвести">▶</button></div>
+      <div class="ved-time"><span class="ved-pt">0:00</span> / <span class="ved-len"></span></div>
+      <div class="ved-tl" aria-label="Таймлайн: перетащите края, чтобы обрезать"><div class="ved-thumbs"></div><div class="ved-sel"><b class="h l" role="slider" aria-label="Начало" tabindex="0"></b><b class="h r" role="slider" aria-label="Конец" tabindex="0"></b></div><i class="ved-ph"></i><i class="ved-cv" title="Обложка"></i>
+        <div class="ved-scale"><span>0:00</span><span>${fmtDur(dur)}</span></div></div>
+      <div class="ved-tools"><button data-m="trim" class="on">✂<span>Обрезать</span></button><button data-m="cover">🖼<span>Обложка</span></button><button data-m="sound">🔊<span>Звук</span></button><button data-m="format">⬚<span>Формат</span></button><button data-m="rotate">⟳<span>Поворот</span></button></div>
+      <div class="ved-hint"></div>
+      <div class="ved-btns"><button class="btn btn-ghost" id="vedReset">Вернуть оригинал</button><button class="btn btn-main" id="vedSave">Сохранить видео</button></div>`;
+    document.body.appendChild(o); requestAnimationFrame(() => o.classList.add("on"));
+    const v = o.querySelector("video"), tl = o.querySelector(".ved-tl"), sel = o.querySelector(".ved-sel"), ph = o.querySelector(".ved-ph"), cv = o.querySelector(".ved-cv"), hint = o.querySelector(".ved-hint");
+    const pct = (t) => (dur ? (t / dur) * 100 : 0);
+    const draw = () => {
+      sel.style.left = pct(st.start) + "%"; sel.style.width = pct(st.end - st.start) + "%"; cv.style.left = pct(st.cover) + "%";
+      const len = st.end - st.start; o.querySelector(".ved-len").textContent = fmtDur(len);
+      o.querySelector(".ved-len").classList.toggle("bad", len > 30.05);
+      const fr = o.querySelector(".ved-frame"); fr.dataset.aspect = st.aspect; fr.style.setProperty("--rot", st.rotate + "deg");
+      v.muted = true; o.querySelector('[data-m="sound"] span').textContent = st.mute ? "Без звука" : "Звук"; o.querySelector('[data-m="sound"]').classList.toggle("off", st.mute);
+      o.querySelector('[data-m="format"] span').textContent = (ASPECTS.find((a) => a[0] === st.aspect) || ASPECTS[0])[1];
+      hint.textContent = mode === "cover" ? "Передвиньте кадр на таймлайне — он станет обложкой" : len > 30.05 ? "Итоговое видео — не длиннее 30 секунд" : "Перетащите края, чтобы выбрать фрагмент";
+    };
+    // миниатюры таймлайна (без загрузки на сервер)
+    (async () => {
+      const th = o.querySelector(".ved-thumbs"), n = 8, tv = document.createElement("video"); tv.src = f._url; tv.muted = true; tv.playsInline = true; tv.preload = "auto";
+      await new Promise((r) => { tv.onloadeddata = r; tv.onerror = r; setTimeout(r, 4000); });
+      for (let i = 0; i < n && o.isConnected; i++) {
+        await new Promise((r) => { tv.onseeked = r; tv.currentTime = (dur * (i + 0.5)) / n; setTimeout(r, 1500); });
+        try { const c = document.createElement("canvas"); c.width = 80; c.height = 80; const k = Math.max(80 / tv.videoWidth, 80 / tv.videoHeight); c.getContext("2d").drawImage(tv, (80 - tv.videoWidth * k) / 2, (80 - tv.videoHeight * k) / 2, tv.videoWidth * k, tv.videoHeight * k); th.insertAdjacentHTML("beforeend", `<img src="${c.toDataURL("image/jpeg", 0.6)}" alt="">`); } catch (e) { th.insertAdjacentHTML("beforeend", "<i></i>"); }
+      }
+    })();
+    v.addEventListener("timeupdate", () => {
+      ph.style.left = pct(v.currentTime) + "%"; o.querySelector(".ved-pt").textContent = fmtDur(Math.max(0, v.currentTime - st.start));
+      if (v.currentTime >= st.end - 0.05) { v.currentTime = st.start; }
+    });
+    const playBtn = o.querySelector(".ved-play");
+    playBtn.onclick = () => { if (v.paused) { if (v.currentTime < st.start || v.currentTime > st.end) v.currentTime = st.start; v.play(); playBtn.classList.add("hide"); } else { v.pause(); playBtn.classList.remove("hide"); } };
+    v.onclick = () => playBtn.click();
+    const tAt = (x) => { const r = tl.getBoundingClientRect(); return Math.max(0, Math.min(1, (x - r.left) / r.width)) * dur; };
+    let drag = null;
+    tl.addEventListener("pointerdown", (e) => {
+      tl.setPointerCapture(e.pointerId); const t = tAt(e.clientX);
+      if (mode === "cover") drag = "cover";
+      else drag = e.target.classList.contains("l") ? "l" : e.target.classList.contains("r") ? "r" : Math.abs(t - st.start) < Math.abs(t - st.end) ? "l" : "r";
+      move(e);
+    });
+    const move = (e) => {
+      if (!drag) return; const t = tAt(e.clientX);
+      if (drag === "cover") { st.cover = Math.max(st.start, Math.min(st.end, t)); v.currentTime = st.cover; }
+      else if (drag === "l") { st.start = Math.max(0, Math.min(t, st.end - 0.5)); if (st.end - st.start > 30) st.end = st.start + 30; v.currentTime = st.start; }
+      else { st.end = Math.min(dur, Math.max(t, st.start + 0.5)); if (st.end - st.start > 30) st.start = st.end - 30; v.currentTime = st.end - 0.1; }
+      if (st.cover < st.start || st.cover > st.end) st.cover = st.start;
+      draw();
+    };
+    tl.addEventListener("pointermove", move);
+    tl.addEventListener("pointerup", () => (drag = null)); tl.addEventListener("pointercancel", () => (drag = null));
+    qa(".h", sel).forEach((h) => h.addEventListener("keydown", (e) => {
+      const d = e.key === "ArrowRight" ? 0.5 : e.key === "ArrowLeft" ? -0.5 : 0; if (!d) return; e.preventDefault();
+      if (h.classList.contains("l")) st.start = Math.max(0, Math.min(st.start + d, st.end - 0.5)); else st.end = Math.min(dur, Math.max(st.end + d, st.start + 0.5)); draw();
+    }));
+    o.querySelector(".ved-tools").onclick = (e) => {
+      const b = e.target.closest("[data-m]"); if (!b) return; const m = b.dataset.m;
+      if (m === "trim" || m === "cover") { mode = m; qa(".ved-tools [data-m]", o).forEach((x) => x.classList.toggle("on", x.dataset.m === m)); }
+      if (m === "sound") st.mute = !st.mute;
+      if (m === "format") { const i = ASPECTS.findIndex((a) => a[0] === st.aspect); st.aspect = ASPECTS[(i + 1) % ASPECTS.length][0]; }
+      if (m === "rotate") st.rotate = (st.rotate + 90) % 360;
+      draw();
+    };
+    const close = () => { v.pause(); o.classList.remove("on"); setTimeout(() => o.remove(), 200); };
+    o.querySelector(".ved-x").onclick = close;
+    $("vedReset").onclick = () => { Object.assign(st, { start: 0, end: Math.min(dur, 30), cover: 0, rotate: 0, aspect: "orig", mute: false }); draw(); toast("Вернули оригинал"); };
+    const save = () => {
+      if (st.end - st.start > 30.05) return toast("Итоговое видео — не длиннее 30 секунд");
+      f._edit = { start: +st.start.toFixed(2), end: +st.end.toFixed(2), cover: +st.cover.toFixed(2), rotate: st.rotate, aspect: st.aspect, mute: st.mute };
+      try { localStorage.setItem(edKey(f), JSON.stringify(f._edit)); } catch (e) {}   // параметры — в черновике
+      close(); onDone && onDone(); toast("✂ Изменения сохранены в черновике");
+    };
+    $("vedSave").onclick = save; o.querySelector(".ved-done").onclick = save;
+    draw();
+  }
 
 /* ===== 50-map.js ===== */
   /* =====================================================
@@ -1889,19 +2386,14 @@
   $("radarBox").onclick = (e) => { const b = e.target.closest("[data-post]"); if (b) openPost(b.dataset.post); };
 
   // события по дням (идея из Posse): колонка даты слева, карточки справа; "Все / Сегодня / Неделя"
-  let evPeriod = "all", evKind = null;
-  // v14: быстрые входы ленты — "Встречи" и "События" открывают один календарь с фильтром по типу
-  qa("[data-quick]").forEach((b) => (b.onclick = () => { evKind = b.dataset.quick; go("sv-events"); }));
-  document.addEventListener("click", (e) => { const o = e.target.closest('[data-open="sv-events"]'); if (o && !o.closest("#quick")) evKind = null; }, true);
+  let evPeriod = "all";
   qa("#evSeg [data-ev]").forEach((b) => (b.onclick = () => { evPeriod = b.dataset.ev; qa("#evSeg button").forEach((x) => x.classList.toggle("on", x === b)); renderEvents(); }));
   const dayKey = (d) => d.toLocaleDateString("en-CA", { timeZone: "Asia/Almaty" });
   function renderEvents() {
     withWide("eventsList", (list) => {
       const now = new Date(), today = dayKey(now), wk = Date.now() + 7 * 86400e3;
-      $("evTitle").textContent = evKind === "meetup" ? "Встречи" : evKind === "event" ? "События" : "События и встречи";
-      const cb = document.querySelector("#sv-events [data-create]"); if (cb) { cb.dataset.create = evKind === "meetup" ? "meetup" : "event"; cb.textContent = evKind === "meetup" ? "+ Создать встречу" : "+ Создать событие"; }
-      const ev = upcoming(list).filter((p) => !evKind || p.category === evKind).filter((p) => { const t = new Date(p.event.starts_at); return evPeriod === "all" || (evPeriod === "today" ? dayKey(t) === today : t.getTime() < wk); });
-      if (!ev.length) { $("eventsList").innerHTML = `<div class="empty"><b>${evKind === "meetup" ? (evPeriod === "today" ? "Сегодня встреч нет" : "Ближайших встреч нет") : evPeriod === "today" ? "Сегодня событий нет" : "Ближайших событий нет"}</b>${evKind === "meetup" ? "Расширьте радиус или создайте встречу: футбол, настолки, прогулка" : "Создайте первое: концерт, ярмарку или встречу соседей"}</div>`; return; }
+      const ev = upcoming(list).filter((p) => { const t = new Date(p.event.starts_at); return evPeriod === "all" || (evPeriod === "today" ? dayKey(t) === today : t.getTime() < wk); });
+      if (!ev.length) { $("eventsList").innerHTML = `<div class="empty"><b>${evPeriod === "today" ? "Сегодня событий нет" : "Ближайших событий нет"}</b>Создайте первое: футбол, прогулку или встречу соседей</div>`; return; }
       const groups = []; ev.forEach((p) => { const k = dayKey(new Date(p.event.starts_at)); const g = groups.find((x) => x.k === k); if (g) g.items.push(p); else groups.push({ k, items: [p] }); });
       const tomorrow = dayKey(new Date(Date.now() + 86400e3));
       $("eventsList").innerHTML = groups.map((g) => {
@@ -2072,26 +2564,33 @@
     }
     const cnt = (k) => (profCounts ? profCounts[k] : "…");
     b.innerHTML = `<div class="ph">
-        <div class="ph-top"><div class="ph-ava">${user.avatar_url ? `<img src="${esc(user.avatar_url)}" alt="">` : esc(initial(user.name))}</div>
-          <div class="ph-stats"><div><b id="pcPosts">${cnt("posts")}</b><span id="plPosts">публикации</span></div><div><b id="pcSaved">${cnt("saved")}</b><span>сохранено</span></div><div><b id="pcEvents">${cnt("events")}</b><span id="plEvents">события</span></div></div>
-          <button class="ph-gear" id="pGear" aria-label="Настройки">⚙</button></div>
-        <b class="ph-name" translate="no">${esc(user.name)}${vBadge(user)}</b>${user.verified ? '<div class="vlabel">✓ Email подтвержден</div>' : ""}
-        ${user.district ? `<div class="ph-d">📍 ${esc(user.district)} район</div>` : ""}
+        <button class="ph-gear" id="pGear" aria-label="Настройки">⚙</button>
+        <div class="ph-ava ph-ava-c">${user.avatar_url ? `<img src="${esc(user.avatar_url)}" alt="">` : esc(initial(user.nickname || user.name))}</div>
+        <b class="ph-name" translate="no">@${esc(user.nickname || user.name)}${vBadge(user)}</b>
+        ${user.verified ? '<div class="vlabel">✓ Почта подтверждена</div>' : '<div class="vlabel warn">Почта не подтверждена</div>'}
+        <div class="ph-d">В NEAR с ${esc(dfmt(user.created_at || Date.now(), { month: "long", year: "numeric" }))}${user.district ? " · " + esc(user.district) : ""}</div>
         ${user.bio ? `<div class="ph-bio">${esc(user.bio)}</div>` : ""}
-        ${user.instagram ? `<a class="insta" href="https://instagram.com/${esc(user.instagram)}" target="_blank" rel="noopener">📷 @${esc(user.instagram)}</a>` : ""}
+        <div class="ph-stats3"><div><b id="pcLikes">${cnt("likes")}</b><span>Лайки</span></div><div><b id="pcPosts">${cnt("posts")}</b><span>Публикации</span></div><div><b id="pcEvents">${cnt("events")}</b><span>Встречи</span></div></div>
+        <div id="repBox">${repSkeleton()}</div>
+        <div class="ph-menu">
+          <button class="sec-row" id="pMeet"><span class="sec-i">📅</span><div><b>Мои встречи</b><small>участие и организация</small></div><span class="chev">›</span></button>
+          <button class="sec-row" id="pRev"><span class="sec-i">⭐</span><div><b>Отзывы</b><small>что пишут участники встреч</small></div><span class="chev">›</span></button>
+          <button class="sec-row" id="pCom"><span class="sec-i">💬</span><div><b>Мои сообщества</b><small>городской и районный чаты</small></div><span class="chev">›</span></button>
+          <button class="sec-row" id="pSec"><span class="sec-i">🛡</span><div><b>Безопасность</b><small>сессия, вход, решения, апелляции</small></div><span class="chev">›</span></button>
+        </div>
         <div class="ph-btns"><button id="pEdit">Редактировать профиль</button><button id="pShare">Поделиться</button></div>
       </div>
-      ${user.banned ? '<div class="warn-banner red ban-note">⛔ Ваш аккаунт ограничен модератором: публиковать и писать сообщения нельзя.<div class="wb-acts"><button id="pAppeal">Обжаловать</button></div></div>' : ""}
       ${api.mode === "local" ? '<div class="demo-strip">🧪 Демо-режим: аккаунт и публикации хранятся только на этом устройстве</div>' : ""}
       <div class="ptabs" id="pSeg"><button data-t="posts" class="${profTab === "posts" ? "on" : ""}">Посты</button><button data-t="media" class="${profTab === "media" ? "on" : ""}">Медиа</button><button data-t="saved" class="${profTab === "saved" ? "on" : ""}">🔒 Сохраненное</button></div>
       <div id="pList"><div class="spin"></div></div>`;
     $("pEdit").onclick = editProfile; $("pGear").onclick = () => go("sv-settings");
-    if ($("pAppeal")) $("pAppeal").onclick = () => appealSheet("user", user.id);
+    $("pSec").onclick = () => Shield.center(); $("pRev").onclick = () => openReviews(user.id, "@" + user.nickname);
+    $("pMeet").onclick = () => myMeetings(); $("pCom").onclick = () => { hist = []; go("v-chats", false); };
+    loadRep($("repBox"), user.id, true);
     $("pShare").onclick = async () => { const url = location.origin + location.pathname + "#user=" + user.id; try { if (navigator.share) { await navigator.share({ title: "NEAR", text: user.name + " в NEAR", url }); return; } } catch (e) { if (e.name === "AbortError") return; } try { await navigator.clipboard.writeText(url); toast("🔗 Ссылка на профиль скопирована"); } catch (e) { toast(url); } };
     qa("#pSeg [data-t]").forEach((x) => (x.onclick = () => { profTab = x.dataset.t; qa("#pSeg button").forEach((y) => y.classList.toggle("on", y === x)); loadProfList(); }));
     $("pList").onclick = (e) => { const g = e.target.closest("[data-gpost]"); if (g) return openPost(g.dataset.gpost); postClick(e); };
-    const lbls = () => { if (!profCounts) return; if ($("plPosts")) $("plPosts").textContent = plural(+profCounts.posts, "публикация", "публикации", "публикаций"); if ($("plEvents")) $("plEvents").textContent = plural(+profCounts.events, "событие", "события", "событий"); };
-    api.stats().then((s) => { profCounts = s; ["posts", "saved", "events"].forEach((k) => { const el = $("pc" + k[0].toUpperCase() + k.slice(1)); if (el) el.textContent = s[k]; }); lbls(); }).catch(() => {});
+    api.stats().then((s) => { profCounts = s; ["posts", "likes", "events"].forEach((k) => { const el = $("pc" + k[0].toUpperCase() + k.slice(1)); if (el) el.textContent = s[k]; }); }).catch(() => {});
     loadProfList();
   }
   async function loadProfList() {
@@ -2114,27 +2613,18 @@
   function editProfile() {
     let avatarFile = null;
     openSheet("Редактировать профиль", `<div class="av-edit"><span class="ava" id="avPrev" style="background:#ff2e8822;color:#ff6aa8">${user.avatar_url ? `<img src="${esc(user.avatar_url)}" alt="">` : esc(initial(user.name))}</span><button class="btn btn-ghost" id="avBtn" type="button">📷 Сменить фото</button><input type="file" id="avFile" accept="image/*" hidden></div>
-      <div class="fld"><label for="peNick">Никнейм</label><div class="nick-in"><span>@</span><input id="peNick" value="${esc(user.nickname || "")}" maxlength="20" autocapitalize="off" spellcheck="false"></div><div class="hint" id="peNickHint">${user.account && user.account.nickname_next_change ? `Следующая смена — ${esc(dfmt(user.account.nickname_next_change, { day: "numeric", month: "long" }))}` : "Менять можно раз в 30 дней"}</div></div>
+      <div class="fld"><label>Имя и фамилия</label><input id="peName" value="${esc(user.name)}" maxlength="60"></div>
       <div class="fld"><label>О себе</label><textarea id="peBio" maxlength="160" placeholder="Пара слов о себе: чем занимаетесь, что любите в районе" style="min-height:64px">${esc(user.bio || "")}</textarea><div class="hint" id="peBioN">${(user.bio || "").length}/160</div></div>
       <div class="fld"><label>Район</label><select id="peDist"><option value="">Не показывать</option>${DISTRICTS.map((d) => `<option ${user.district === d[0] ? "selected" : ""}>${d[0]}</option>`).join("")}</select></div>
       <div class="fld"><label>Instagram</label><input id="peInsta" value="${esc(user.instagram || "")}" placeholder="ваш_ник (без @)" autocapitalize="off" autocomplete="off"></div>
       <div class="err" id="peErr"></div>
       <div class="sheet-btns"><button class="btn btn-ghost" id="peCancel">Отмена</button><button class="btn btn-main" id="peSave">Сохранить</button></div>`);
     $("peBio").oninput = () => ($("peBioN").textContent = $("peBio").value.length + "/160");
-    nickLive($("peNick"), $("peNickHint"));
     $("avBtn").onclick = () => $("avFile").click();
     $("avFile").onchange = (e) => { const f = e.target.files[0]; if (!f) return; try { N.validateFile(f); avatarFile = f; $("avPrev").innerHTML = `<img src="${URL.createObjectURL(f)}" alt="">`; } catch (err) { toast(err.message); } };
     $("peCancel").onclick = closeSheet;
     $("peSave").onclick = async () => {
-      try {
-        user = await busy($("peSave"), async () => {
-          const nick = $("peNick").value.trim();
-          // никнейм — отдельным запросом: проверки, занятость, раз в 30 дней
-          if (nick !== (user.nickname || "")) await api.setNickname(nick);
-          return api.updateProfile({ district: $("peDist").value || null, avatarFile, instagram: $("peInsta").value, bio: $("peBio").value });
-        });
-        closeSheet(); toast("✓ Профиль обновлен"); renderProfile(); if (cur() === "sv-settings") renderSettings();
-      }
+      try { user = await busy($("peSave"), () => api.updateProfile({ name: $("peName").value, district: $("peDist").value || null, avatarFile, instagram: $("peInsta").value, bio: $("peBio").value })); closeSheet(); toast("✓ Профиль обновлен"); renderProfile(); if (cur() === "sv-settings") renderSettings(); }
       catch (e) { $("peErr").textContent = e.message; $("peErr").classList.add("on"); }
     };
   }
@@ -2183,9 +2673,15 @@
       <div class="sgrp"><div class="sg-t">Уведомления в приложении</div>${notif}
         <div class="s-note">Звуки и сигналы — пока NEAR открыт. Уведомления на заблокированный телефон — в разделе выше.</div></div>
       ${appearanceGrp()}
+      <div class="sgrp"><div class="sg-t">Видео</div>
+        <div class="srow"><span class="si">▶️</span><span class="st2"><b>Автозапуск без звука</b><small>видео в ленте запускается, когда видно на экране</small></span>${tg("v_autoplay", prefs.v_autoplay ?? true)}</div>
+        <div class="srow"><span class="si">📶</span><span class="st2"><b>Экономия трафика</b><small>без автозапуска и предзагрузки видео</small></span>${tg("v_saver", prefs.v_saver ?? false)}</div>
+        <div class="srow"><span class="si">🔊</span><span class="st2"><b>Звук при ручном запуске</b><small>автозапуск всегда без звука</small></span>${tg("v_sound", prefs.v_sound ?? false)}</div>
+        <div class="srow disabled"><span class="si">💬</span><span class="st2"><b>Субтитры</b><small>появятся вместе с субтитрами RU/KZ/EN</small></span>${tg("v_subs", false)}</div></div>
       <div class="sgrp"><div class="sg-t">Безопасность</div>
-        ${row("sAll", "📵", "Выйти на всех устройствах", "если потеряли телефон или вошли с чужого")}
-        ${user.is_mod ? row("sMod", "🛡", "Модерация", "жалобы, публикации, апелляции", '<span class="mini-badge hidden" id="modBadge"></span> ›') : ""}</div>
+        ${row("sSec", "🛡", "Центр безопасности", "сессия, история входов, решения, апелляции")}
+        ${user.is_mod ? row("sShield", "🛡", "NEAR Shield", "санкции, апелляции, связанные аккаунты, журнал") : ""}
+        ${user.is_mod ? row("sMod", "🚩", "Модерация", "жалобы, публикации, апелляции", '<span class="mini-badge hidden" id="modBadge"></span> ›') : ""}</div>
       <div class="sgrp"><div class="sg-t">О приложении</div>
         ${row("sRules", "📜", "Правила сообщества", "")}
         ${row("sPriv", "🔏", "Политика конфиденциальности", "")}
@@ -2218,14 +2714,16 @@
     on("sHidden", () => { if (!hiddenPosts.size) return; hiddenPosts.clear(); saveHidden(); renderSettings(); feedDirty = true; toast("Скрытые публикации снова в ленте"); });
     on("sHelp", () => { if (CFG.SUPPORT_EMAIL) location.href = "mailto:" + CFG.SUPPORT_EMAIL + "?subject=" + encodeURIComponent("NEAR: вопрос"); else toast("Пока поддержка через модераторов: нажмите ⚑ на любой публикации"); });
     on("sAll", async () => { if (!(await confirmSheet("Выйти на всех устройствах?", "Сеансы на всех телефонах и компьютерах завершатся. Войти можно будет снова.", "Выйти везде", true))) return; try { const was = user.id; Conv.unsub(); await api.signOutAll(); user = null; Cache.wipe(was); cache.clear(); onUserChange(); hist = []; go("v-feed", false); toast("Вы вышли на всех устройствах"); } catch (e) { toast(e.message); } });
-    on("sMod", () => go("sv-mod"));
+    on("sMod", () => go("sv-mod")); on("sSec", () => Shield.center()); on("sShield", () => ShieldAdmin.open());
     if (user.is_mod) api.openReportsCount().then((n) => { if ($("modBadge") && n) { $("modBadge").textContent = n; $("modBadge").classList.remove("hidden"); } }).catch(() => {});
     qa("[data-tg]", $("setBody")).forEach((t) => (t.onclick = async () => {
       const k = t.dataset.tg, val = !t.classList.contains("on"); t.classList.toggle("on", val);
       if (k === "show_seen") { try { user = await api.updateProfile({ show_seen: val }); toast(val ? "Статус \"в сети\" виден соседям" : "Статус \"в сети\" скрыт"); } catch (e) { t.classList.toggle("on", !val); toast(e.message); } return; }
       if (k === "stats") { try { localStorage.setItem("near_stats", val ? "1" : "0"); } catch (e) {} return; }
+      if (k === "v_subs") { t.classList.remove("on"); toast("Субтитры появятся в следующем обновлении"); return; }
       prefs[k] = val; savePrefs();
       if (k === "sound" && val) Sound.play("notif");
+      if (k === "v_autoplay" || k === "v_saver") { if (!val || k === "v_saver") Player.pauseAll(); }
     }));
     bindAppearance();
   }
@@ -2242,8 +2740,7 @@
   }
   function showPrivacy() {
     openSheet("Политика конфиденциальности", `<div class="rules" style="font-size:13px;line-height:1.5">
-      <p><b>Что мы храним:</b> email, никнейм, район (если указан), фото профиля, ваши публикации, комментарии, сообщения и место публикаций. Имя, фамилию и пол NEAR не собирает. Email и телефон видите только вы.</p>
-      <p><b>Возраст:</b> по умолчанию неизвестен. Документы NEAR не хранит. Пока возраст не проверен, недоступны личные сообщения незнакомым и офлайн-встречи.</p>
+      <p><b>Что мы храним:</b> email, имя, пол, район (если указан), фото профиля, ваши публикации, комментарии, сообщения и место публикаций.</p>
       <p><b>Местоположение:</b> используется, чтобы показать, что рядом. Точное место можно скрыть — метка сместится примерно на 200 м.</p>
       <p><b>Кто что видит:</b> публикации и профиль видят пользователи NEAR. Сохраненное, настройки и заблокированные видите только вы. Файлы из переписки доступны только ее участникам по временной ссылке.</p>
       <p><b>Модерация:</b> модераторы видят жалобы и отмеченные ИИ материалы, но не читают все переписки.</p>
@@ -2284,19 +2781,17 @@
       <li>Без спама, мошенничества и навязчивой рекламы.</li>
       <li>Без откровенных, жестоких и шокирующих фото и видео.</li>
       <li>Не публикуйте чужие личные данные: адреса, номера, документы, лица детей.</li>
-      <li>NEAR — не сервис знакомств: без романтических и интимных объявлений.</li>
-      <li>Не переводите деньги незнакомым пользователям. NEAR не просит SMS-коды.</li>
       <li>При угрозе жизни сначала звоните 112.</li>
-      <li>Мат скрывается автоматически: остается первая буква, остальное — звездочки. Угрозы не публикуются. Фото и сообщения проверяются автоматически.</li>
-      <li>Лимиты на день: новый аккаунт — 3 публикации, 20 комментариев, 3 новых запроса в чат.</li>
+      <li>Грубые слова скрываются автоматически. Фото и сообщения могут проверяться автоматически.</li>
       <li>Нарушения: жалоба ⚑ → проверка модератором → скрытие контента или блокировка аккаунта.</li>
     </ol><button class="btn btn-main full" id="rulesOk">Понятно</button>`);
     $("rulesOk").onclick = () => { closeSheet(); const cb = document.querySelector('#f-signup [name=rules]'); if (cb && $("v-auth").classList.contains("on")) cb.checked = true; };
   }
-  function reportSheet({ type, id, user_id, label }) {
+  function reportSheet({ type, id, user_id, label, timecode }) {
     if (!requireAuth("Войдите, чтобы отправить жалобу")) return;
     const R2 = N.REASONS; let reason = null;
     openSheet("Пожаловаться на " + label, `<div class="reason-list">${Object.entries(R2).map(([k, v]) => `<button class="opt-row" data-reason="${k}">${v}<span></span></button>`).join("")}</div>
+      ${timecode != null ? `<div class="s-note">⏱ Момент в видео: <b>${fmtDur(timecode)}</b> — модератор откроет ролик с этого места</div>` : ""}
       <div class="fld mt8"><textarea id="repDet" maxlength="500" placeholder="Подробности (необязательно)" style="min-height:70px"></textarea></div>
       ${user_id && user && user_id !== user.id ? `<label class="rules-check" style="margin:0 0 12px"><input type="checkbox" id="repBlock"> <span>Также заблокировать этого пользователя</span></label>` : ""}
       <div class="err" id="repErr"></div>
@@ -2306,7 +2801,7 @@
     $("repYes").onclick = async () => {
       if (!reason) { $("repErr").textContent = "Выберите причину"; $("repErr").classList.add("on"); return; }
       try {
-        await busy($("repYes"), () => api.report({ type, id, user_id, reason, details: $("repDet").value }));
+        await busy($("repYes"), () => api.report({ type, id, user_id, reason, details: (timecode != null ? `[таймкод ${fmtDur(timecode)}] ` : "") + $("repDet").value }));
         const alsoBlock = $("repBlock") && $("repBlock").checked;
         if (alsoBlock) await api.block(user_id);
         closeSheet(); toast("🛡 Спасибо! Модератор проверит жалобу" + (alsoBlock ? ", пользователь заблокирован" : ""));
@@ -2347,15 +2842,17 @@
       : fs === "incoming" ? `<button class="btn btn-main" id="uFriend">✓ Принять заявку</button>`
       : `<button class="btn btn-main" id="uFriend">➕ Добавить в друзья</button>`;
     $("uSub").textContent = fs === "friends" ? "ваш друг" : "";
-    $("uBody").innerHTML = `<div class="up"><span class="ava-w big">${ava(u)}${isOnline(u) ? '<i class="on-dot"></i>' : ""}</span><b translate="no">${esc(u.name)}${vBadge(u)}</b>${u.verified ? '<div class="vlabel">✓ Email подтвержден</div>' : ""}${seenText(u) ? `<div class="seen${isOnline(u) ? " on" : ""}">${seenText(u)}</div>` : ""}${u.bio ? `<div class="ph-bio">${esc(u.bio)}</div>` : ""}<div class="d">${u.district ? "📍 " + esc(u.district) + " район · " : ""}в NEAR с ${dfmt(u.created_at || Date.now(), { day: "numeric", month: "long", year: "numeric" })}</div>
+    $("uBody").innerHTML = `<div class="up"><span class="ava-w big">${ava(u)}${isOnline(u) ? '<i class="on-dot"></i>' : ""}</span><b translate="no">@${esc(u.nickname || u.name)}${vBadge(u)}</b>${u.verified ? '<div class="vlabel">✓ Почта подтверждена</div>' : ""}${seenText(u) ? `<div class="seen${isOnline(u) ? " on" : ""}">${seenText(u)}</div>` : ""}${u.bio ? `<div class="ph-bio">${esc(u.bio)}</div>` : ""}<div class="d">${u.district ? "📍 " + esc(u.district) + " район · " : ""}в NEAR с ${dfmt(u.created_at || Date.now(), { day: "numeric", month: "long", year: "numeric" })}</div>
       ${u.instagram ? `<a class="insta" href="https://instagram.com/${esc(u.instagram)}" target="_blank" rel="noopener">📷 @${esc(u.instagram)}</a>` : ""}</div>
       <div class="up-stats"><div><b>${u.posts}</b><br><span>публикаций</span></div><div><b>${u.friends}</b><br><span>друзей</span></div></div>
-      ${u.blocked ? `<div class="warn-banner red" style="margin:0 0 12px">🚫 Вы заблокировали этого пользователя<div class="wb-acts"><button id="uUnblock">Разблокировать</button></div></div>` : `<div class="up-acts">${fBtn}<button class="btn btn-ghost" id="uMsg">💬 Написать</button><button class="iconbtn" id="uMore">⋯</button></div>`}
+      <div id="uRep">${repSkeleton()}</div>
+      ${u.blocked ? `<div class="warn-banner red" style="margin:0 0 12px">🚫 Вы заблокировали этого пользователя<div class="wb-acts"><button id="uUnblock">Разблокировать</button></div></div>` : `<div class="up-acts">${fBtn}<button class="btn btn-ghost" id="uMsg">⭐ Отзывы</button><button class="iconbtn" id="uMore">⋯</button></div>`}
       ${fs === "incoming" && !u.blocked ? `<button class="more" id="uDecline">Отклонить заявку</button>` : ""}
-      ${user && user.is_admin && user.id !== u.id ? `<button class="more" id="uBan" style="color:${u.banned ? "var(--muted)" : "#ff6b7d"}">${u.banned ? "✓ Снять бан" : "⛔ Забанить (администратор)"}</button>` : ""}
+      ${user && user.is_mod && user.id !== u.id ? `<button class="more" id="uBan">🛡 Открыть в NEAR Shield</button>` : ""}
       <div class="lbl">Публикации</div><div id="uPosts"><div class="spin"></div></div>`;
     const reload = () => openUser(u.id);
-    if ($("uBan")) $("uBan").onclick = async () => { if (!(await confirmSheet("Модерация", u.banned ? "Снять бан?" : "Забанить пользователя? Он не сможет публиковать и писать.", "Да", !u.banned))) return; try { await api.modAction("user", u.id, u.banned ? "unban" : "ban"); toast("✓ Готово"); reload(); } catch (er) { toast(er.message); } };
+    if ($("uBan")) $("uBan").onclick = async () => { await ShieldAdmin.open(); ShieldAdmin.card(u.id); };
+    loadRep($("uRep"), u.id, false);
     if ($("uUnblock")) $("uUnblock").onclick = async () => { try { await api.unblock(u.id); toast("Разблокирован(а)"); wide = null; feedDirty = true; reload(); } catch (e) { toast(e.message); } };
     if ($("uFriend")) $("uFriend").onclick = async () => {
       if (!requireAuth("Войдите, чтобы добавлять друзей")) return;
@@ -2368,7 +2865,7 @@
       } catch (e) { toast(e.message); }
     };
     if ($("uDecline")) $("uDecline").onclick = async () => { try { await api.removeFriend(u.id); toast("Заявка отклонена"); reload(); refreshChatBadge(); } catch (e) { toast(e.message); } };
-    if ($("uMsg")) $("uMsg").onclick = () => startChat(u.id);
+    if ($("uMsg")) $("uMsg").onclick = () => openReviews(u.id, "@" + (u.nickname || u.name));
     if ($("uMore")) $("uMore").onclick = () => {
       openSheet(u.name, `<button class="opt-row" id="umRep">⚑ Пожаловаться на пользователя<span>›</span></button><button class="opt-row" id="umBlock" style="color:#ff8a95">🚫 Заблокировать<span></span></button>`);
       $("umRep").onclick = () => reportSheet({ type: "user", id: u.id, user_id: u.id, label: "пользователя" });
@@ -2378,321 +2875,286 @@
   }
   $("uBody").addEventListener("click", (e) => { const b = e.target.closest("[data-post]"); if (b && b.classList.contains("row-post")) openPost(b.dataset.post); });
 
+/* ===== 75-reputation.js ===== */
+  /* =====================================================
+     NEAR REPUTATION, отзывы после встречи, встречи (Host, co-host, посещаемость)
+     ===================================================== */
+  const REP_TXT = { high: "Высокая репутация", good: "Хорошая репутация", medium: "Средняя репутация", low: "Низкая репутация", new: "Новый участник · недостаточно данных" };
+  const repSkeleton = () => '<div class="rep-card"><div class="spin"></div></div>';
+  // полукруглая шкала; заполнение 600 мс (без анимации при reduced motion)
+  function gauge(score) {
+    const L = 157, v = score == null ? 0 : Math.max(0, Math.min(100, score)) / 100;
+    return `<svg class="gauge" viewBox="0 0 120 70" aria-hidden="true"><defs><linearGradient id="gg" x1="0" x2="1"><stop offset="0" stop-color="#FF7848"/><stop offset=".55" stop-color="#EC398E"/><stop offset="1" stop-color="#A54EE7"/></linearGradient></defs>
+      <path d="M10 62a50 50 0 0 1 100 0" fill="none" stroke="var(--line)" stroke-width="10" stroke-linecap="round"/>
+      <path class="g-fill" d="M10 62a50 50 0 0 1 100 0" fill="none" stroke="url(#gg)" stroke-width="10" stroke-linecap="round" stroke-dasharray="${L}" stroke-dashoffset="${L}" style="--to:${(L * (1 - v)).toFixed(1)}"/></svg>`;
+  }
+  const stars = (r) => (r == null ? "—" : "★ " + String(r).replace(".", ","));
+  async function loadRep(box, uid, mine) {
+    if (!box) return;
+    let r; try { r = await api.reputation(uid); } catch (e) { box.innerHTML = ""; return; }
+    const fresh = r.score == null;
+    box.innerHTML = `<div class="rep-card">
+      <div class="rep-h"><b>Репутация</b><button class="rep-i" id="repInfo" aria-label="Как считается репутация">ⓘ</button></div>
+      <div class="rep-g">${gauge(r.score)}<div class="rep-n">${fresh ? '<b class="new">Новый</b>' : `<b>${r.score}</b><small>из 100</small>`}</div></div>
+      <div class="rep-l lvl-${r.level}">${REP_TXT[r.level]}</div>
+      <div class="rep-2"><div><small>Организатор</small><b>${stars(r.host_rating)}</b><span>${r.host_reviews} ${plural(r.host_reviews, "отзыв", "отзыва", "отзывов")}</span></div>
+        <div><small>Участник</small><b>${stars(r.member_rating)}</b><span>${r.member_reviews} ${plural(r.member_reviews, "отзыв", "отзыва", "отзывов")}</span></div></div>
+      <div class="rep-3"><div><small>Посещаемость встреч</small><b>${r.attendance_pct == null ? "—" : r.attendance_pct + "%"}</b></div><div><small>Благодарности</small><b>${r.thanks}</b></div></div>
+      <p class="rep-note">${fresh ? "Балл появится после 3 отзывов от разных людей и 3 завершенных встреч." : "Репутация не является гарантией безопасности."}</p></div>`;
+    requestAnimationFrame(() => { const f = box.querySelector(".g-fill"); if (f) f.style.strokeDashoffset = f.style.getPropertyValue("--to"); });
+    $("repInfo").onclick = () => openSheet("Из чего складывается репутация", `<div class="rep-parts">${[["Отзывы участников", 30], ["Посещаемость встреч", 25], ["Соблюдение правил", 25], ["Полезная активность", 10], ["История аккаунта", 10]]
+      .map(([t, w]) => `<div><span>${t}</span><b>${w}%</b><i style="width:${w * 2.4}%"></i></div>`).join("")}</div>
+      <p class="dim" style="font-size:12.5px;margin-top:8px">Неподтвержденные жалобы, мало лайков или отсутствие активности балл не снижают. Учитываются только решения модераторов. Начальные веса уточняются по итогам пилота.</p>
+      ${mine && r.components ? `<p class="dim" style="font-size:12px;margin-top:6px">Ваши компоненты: отзывы ${r.components.V ?? "—"}, посещаемость ${r.components.A ?? "—"}, правила ${r.components.S ?? "—"}, активность ${r.components.U ?? "—"}, история ${r.components.H ?? "—"}</p>` : ""}`);
+  }
+  async function openReviews(uid, title) {
+    go("sv-reviews"); $("rvSub").textContent = title || ""; const box = $("rvBody"); box.innerHTML = '<div class="spin"></div>';
+    try {
+      const list = await api.userReviews(uid);
+      box.innerHTML = list.length ? list.map((r) => `<div class="rv-row"><div class="rv-h">${ava({ name: (r.reviewer && r.reviewer.nickname) || "?", avatar_url: r.reviewer && r.reviewer.avatar_url })}<div><b translate="no">@${esc((r.reviewer && r.reviewer.nickname) || "")}</b><small>${r.target_role === "host" ? "об организаторе" : "об участнике"} · ${timeAgo(r.created_at)}</small></div><span class="rv-s">${"★".repeat(r.rating)}<i>${"★".repeat(5 - r.rating)}</i></span></div>
+        ${r.meeting_title ? `<div class="rv-m" translate="no">🤝 ${esc(r.meeting_title.slice(0, 70))}</div>` : ""}${(r.tags || []).length ? `<div class="rv-tags">${r.tags.map((t) => `<span>${esc(N.REVIEW_TAGS[t] || t)}</span>`).join("")}</div>` : ""}
+        ${r.comment ? `<p translate="no">${esc(r.comment)}</p>` : ""}<button class="lnk rv-rep" data-rvrep="${r.id}">Пожаловаться</button></div>`).join("")
+        : '<div class="empty"><b>Отзывов пока нет</b>Отзывы оставляют участники после встречи</div>';
+      box.onclick = (e) => { const b = e.target.closest("[data-rvrep]"); if (b) reportSheet({ type: "review", id: b.dataset.rvrep, user_id: uid, label: "отзыв" }); };
+    } catch (e) { box.innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
+  }
+  /* ---------- оценка после встречи ---------- */
+  async function reviewSheet(postId) {
+    if (!requireAuth("Войдите, чтобы оставить отзыв")) return;
+    const [targets, p] = await Promise.all([api.reviewTargets(postId).catch(() => []), api.getPost(postId).catch(() => null)]);
+    const left = targets.filter((t) => !t.done);
+    if (!left.length) return toast(targets.length ? "Вы уже оценили всех участников этой встречи 💜" : "Отзыв могут оставить только подтвержденные участники в течение 7 дней после встречи");
+    const t = left[0]; let rating = 0; const tags = new Set();
+    const mc = p && p.event && N.MEET_CATS[p.event.meet_cat];
+    openSheet("Оцените встречу", `<div class="rvf">
+      <div class="rvf-meet"><span>${mc ? mc.e : "🤝"}</span><div><b translate="no">${esc(p ? p.text.slice(0, 60) : "Встреча")}</b><small>Встреча завершена</small></div></div>
+      <div class="rvf-who">${ava({ name: t.nickname || "?", avatar_url: t.avatar_url })}<b translate="no">@${esc(t.nickname || "")}</b><small>${t.role === "host" ? "Организатор встречи" : "Участник встречи"}</small></div>
+      <div class="rvf-stars" role="radiogroup" aria-label="Оценка">${[1, 2, 3, 4, 5].map((n) => `<button type="button" data-st="${n}" role="radio" aria-checked="false" aria-label="${n} из 5">☆</button>`).join("")}</div>
+      <div class="rvf-n" id="rvN">Выберите оценку</div>
+      <div class="lbl">Что вам понравилось?</div>
+      <div class="rvf-tags">${Object.entries(N.REVIEW_TAGS).map(([k, v]) => `<button type="button" data-tag="${k}">${v}</button>`).join("")}</div>
+      <textarea id="rvTx" maxlength="500" rows="3" placeholder="Расскажите о встрече..."></textarea><div class="rvf-cnt"><span id="rvCnt">0</span>/500</div>
+      <button class="btn btn-main big" id="rvSend" disabled>Отправить отзыв</button>
+      <p class="dim center" style="font-size:12px;margin-top:8px">Отзыв могут оставить только подтвержденные участники. ${left.length > 1 ? `Еще ${left.length - 1} — после этого.` : ""}</p></div>`);
+    const L = $("bsList");
+    qa("[data-st]", L).forEach((b) => (b.onclick = () => {
+      rating = +b.dataset.st; qa("[data-st]", L).forEach((x) => { const on = +x.dataset.st <= rating; x.textContent = on ? "★" : "☆"; x.classList.toggle("on", on); x.setAttribute("aria-checked", +x.dataset.st === rating ? "true" : "false"); });
+      b.classList.remove("pick"); void b.offsetWidth; b.classList.add("pick");
+      $("rvN").textContent = rating + "/5"; $("rvSend").disabled = false;
+    }));
+    qa("[data-tag]", L).forEach((b) => (b.onclick = () => { b.classList.toggle("on"); if (tags.has(b.dataset.tag)) tags.delete(b.dataset.tag); else tags.add(b.dataset.tag); }));
+    $("rvTx").oninput = () => ($("rvCnt").textContent = $("rvTx").value.length);
+    $("rvSend").onclick = async () => {
+      try { await busy($("rvSend"), () => api.reviewSubmit(postId, t.user_id, rating, [...tags], $("rvTx").value)); closeSheet(); toast("⭐ Спасибо за отзыв!"); if (left.length > 1) setTimeout(() => reviewSheet(postId), 400); }
+      catch (e) { toast(e.message); }
+    };
+  }
+  /* ---------- встреча: участники, отметки, организатор ---------- */
+  async function meetingSheet(postId) {
+    const [mi, p] = await Promise.all([api.meetingInfo(postId), api.getPost(postId).catch(() => null)]);
+    if (!mi) return toast("Встреча не найдена");
+    const role = mi.role, started = new Date(mi.starts_at) < Date.now(), going = mi.members.filter((m) => m.status === "going");
+    const mc = N.MEET_CATS[mi.meet_cat] || N.MEET_CATS.other;
+    const ATT = { attended: "✓ был(а)", missed: "не пришел(ла)", disputed: "спорно — проверит модератор", unknown: "не отмечено" };
+    openSheet("Встреча", `<div class="mt-h"><span class="mt-c">${mc.e} ${mc.n}</span><b translate="no">${esc(p ? p.text.slice(0, 80) : "")}</b>
+      <small>${fmtWhen(mi.starts_at)}${mi.ends_at ? " — " + fmtWhen(mi.ends_at) : ""} · ${going.length}${mi.capacity ? "/" + mi.capacity : ""} участников</small>
+      ${mi.status === "cancelled" ? `<div class="warn-banner red">Встреча отменена${mi.cancel_reason ? ": " + esc(mi.cancel_reason) : ""}</div>` : ""}</div>
+      <div class="lbl">Организатор</div><div class="u-row" data-user="${mi.host_id}">${ava({ name: (mi.host && mi.host.nickname) || "?", avatar_url: mi.host && mi.host.avatar_url })}<div class="tx"><b translate="no">@${esc((mi.host && mi.host.nickname) || "")}</b><span>Host${mi.cohost_id ? " · есть co-host" : ""}</span></div></div>
+      <div class="lbl mt8">Участники</div>${going.length ? going.map((m) => `<div class="u-row mt-m"><span data-user="${m.user_id}">${ava({ name: m.nickname || "?", avatar_url: m.avatar_url })}</span><div class="tx"><b translate="no">@${esc(m.nickname || "")}${m.user_id === mi.cohost_id ? " · co-host" : ""}</b><span>${started ? ATT[m.attendance] : "идет"}</span></div>
+        ${role === "host" || role === "cohost" ? (started ? `<button class="pill-btn" data-mark="${m.user_id}" data-v="1" aria-label="Был">✓</button><button class="pill-btn ghost" data-mark="${m.user_id}" data-v="0" aria-label="Не пришел">✕</button>` : `<button class="pill-btn ghost" data-mact="${m.user_id}" aria-label="Действия с участником">⋯</button>`) : ""}</div>`).join("") : '<div class="empty-mini">Пока никто не вступил</div>'}
+      <div class="mt-btns">
+        ${role === "member" && started ? '<button class="btn btn-ghost" id="mtSelfY">Я был(а) на встрече</button><button class="btn btn-ghost" id="mtSelfN">Я не пришел(ла)</button>' : ""}
+        ${mi.chat_id && role ? '<button class="btn btn-ghost" id="mtChat">💬 Чат встречи</button>' : ""}
+        ${role === "member" && !started && mi.status !== "cancelled" ? '<button class="btn btn-ghost" id="mtLeave">Не смогу прийти</button>' : ""}
+        ${role === "host" && !started && mi.status !== "cancelled" ? '<button class="btn btn-ghost danger-o" id="mtCancel">Отменить встречу</button>' : ""}
+      </div>
+      <p class="dim" style="font-size:12px;margin-top:8px">Организатор может исключить участника только из своей встречи или ограничить его в чате встречи. Блокировка аккаунта — только решение модератора.</p>`);
+    const L = $("bsList");
+    qa("[data-mark]", L).forEach((b) => (b.onclick = async () => { try { const r = await api.meetingMark(postId, b.dataset.mark, b.dataset.v === "1"); toast(r === "disputed" ? "Отметки расходятся — решит модератор" : "Отмечено"); meetingSheet(postId); } catch (e) { toast(e.message); } }));
+    qa("[data-mact]", L).forEach((b) => (b.onclick = () => {
+      const uid2 = b.dataset.mact;
+      openSheet("Участник", `${role === "host" ? '<button class="opt-row" id="mcCo">⭐ Сделать co-host</button>' : ""}<button class="opt-row danger" id="mcEx">🚪 Исключить из встречи</button>`);
+      if ($("mcCo")) $("mcCo").onclick = async () => { try { await api.meetingSetCohost(postId, uid2); toast("Co-host назначен"); meetingSheet(postId); } catch (e) { toast(e.message); } };
+      $("mcEx").onclick = async () => { if (!(await confirmSheet("Исключить участника?", "Он не сможет снова вступить в эту встречу. Это не блокирует аккаунт в NEAR.", "Исключить", true))) return; try { await api.meetingExclude(postId, uid2, "Исключен организатором"); toast("Участник исключен из встречи"); meetingSheet(postId); } catch (e) { toast(e.message); } };
+    }));
+    if ($("mtSelfY")) $("mtSelfY").onclick = async () => { try { await api.meetingMark(postId, user.id, true); toast("Спасибо! Посещаемость учтена"); closeSheet(); } catch (e) { toast(e.message); } };
+    if ($("mtSelfN")) $("mtSelfN").onclick = async () => { try { await api.meetingMark(postId, user.id, false); toast("Отмечено"); closeSheet(); } catch (e) { toast(e.message); } };
+    if ($("mtChat")) $("mtChat").onclick = () => { closeSheet(); openConv(mi.chat_id); };
+    if ($("mtLeave")) $("mtLeave").onclick = async () => { try { await api.meetingLeave(postId); toast(new Date(mi.starts_at) - Date.now() > 2 * 3600e3 ? "Участие отменено — спасибо, что предупредили" : "Участие отменено"); closeSheet(); const q = cache.get(postId); if (q && q.event) { q.event.joined = false; q.event.members--; patchCard(q); } } catch (e) { toast(e.message); } };
+    if ($("mtCancel")) $("mtCancel").onclick = async () => { if (!(await confirmSheet("Отменить встречу?", "Участники получат уведомление.", "Отменить встречу", true))) return; try { await api.meetingCancel(postId, "Организатор отменил встречу"); toast("Встреча отменена, участники уведомлены"); closeSheet(); } catch (e) { toast(e.message); } };
+    L.onclick = (e) => { const u2 = e.target.closest("[data-user]"); if (u2 && !e.target.closest("button[data-mark],button[data-mact]")) { closeSheet(); openUser(u2.dataset.user); } };
+  }
+  async function myMeetings() {
+    const [mine, pend] = await Promise.all([api.myPosts().catch(() => []), api.reviewsPending().catch(() => [])]);
+    const hosted = mine.filter((p) => p.category === "meetup");
+    openSheet("Мои встречи", `${pend.length ? '<div class="lbl">Ждут вашего отзыва</div>' + pend.map((x) => `<button class="opt-row" data-rv="${x.post_id}">⭐ <span translate="no">${esc(x.title)}</span><span>${x.left_count}</span></button>`).join("") : ""}
+      <div class="lbl mt8">Организую</div>${hosted.length ? hosted.map((p) => `<button class="opt-row" data-mt="${p.id}">🤝 <span translate="no">${esc(p.text.slice(0, 50))}</span><span>${p.event ? fmtWhen(p.event.starts_at) : ""}</span></button>`).join("") : '<div class="empty-mini">Вы еще не создавали встреч</div>'}
+      <button class="btn btn-main full mt12" data-create="meetup">+ Создать встречу</button>`);
+    qa("[data-rv]", $("bsList")).forEach((b) => (b.onclick = () => { closeSheet(); reviewSheet(b.dataset.rv); }));
+    qa("[data-mt]", $("bsList")).forEach((b) => (b.onclick = () => { closeSheet(); meetingSheet(b.dataset.mt); }));
+  }
+  // после встречи: предложение оставить отзыв (один раз на встречу в этой вкладке)
+  async function promptReviews() {
+    if (!user) return;
+    const list = await api.reviewsPending().catch(() => []);
+    const seen = JSON.parse(sessionStorage.getItem("near_rv_seen") || "[]");
+    const x = list.find((r) => !seen.includes(r.post_id)); if (!x) return;
+    seen.push(x.post_id); sessionStorage.setItem("near_rv_seen", JSON.stringify(seen));
+    const t = $("toast"); t.innerHTML = `⭐ Встреча "${esc(x.title.slice(0, 30))}" завершена. <button class="lnk" id="rvGo">Оценить</button>`; t.classList.add("on");
+    $("rvGo").onclick = () => { t.classList.remove("on"); reviewSheet(x.post_id); };
+    setTimeout(() => t.classList.remove("on"), 7000);
+  }
+
 /* ===== 80-chat.js ===== */
   /* =====================================================
-     ЧАТЫ, ДРУЗЬЯ, ЗАЯВКИ
+     ОБЩИЕ ЧАТЫ (город, район, встреча) и друзья. Личных сообщений нет (v14.8).
      ===================================================== */
-  let chTab = "chats";
+  let chTab = "chats", chatSeen = -1, convId = null, convInfo = null, replyTo = null;
   qa("#chSeg [data-t]").forEach((b) => (b.onclick = () => { chTab = b.dataset.t; qa("#chSeg button").forEach((x) => x.classList.toggle("on", x === b)); renderChats(); }));
-  function msgPreview(m) {
-    if (!m) return "";
-    const pre = user && m.sender_id === user.id ? "Вы: " : "";
-    if (m.mod_status === "flagged") return pre + "⚠️ Скрытое сообщение";
-    return pre + ({ image: "📷 Фото", video: "🎬 Видео", audio: "🎤 Голосовое" }[m.kind] || m.text || "");
-  }
   const shortTime = (iso) => { const d = new Date(iso), n = new Date(); return d.toDateString() === n.toDateString() ? d.toLocaleTimeString(LOC(), { hour: "2-digit", minute: "2-digit" }) : dfmt(d, { day: "numeric", month: "short" }); };
-  const convRow = (c) => `<button class="u-row${c.unread ? " unread-row" : ""}" data-conv="${c.id}"><span class="ava-w">${ava(c.other)}${isOnline(c.other) ? '<i class="on-dot"></i>' : ""}</span><div class="tx"><b translate="no">${esc(c.other.name)}${vBadge(c.other)}</b>${c.status === "request" && !c.request ? '<span class="tag-mini">запрос отправлен</span>' : c.status === "declined" ? '<span class="tag-mini red">ограничено</span>' : c.friend ? "" : '<span class="tag-mini">не в друзьях</span>'}<span translate="no">${esc(msgPreview(c.last))}</span></div><div class="meta"><small>${shortTime(c.last.created_at)}</small>${c.unread ? `<span class="unread">${c.unread}</span>` : ""}</div></button>`;
+  const CHAT_ICO = { city: "🏙️", district: "🏘️", meeting: "🤝" };
+  const chatRow = (c) => `<button class="u-row chat-row${c.unread ? " unread-row" : ""}" data-conv="${c.id}"><span class="chat-ico k-${c.kind}">${CHAT_ICO[c.kind] || "💬"}</span>
+    <div class="tx"><b translate="no">${esc(c.title)}</b><span>${c.last_text ? `<i translate="no">@${esc(c.last_nick || "")}</i>: <span translate="no">${esc(c.last_text)}</span>` : c.kind === "city" ? "Городское сообщество" : c.kind === "district" ? "Соседи вашего района" : "Чат участников встречи"}</span></div>
+    <div class="meta">${c.last_message_at ? `<small>${shortTime(c.last_message_at)}</small>` : ""}${c.unread ? `<span class="badge-n">${c.unread > 99 ? "99+" : c.unread}</span>` : ""}</div></button>`;
   async function renderChats() {
     const box = $("chBody");
-    if (!user) { box.innerHTML = `<div class="empty"><b>Сообщения и друзья</b>Войдите, чтобы переписываться с соседями<br><button class="btn btn-main mt12" id="chLogin">Войти</button></div>`; $("chLogin").onclick = () => showAuth("login"); return; }
+    if (!user) { box.innerHTML = `<div class="empty"><b>Общие чаты</b>Городской чат, чат района и чаты встреч — после входа<br><button class="btn btn-main mt12" id="chLogin">Войти</button></div>`; $("chLogin").onclick = () => showAuth("login"); return; }
     if (!box.children.length || box.querySelector(".empty")) box.innerHTML = '<div class="spin"></div>';
     try {
-      const [rq, convs] = await Promise.all([api.friendRequests(), chTab === "friends" ? Promise.resolve([]) : api.conversations()]);
-      const msgReq = convs.filter((c) => c.request && c.status === "request");
-      const nReq = rq.incoming.length + msgReq.length;
-      $("reqBadge").textContent = nReq; $("reqBadge").classList.toggle("hidden", !nReq);
+      const rq = await api.friendRequests();
+      $("reqBadge").textContent = rq.incoming.length; $("reqBadge").classList.toggle("hidden", !rq.incoming.length);
       if (chTab === "chats") {
-        const list = convs.filter((c) => !c.request);
-        box.innerHTML = (msgReq.length ? `<button class="req-strip" data-tab="requests">✉️ ${msgReq.length} ${plural(msgReq.length, "запрос", "запроса", "запросов")} на переписку от незнакомых людей ›</button>` : "")
-          + (list.length ? list.map(convRow).join("") : `<div class="empty"><b>Пока нет переписок</b>Откройте профиль соседа и нажмите "Написать"<br><button class="btn btn-main mt12" data-open="sv-find">Найти людей</button></div>`);
-      } else if (chTab === "friends") {
-        const list = await api.friends();
-        box.innerHTML = list.length ? list.map((u) => `<div class="u-row" data-user="${u.id}"><span class="ava-w">${ava(u)}${isOnline(u) ? '<i class="on-dot"></i>' : ""}</span><div class="tx"><b translate="no">${esc(u.name)}${vBadge(u)}</b><span>${isOnline(u) ? '<em class="ok-t">в сети</em> · ' : ""}${u.district ? esc(u.district) + " район" : ""}${u.instagram ? " · @" + esc(u.instagram) : ""}</span></div><button class="pill-btn" data-chat="${u.id}" aria-label="Написать">💬</button></div>`).join("")
-          : `<div class="empty"><b>Друзей пока нет</b>Найдите соседей по имени или добавьте автора публикации из его профиля</div>`;
+        const list = await api.chatList();
+        box.innerHTML = (list.length ? list.map(chatRow).join("") : `<div class="empty"><b>Чатов пока нет</b>Выберите район в профиле или вступите во встречу</div>`)
+          + (!user.district ? `<button class="req-strip" data-open="sv-settings">🏘️ Укажите район в профиле — откроется чат соседей ›</button>` : "");
       } else {
-        // CHAT-01: запросы на переписку от незнакомых + заявки в друзья
-        box.innerHTML = (msgReq.length ? '<div class="lbl">Запросы на переписку</div><div class="s-note" style="margin:0 0 8px">Пока вы не приняли запрос, собеседник не может отправить больше одного сообщения, фото и ссылки.</div>' + msgReq.map(convRow).join("") : "")
-          + (rq.incoming.length ? '<div class="lbl mt12">Заявки в друзья</div>' + rq.incoming.map((u) => `<div class="u-row" data-user="${u.id}">${ava(u)}<div class="tx"><b translate="no">${esc(u.name)}</b><span>хочет добавить вас в друзья</span></div><button class="pill-btn" data-accept="${u.id}">Принять</button><button class="pill-btn ghost" data-decline="${u.id}" aria-label="Отклонить">✕</button></div>`).join("") : "")
-          + (rq.outgoing.length ? '<div class="lbl mt12">Отправленные заявки</div>' + rq.outgoing.map((u) => `<div class="u-row" data-user="${u.id}">${ava(u)}<div class="tx"><b translate="no">${esc(u.name)}</b><span>ждем ответа</span></div><button class="pill-btn ghost" data-decline="${u.id}">Отменить</button></div>`).join("") : "")
-          || '<div class="empty"><b>Запросов нет</b>Здесь появятся запросы на переписку и заявки в друзья</div>';
+        const fr = await api.friends();
+        box.innerHTML = (rq.incoming.length ? '<div class="lbl">Заявки в друзья</div>' + rq.incoming.map((u) => `<div class="u-row" data-user="${u.id}">${ava(u)}<div class="tx"><b translate="no">@${esc(u.nickname || u.name)}</b><span>хочет добавить вас в друзья</span></div><button class="pill-btn" data-accept="${u.id}">✓ Принять</button><button class="pill-btn ghost" data-decline="${u.id}" aria-label="Отклонить">✕</button></div>`).join("") : "")
+          + '<div class="lbl mt12">Друзья</div>' + (fr.length ? fr.map((u) => `<div class="u-row" data-user="${u.id}"><span class="ava-w">${ava(u)}</span><div class="tx"><b translate="no">@${esc(u.nickname || u.name)}${vBadge(u)}</b><span>${u.district ? esc(u.district) : "Алматы"}</span></div></div>`).join("")
+            : '<div class="empty-mini">Друзей пока нет. Добавить можно из профиля участника встречи или автора публикации</div>')
+          + '<button class="search mt12" data-open="sv-find">🔍 Найти по никнейму</button>';
       }
     } catch (e) { box.innerHTML = `<div class="empty"><b>Ошибка</b>${esc(e.message)}<br><button class="btn btn-main mt12" id="chRetry">Повторить</button></div>`; $("chRetry").onclick = renderChats; }
   }
   $("chBody").onclick = async (e) => {
     let b;
-    if ((b = e.target.closest("[data-tab]"))) { const t = document.querySelector(`#chSeg [data-t="${b.dataset.tab}"]`); if (t) t.click(); return; }
     if ((b = e.target.closest("[data-accept]"))) { try { await api.acceptFriend(b.dataset.accept); toast("🤝 Теперь вы друзья"); renderChats(); refreshChatBadge(); } catch (er) { toast(er.message); } return; }
     if ((b = e.target.closest("[data-decline]"))) { try { await api.removeFriend(b.dataset.decline); toast("Заявка удалена"); renderChats(); refreshChatBadge(); } catch (er) { toast(er.message); } return; }
-    if ((b = e.target.closest("[data-chat]"))) return startChat(b.dataset.chat);
     if ((b = e.target.closest("[data-conv]"))) return openConv(b.dataset.conv);
     if ((b = e.target.closest("[data-user]"))) return openUser(b.dataset.user);
   };
-  // notify — прозвучать и показать подсказку, если непрочитанных стало больше
-  let chatSeen = -1;
   async function refreshChatBadge(notify) {
     if (!api || !user) { $("chatBadge").classList.add("hidden"); return; }
     try {
-      const [m, rq] = await Promise.all([api.unreadMessages(), api.friendRequests()]);
-      const n = m + rq.incoming.length;
+      const [list, rq] = await Promise.all([api.chatList(), api.friendRequests()]);
+      const m = list.reduce((t, c) => t + (c.unread || 0), 0), n = Math.min(m, 99) + rq.incoming.length;
       $("chatBadge").textContent = n > 9 ? "9+" : n; $("chatBadge").classList.toggle("hidden", !n);
-      if (notify && chatSeen >= 0 && m > chatSeen && cur() !== "sv-conv") { if (prefOn("n_msg")) Sound.play("message"); toast("💬 Новое сообщение"); }
+      if (notify && chatSeen >= 0 && m > chatSeen && cur() !== "sv-conv" && prefOn("n_msg")) Sound.play("message");
       chatSeen = m;
     } catch (e) {}
   }
+  // личных сообщений нет: из профиля можно добавить в друзья или встретиться в общем чате
+  function startChat() { toast("Личных сообщений в NEAR нет. Общайтесь в общих чатах и чатах встреч"); hist = []; go("v-chats", false); }
 
-  /* поиск людей */
+  /* поиск по никнейму */
   let fT = null;
   $("fq").oninput = () => { clearTimeout(fT); fT = setTimeout(async () => {
-    const q = $("fq").value.trim();
-    if (q.length < 2) { $("fRes").innerHTML = '<div class="dim center" style="font-size:12px;padding:20px">Введите минимум 2 буквы</div>'; return; }
+    const q = $("fq").value.trim().replace(/^@/, "");
+    if (q.length < 2) { $("fRes").innerHTML = '<div class="dim center" style="font-size:12px;padding:20px">Введите минимум 2 символа никнейма</div>'; return; }
     $("fRes").innerHTML = '<div class="spin"></div>';
-    try { const list = await api.searchUsers(q); $("fRes").innerHTML = list.length ? list.map((u) => `<button class="u-row" data-user="${u.id}">${ava(u)}<div class="tx"><b>${esc(u.name)}</b><span>${u.district ? esc(u.district) + " район" : "Алматы"}${u.instagram ? " · @" + esc(u.instagram) : ""}</span></div><span class="pill-btn ghost">Профиль</span></button>`).join("") : '<div class="empty"><b>Никого не нашли</b>Проверьте написание имени</div>'; }
+    try { const list = await api.searchUsers(q); $("fRes").innerHTML = list.length ? list.map((u) => `<button class="u-row" data-user="${u.id}">${ava(u)}<div class="tx"><b translate="no">@${esc(u.nickname || u.name)}</b><span>${u.district ? esc(u.district) : "Алматы"}</span></div></button>`).join("") : '<div class="empty">Никого не нашли</div>'; }
     catch (e) { $("fRes").innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
   }, 300); };
   $("fRes").onclick = (e) => { const b = e.target.closest("[data-user]"); if (b) openUser(b.dataset.user); };
 
   /* =====================================================
-     ПЕРЕПИСКА: текст, фото, видео, голосовые
+     ОТКРЫТЫЙ ЧАТ: сообщения, ответы, реакции
      ===================================================== */
-  let convId = null, convInfo = null;
   const uuid = () => (crypto.randomUUID ? crypto.randomUUID() : "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => { const r = (Math.random() * 16) | 0; return (c === "x" ? r : (r & 3) | 8).toString(16); }));
-  async function startChat(otherId) {
-    if (!requireAuth("Войдите, чтобы писать сообщения", { t: "chat", a: otherId })) return;
-    try { const cid = await api.openConversation(otherId); openConv(cid); } catch (e) { if (!gateError(e)) toast(e.message); }
-  }
-  /* CHAT-02: одна переписка — свой канал Realtime; сообщения хранятся по id (без дублей);
-     опрос сервера — только когда канал оборвался, с растущим интервалом */
+  const REACT = ["❤️", "👍", "😂", "😮", "😢", "🙏"];
   const Conv = {
-    msgs: new Map(), off: null, state: "idle", pollT: null, delay: 5000,
-    reset() { this.unsub(); this.msgs = new Map(); },
-    sub() {
-      this.unsub(); if (!convId || !api.subscribeConversation) return;
-      const cid = convId;
-      try { this.off = api.subscribeConversation(cid, (t, row) => { if (cid === convId) this.onRow(t, row); }, (st) => this.onState(st)); }
-      catch (e) { this.onState("CHANNEL_ERROR"); }
-      if (api.mode === "local") this.state = "SUBSCRIBED";
-    },
-    unsub() { if (this.off) { try { this.off(); } catch (e) {} } this.off = null; clearTimeout(this.pollT); this.state = "idle"; },
-    onState(st) {
-      const was = this.state; this.state = st;
-      if (st === "SUBSCRIBED") { clearTimeout(this.pollT); this.delay = 5000; if (was !== "idle") this.catchUp(); }
-      else if (["CHANNEL_ERROR", "TIMED_OUT", "CLOSED"].includes(st)) this.poll();
-    },
-    poll() {
-      clearTimeout(this.pollT);
-      this.pollT = setTimeout(async () => { if (convId && !document.hidden) await this.catchUp(); this.delay = Math.min(this.delay * 2, 60000); if (convId && this.state !== "SUBSCRIBED") this.poll(); }, this.delay);
-    },
-    last() { let t = null; this.msgs.forEach((m) => { if (!m._state && (!t || m.created_at > t)) t = m.created_at; }); return t; },
-    async catchUp() {
-      const cid = convId; if (!cid) return;
-      try { const list = await api.messages(cid, this.last()); if (cid !== convId) return; list.forEach((m) => this.put(m)); render(); } catch (e) {}
-    },
-    put(m) { const old = this.msgs.get(m.id); if (old && old._state === "pending" && !m._state) delete old._state; this.msgs.set(m.id, old ? Object.assign(old, m, { _state: m._state }) : m); },
-    async onRow(t, row) {
-      if (!row) return;
-      if (t === "delete") { this.msgs.delete(row.id); render(); return; }
-      if (row.media_path && api.signChat) { try { await api.signChat([row]); } catch (e) {} }
-      const isNew = !this.msgs.has(row.id);
-      this.put({ ...row, _state: undefined }); render(isNew);
-      if (t === "insert" && user && row.sender_id !== user.id) {
-        if (prefOn("n_msg")) Sound.play("message");
-        if (!document.hidden) api.markRead(convId).then(() => refreshChatBadge()).catch(() => {});
-        if (convInfo && convInfo.status === "request" && convInfo.initiator === user.id) { convInfo.status = "accepted"; convHead(); }
-      }
-    },
-    statusChanged(row) { if (!convInfo || !row || !row.status || row.status === convInfo.status) return; convInfo.status = row.status; convHead(); }
+    msgs: new Map(), off: null,
+    reset() { this.msgs.clear(); this.unsub(); },
+    sub() { this.unsub(); if (!convId || !api.subscribeChat) return; const id = convId; this.off = api.subscribeChat(id, (t) => { if (t === "insert" && convId === id) this.catchUp(); }, (st) => { if (["CHANNEL_ERROR", "TIMED_OUT"].includes(st)) this.poll(); }); },
+    unsub() { if (this.off) { try { this.off(); } catch (e) {} this.off = null; } clearTimeout(this.pT); },
+    poll() { clearTimeout(this.pT); this.pT = setTimeout(() => { if (convId && !document.hidden) this.catchUp(); this.poll(); }, 15000); },
+    async catchUp() { if (!convId) return; const id = convId; const rows = await api.chatPage(id).catch(() => null); if (!rows || convId !== id) return; rows.forEach((m) => this.msgs.set(m.id, m)); render(true); api.chatRead(id).catch(() => {}); },
+    statusChanged() {}, onRow() { this.catchUp(); }
   };
-  // шапка, предупреждения и поле ввода — по состоянию переписки (запрос, принята, отклонена, блокировка)
-  function convHead() {
-    if (!convInfo) return;
-    const o = convInfo.other, me = user && user.id, st = convInfo.status || "accepted", mine = convInfo.initiator === me;
-    $("convWho").innerHTML = `<span class="ava-w">${ava(o)}${isOnline(o) ? '<i class="on-dot"></i>' : ""}</span><div style="min-width:0"><b translate="no">${esc(o.name)}${vBadge(o)}</b><span class="${isOnline(o) ? "ok-t" : ""}">${o.deleted ? "аккаунт удален" : seenText(o) || (convInfo.friend ? "друг" : "не в друзьях")}</span></div>`;
-    const w = $("convWarn"); w.className = "warn-banner"; w.classList.remove("hidden");
-    let canWrite = true, canFiles = true;
-    if (o.deleted) {
-      const left = convInfo.orphaned_at ? Math.max(0, 30 - Math.floor((Date.now() - new Date(convInfo.orphaned_at)) / 86400e3)) : 30;
-      w.classList.add("red"); w.innerHTML = `Собеседник удалил аккаунт. Переписка доступна только для чтения и будет удалена через ${left} ${plural(left, "день", "дня", "дней")}.`; canWrite = false;
-    }
-    else if (convInfo.blocked) { w.classList.add("red"); w.innerHTML = "🚫 Переписка недоступна: пользователь заблокирован."; canWrite = false; }
-    else if (st === "request" && !mine) {
-      w.innerHTML = `<b>Запрос на переписку</b> ${esc(o.name)} нет у вас в друзьях. Не переходите по ссылкам и не сообщайте коды из SMS, данные карт и адрес.
-        <div class="wb-acts"><button class="ok" id="cwAccept">✓ Принять</button><button id="cwDecline">Отклонить</button><button id="cwBlock">🚫 Заблокировать</button><button id="cwRep">⚑ Пожаловаться</button></div>`;
-      canFiles = false;
-    } else if (st === "request" && mine) {
-      const sent = [...Conv.msgs.values()].some((m) => m.sender_id === me && m._state !== "failed");
-      w.innerHTML = sent ? `<b>Запрос отправлен.</b> Дождитесь, пока ${esc(o.name)} примет его, — тогда можно будет продолжить переписку.`
-        : `<b>Это первое сообщение незнакомому человеку.</b> До принятия запроса можно отправить одно сообщение без фото и ссылок.`;
-      canWrite = !sent; canFiles = false;
-    } else if (st === "declined") {
-      w.classList.add("red");
-      w.innerHTML = mine ? "Собеседник ограничил переписку. Отправлять сообщения нельзя." : `Вы отклонили запрос.<div class="wb-acts"><button class="ok" id="cwAccept">Все-таки принять</button></div>`;
-      canWrite = false;
-    } else if (!convInfo.friend) {
-      w.innerHTML = `⚠️ ${esc(o.name)} нет у вас в друзьях. Не переходите по ссылкам, не сообщайте коды из SMS, данные карт и адрес.<div class="wb-acts"><button id="cwRep">⚑ Пожаловаться</button><button id="cwBlock">🚫 Заблокировать</button></div>`;
-    } else w.classList.add("hidden");
-    $("composer").classList.toggle("hidden", !canWrite);
-    $("attachBtn").classList.toggle("hidden", !canFiles); $("micBtn").classList.toggle("hidden", !canFiles || !!$("msgIn").value.trim());
-    $("composer").dataset.files = canFiles ? "1" : "";
-    const on = (id, f) => { const el = $(id); if (el) el.onclick = f; };
-    on("cwRep", () => reportSheet({ type: "user", id: o.id, user_id: o.id, label: "пользователя" }));
-    on("cwBlock", () => blockUser(o.id, o.name, () => openConv(convId)));
-    on("cwAccept", async () => { try { convInfo.status = await api.conversationRespond(convId, true); convHead(); refreshChatBadge(); toast("Запрос принят"); Obs.track("chat_request_accepted"); } catch (e) { toast(e.message); } });
-    on("cwDecline", async () => {
-      if (!(await confirmSheet("Отклонить запрос?", `${o.name} больше не сможет писать вам в этой переписке. Вы сможете принять запрос позже.`, "Отклонить", true))) return;
-      try { convInfo.status = await api.conversationRespond(convId, false); convHead(); refreshChatBadge(); toast("Запрос отклонен"); } catch (e) { toast(e.message); }
-    });
-  }
   async function openConv(cid) {
-    go("sv-conv"); Conv.reset(); convId = cid; convInfo = null; lastSig = "";
-    $("convMsgs").innerHTML = '<div class="spin"></div>'; $("convWarn").classList.add("hidden"); $("convWho").innerHTML = ""; $("convProg").textContent = "";
-    try {
-      convInfo = await api.conversationInfo(cid);
-      if (convId !== cid) return;
-      const list = await api.messages(cid);
-      if (convId !== cid) return;
-      list.forEach((m) => Conv.put(m)); convHead(); render(true);
-      Conv.sub();
-    } catch (e) { $("convMsgs").innerHTML = `<div class="empty"><b>Не открылось</b>${esc(e.message)}</div>`; }
+    if (!requireAuth("Войдите, чтобы открыть чат", { t: "chat", a: cid })) return;
+    go("sv-conv"); Conv.reset(); convId = cid; replyTo = null; $("cvReply").classList.add("hidden");
+    $("convMsgs").innerHTML = '<div class="spin"></div>';
+    const list = await api.chatList().catch(() => []);
+    convInfo = list.find((c) => c.id === cid) || { id: cid, title: "Чат", kind: "city" };
+    $("convWho").innerHTML = `<span class="chat-ico k-${convInfo.kind}">${CHAT_ICO[convInfo.kind] || "💬"}</span><div><b translate="no">${esc(convInfo.title)}</b><small>${convInfo.kind === "city" ? "Городское сообщество" : convInfo.kind === "district" ? "Чат района" : "Участники встречи"}</small></div>`;
+    try { const rows = await api.chatPage(cid); rows.forEach((m) => Conv.msgs.set(m.id, m)); render(true); api.chatRead(cid).catch(() => {}); refreshChatBadge(); }
+    catch (e) { $("convMsgs").innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
+    Conv.sub();
   }
-  $("convWho").onclick = () => { if (convInfo && convInfo.other.id) openUser(convInfo.other.id); };
-  $("convMenu").onclick = () => {
-    if (!convInfo || !convInfo.other.id) return; const o = convInfo.other;
-    openSheet(o.name, `<button class="opt-row" id="cmProf">👤 Профиль<span>›</span></button><button class="opt-row" id="cmRep">⚑ Пожаловаться<span>›</span></button><button class="opt-row" id="cmBlock" style="color:#ff8a95">🚫 Заблокировать<span></span></button>`);
-    $("cmProf").onclick = () => { closeSheet(); openUser(o.id); };
-    $("cmRep").onclick = () => reportSheet({ type: "user", id: o.id, user_id: o.id, label: "пользователя" });
-    $("cmBlock").onclick = () => blockUser(o.id, o.name, () => openConv(convId));
-  };
-  let lastSig = "";
   function render(scroll) {
-    const list = [...Conv.msgs.values()].sort((a, b) => (a.created_at === b.created_at ? (a.id > b.id ? 1 : -1) : a.created_at.localeCompare(b.created_at)));
-    const sig = list.map((m) => m.id + (m._state || "") + m.mod_status + (m.read_at ? 1 : 0) + (m.media_url || "")).join("|");
-    if (sig === lastSig && !scroll) return; lastSig = sig;
-    const box = $("convMsgs"), atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
-    let day = "";
-    box.innerHTML = list.length ? list.map((m) => {
-      const d = dfmt(m.created_at, { day: "numeric", month: "long" });
-      const sep = d !== day ? `<div class="day-sep">${(day = d)}</div>` : "";
-      return sep + bubble(m);
-    }).join("") : `<div class="empty" style="margin-top:20px"><b>Начните разговор</b>${convInfo && convInfo.status === "request" ? "Первое сообщение — только текст, без ссылок" : "Напишите сообщение, отправьте фото или голосовое 🎤"}</div>`;
-    if (scroll || atBottom) box.scrollTop = box.scrollHeight;
-    if (list.some((m) => user && m.sender_id !== user.id && !m.read_at) && !document.hidden) { api.markRead(convId).then(() => refreshChatBadge()).catch(() => {}); }
-    if (convInfo && convInfo.status === "request" && convInfo.initiator === (user && user.id)) convHead();
+    const box = $("convMsgs"), atEnd = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
+    const list = [...Conv.msgs.values()].sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
+    box.innerHTML = list.length ? list.map(bubble).join("") : '<div class="empty-mini">Сообщений пока нет. Начните разговор — вежливо и по делу 🙂</div>';
+    if (scroll || atEnd) box.scrollTop = box.scrollHeight;
   }
   function bubble(m) {
-    const mine = user && m.sender_id === user.id;
-    const st = m._state === "pending" ? " 🕓" : m._state === "failed" ? "" : mine ? (m.read_at ? " ✓✓" : " ✓") : "";
-    const tm = `<span class="tm">${new Date(m.created_at).toLocaleTimeString(LOC(), { hour: "2-digit", minute: "2-digit" })}${st}${mine && m.mod_status === "pending" ? " ⏳" : ""}</span>`;
-    const fail = m._state === "failed" ? `<div class="bub-fail"><span>⚠ Не отправлено${m._err ? ": " + esc(m._err) : ""}</span><button data-resend="${m.id}">Повторить</button><button data-drop="${m.id}">Удалить</button></div>` : "";
-    const flagged = m.mod_status === "flagged", pendingForThem = m.mod_status === "pending" && !mine && m.kind === "image";
-    const cls = `bub ${mine ? "me" : "them"}${m._state ? " " + m._state : ""}`;
-    let body = "";
-    if (m.kind === "text") {
-      body = flagged && !mine ? `<div class="blur-wrap" data-reveal style="border-radius:10px"><div class="bg" style="padding:4px 2px">${esc(m.text)}</div><div class="shield" style="font-size:11px">⚠️ Возможно оскорбительное<button type="button">Показать</button></div></div>` : esc(m.text);
-      return `<div class="${cls}" data-msg="${m.id}" translate="no">${body}${flagged && mine ? '<span class="tm">⚠️ скрыто для получателя</span>' : ""}${tm}${fail}</div>`;
-    }
-    if (m.media_locked || (m.kind !== "text" && !m.media_url)) return `<div class="${cls}" data-msg="${m.id}"><span class="dim">🔒 Файл недоступен</span>${tm}</div>`;
-    if (m.kind === "image") {
-      const img = `<img src="${esc(m.media_url)}" alt="" loading="lazy" data-zoom>`;
-      body = (flagged || pendingForThem) && !mine ? `<div class="blur-wrap" data-reveal>${img}<div class="shield">${flagged ? "⚠️ Возможно неприемлемое фото" : "⏳ Фото проверяется"}<button type="button">Показать</button></div></div>` : img;
-    }
-    if (m.kind === "video") body = `<video src="${esc(m.media_url)}" controls playsinline preload="metadata"></video>`;
-    if (m.kind === "audio") body = `<audio src="${esc(m.media_url)}" controls preload="metadata"></audio>`;
-    return `<div class="${cls} media" data-msg="${m.id}">${body}${m.text ? `<div class="cap" translate="no">${esc(m.text)}</div>` : ""}${tm}</div>`;
+    const mine = user && m.sender_id === user.id, R = m.reactions || {};
+    const reacts = Object.keys(R).length ? `<div class="rx">${Object.entries(R).map(([e, n]) => `<button class="rx-b${(m.mine_reactions || []).includes(e) ? " on" : ""}" data-react="${m.id}" data-e="${e}" aria-label="${e} ${n}">${e} ${n}</button>`).join("")}</div>` : "";
+    return `<div class="gmsg${mine ? " mine" : ""}${m.pending ? " sending" : ""}" data-msg="${m.id}">
+      ${mine ? "" : `<button class="g-ava" data-user="${m.sender_id}" aria-label="@${esc(m.nickname || "")}">${ava({ name: m.nickname || "?", avatar_url: m.avatar_url })}</button>`}
+      <div class="g-b">${mine ? "" : `<b class="g-nick" data-user="${m.sender_id}" translate="no">@${esc(m.nickname || "")}</b>`}
+        ${m.reply_to ? `<div class="g-reply" translate="no"><b>@${esc(m.reply_nick || "")}</b> ${esc(m.reply_text || "")}</div>` : ""}
+        <div class="g-t" translate="no">${esc(m.text)}</div>
+        <div class="g-m">${m.mod_status === "pending" ? "🛡 на проверке · " : ""}${m.pending ? "🕓" : shortTime(m.created_at)}</div></div>
+      <button class="g-more" data-mmenu="${m.id}" aria-label="Действия с сообщением">⋯</button>${reacts}</div>`;
   }
-  $("convMsgs").addEventListener("click", (e) => {
+  $("convMsgs").onclick = async (e) => {
     let b;
-    if ((b = e.target.closest("[data-resend]"))) { const m = Conv.msgs.get(b.dataset.resend); if (m) sendText(m.text, m.id); return; }
-    if ((b = e.target.closest("[data-drop]"))) { Conv.msgs.delete(b.dataset.drop); render(); if (convInfo) convHead(); return; }
-    if ((b = e.target.closest("[data-reveal]"))) { if (e.target.tagName === "BUTTON") { b.classList.remove("blur-wrap"); const s2 = b.querySelector(".shield"); if (s2) s2.remove(); } return; }
-    if ((b = e.target.closest("[data-zoom]"))) return openViewer(b.src);
-    if ((b = e.target.closest("[data-msg]")) && !e.target.closest("audio,video")) { const m = Conv.msgs.get(b.dataset.msg); if (m && !m._state) msgMenu(m.id, b.classList.contains("me")); }
-  });
-  function msgMenu(id, mine) {
-    const m = Conv.msgs.get(id), txt = (m && m.text) || "";
-    openSheet("Сообщение", `${txt ? '<button class="opt-row" id="mmCopy">📋 Копировать текст<span></span></button>' : ""}${mine ? `<button class="opt-row" id="mmDel" style="color:#ff8a95">🗑 Удалить у всех<span></span></button>` : `<button class="opt-row" id="mmRep">⚑ Пожаловаться на сообщение<span>›</span></button>`}`);
-    if ($("mmCopy")) $("mmCopy").onclick = async () => { try { await navigator.clipboard.writeText(txt); toast("Скопировано"); } catch (e) { toast("Не удалось скопировать"); } closeSheet(); };
-    if ($("mmDel")) $("mmDel").onclick = async () => { closeSheet(); try { await api.deleteMessage(id); Conv.msgs.delete(id); render(); } catch (e) { toast(e.message); } };
-    if ($("mmRep")) $("mmRep").onclick = () => reportSheet({ type: "message", id, user_id: convInfo && convInfo.other.id, label: "сообщение" });
+    if ((b = e.target.closest("[data-user]"))) return openUser(b.dataset.user);
+    if ((b = e.target.closest("[data-react]"))) return react(b.dataset.react, b.dataset.e);
+    if ((b = e.target.closest("[data-mmenu]"))) return msgMenu(b.dataset.mmenu);
+  };
+  async function react(id, emoji) {
+    const m = Conv.msgs.get(id); if (!m) return;
+    try { const on = await api.chatReact(id, emoji); m.reactions = m.reactions || {}; m.mine_reactions = m.mine_reactions || [];
+      m.reactions[emoji] = Math.max(0, (m.reactions[emoji] || 0) + (on ? 1 : -1)); if (!m.reactions[emoji]) delete m.reactions[emoji];
+      m.mine_reactions = on ? [...m.mine_reactions, emoji] : m.mine_reactions.filter((x) => x !== emoji); render(); }
+    catch (er) { toast(er.message); }
   }
-  $("msgIn").oninput = () => { const has = !!$("msgIn").value.trim(), files = $("composer").dataset.files === "1"; $("sendBtn").classList.toggle("hidden", !has); $("micBtn").classList.toggle("hidden", has || !files); };
-  // текст отправляется сразу в ленту переписки: 🕓 отправляется → ✓ доставлено; при ошибке — "Повторить" (тот же id, без дубля)
-  async function sendText(text, id) {
-    const cid = convId; if (!cid || !user) return;
-    id = id || uuid();
-    Conv.put({ id, conversation_id: cid, sender_id: user.id, kind: "text", text, mod_status: "ok", read_at: null, created_at: (Conv.msgs.get(id) || {}).created_at || new Date().toISOString(), _state: "pending" });
-    render(true);
-    try {
-      const row = await api.sendMessage(cid, { text, id });
-      if (cid !== convId) return;
-      Conv.put({ ...row, _state: undefined }); render(); Sound.play("send");
-      Obs.track("message_sent"); usefulAction("message");
-      // первый ответ на чужое сообщение в этой переписке — для метрики "время до первого ответа"
-      const all = [...Conv.msgs.values()].filter((x) => x.conversation_id === cid);
-      if (all.some((x) => x.sender_id !== user.id) && all.filter((x) => x.sender_id === user.id).length === 1) Obs.track("first_reply");
-    } catch (e) {
-      if (e.code === "23505") { Conv.catchUp(); return; } // уже дошло — повтор не нужен
-      if (gateError(e)) { Conv.msgs.delete(id); render(); return; }
-      const m = Conv.msgs.get(id); if (m) { m._state = "failed"; m._err = e.message; } render();
-      if (/принят|ссылк|Дождитесь|отклонил|недоступен/i.test(e.message)) toast(e.message);
-    }
+  function msgMenu(id) {
+    const m = Conv.msgs.get(id); if (!m) return;
+    const mine = user && m.sender_id === user.id, host = convInfo && convInfo.kind === "meeting" && ["host", "cohost"].includes(convInfo.role);
+    openSheet("Сообщение", `<div class="rx-pick">${REACT.map((e) => `<button data-pick="${e}" aria-label="Реакция ${e}">${e}</button>`).join("")}</div>
+      <button class="opt-row" id="mmReply">↩️ Ответить</button><button class="opt-row" id="mmCopy">📋 Скопировать текст</button>
+      ${mine ? "" : `<button class="opt-row" id="mmReport">🚩 Пожаловаться</button>`}${host && !mine ? `<button class="opt-row danger" id="mmRestrict">⏸ Ограничить в этом чате на 24 часа</button>` : ""}`);
+    qa("[data-pick]", $("bsList")).forEach((b) => (b.onclick = () => { closeSheet(); react(id, b.dataset.pick); }));
+    $("mmReply").onclick = () => { closeSheet(); replyTo = m; $("cvReply").querySelector("span").innerHTML = `Ответ <b>@${esc(m.nickname || "")}</b>: ${esc(m.text.slice(0, 60))}`; $("cvReply").classList.remove("hidden"); $("msgIn").focus(); };
+    $("mmCopy").onclick = () => { closeSheet(); navigator.clipboard && navigator.clipboard.writeText(m.text).then(() => toast("Скопировано")); };
+    if ($("mmReport")) $("mmReport").onclick = () => { closeSheet(); reportSheet({ type: "chat_message", id, user_id: m.sender_id, label: "сообщение" }); };
+    if ($("mmRestrict")) $("mmRestrict").onclick = async () => { closeSheet(); try { await api.chatRestrict(convId, m.sender_id, 24); toast("Участник ограничен в этом чате на 24 часа"); } catch (er) { toast(er.message); } };
   }
-  async function sendPayload(payload) {
-    const cid = convId; if (!cid) return;
-    try {
-      const row = await api.sendMessage(cid, payload, (m) => ($("convProg").textContent = m)); $("convProg").textContent = "";
-      if (cid === convId && row) { Conv.put(row); render(true); }
-      Sound.play("send"); Obs.track("message_sent"); usefulAction("message");
-    } catch (e) { $("convProg").textContent = ""; toast(e.message); throw e; }
-  }
+  $("cvReplyX").onclick = () => { replyTo = null; $("cvReply").classList.add("hidden"); };
+  $("convMenu").onclick = () => {
+    if (!convInfo) return;
+    openSheet(convInfo.title, `${convInfo.kind === "meeting" && convInfo.post_id ? `<button class="opt-row" id="cmMeet">🤝 Открыть встречу</button>` : ""}<button class="opt-row" id="cmRules">📜 Правила общения</button>`);
+    if ($("cmMeet")) $("cmMeet").onclick = () => { closeSheet(); openPost(convInfo.post_id); };
+    $("cmRules").onclick = () => { closeSheet(); showRules(); };
+  };
   $("composer").onsubmit = async (e) => {
-    e.preventDefault(); const v = $("msgIn").value.trim(); if (!v) return;
-    if (N.hasBad(v)) toast("🤬 Грубые слова будут скрыты звездочками");
-    $("msgIn").value = ""; $("msgIn").oninput();
-    sendText(v);
-    $("msgIn").focus();
+    e.preventDefault(); const inp = $("msgIn"), text = inp.value.trim(); if (!text || !convId) return;
+    const pre = N.clean(text, "chat");
+    if (pre.verdict === "block") return toast(pre.reasons.includes("bad_link") ? "Ссылка выглядит небезопасной. Уберите ее" : pre.reasons.includes("scam_request") ? "Нельзя просить данные карт и коды из SMS" : "Сообщение не прошло проверку NEAR Clean");
+    const key = uuid(), tmp = { id: "tmp-" + key, sender_id: user.id, nickname: user.nickname, text: pre.text, created_at: new Date().toISOString(), pending: true, reply_to: replyTo && replyTo.id, reply_nick: replyTo && replyTo.nickname, reply_text: replyTo && replyTo.text };
+    Conv.msgs.set(tmp.id, tmp); render(true); inp.value = "";
+    const rt = replyTo; replyTo = null; $("cvReply").classList.add("hidden");
+    try {
+      const m = await api.chatSend(convId, text, key, rt && rt.id);
+      Conv.msgs.delete(tmp.id); Conv.msgs.set(m.id, { ...tmp, ...m, nickname: user.nickname, pending: false, reactions: {}, mine_reactions: [] }); render(true);
+      Obs.track("message_sent");
+    } catch (er) { Conv.msgs.delete(tmp.id); render(); inp.value = text; if (!gateError(er)) toast(er.message); }
   };
-  $("attachBtn").onclick = () => $("chatFile").click();
-  $("chatFile").onchange = async (e) => {
-    const f = e.target.files[0]; e.target.value = ""; if (!f) return;
-    try { const k = N.validateChatFile(f); if (k === "audio") throw new Error("Выберите фото или видео"); await sendPayload({ file: f, kind: k }); } catch (er) { if (!er.raw) toast(er.message); }
-  };
-  /* голосовые сообщения */
-  let rec = null, recChunks = [], recStart = 0, recTimer = null, recStream = null;
-  function pickMime() {
-    const c = ["audio/mp4", "audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus"];
-    if (!window.MediaRecorder) return null;
-    for (const t of c) { try { if (MediaRecorder.isTypeSupported(t)) return t; } catch (e) {} }
-    return "";
-  }
-  $("micBtn").onclick = async () => {
-    const mime = pickMime();
-    if (mime === null || !navigator.mediaDevices) { toast("Запись голоса не поддерживается в этом браузере"); return; }
-    try { recStream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
-    catch (e) { toast("Разрешите доступ к микрофону в настройках браузера"); return; }
-    recChunks = []; rec = new MediaRecorder(recStream, mime ? { mimeType: mime } : undefined);
-    rec.ondataavailable = (ev) => { if (ev.data && ev.data.size) recChunks.push(ev.data); };
-    rec.start(250); recStart = Date.now();
-    $("composer").classList.add("hidden"); $("recBar").classList.remove("hidden"); $("recTime").textContent = "0:00";
-    recTimer = setInterval(() => { const s2 = Math.floor((Date.now() - recStart) / 1000); $("recTime").textContent = Math.floor(s2 / 60) + ":" + String(s2 % 60).padStart(2, "0"); if (s2 >= 120) $("recSend").click(); }, 250);
-  };
-  function stopRec(cancel) {
-    return new Promise((res) => {
-      clearInterval(recTimer);
-      if (!rec) { res(null); return; }
-      const r = rec; rec = null;
-      r.onstop = () => { if (recStream) recStream.getTracks().forEach((t) => t.stop()); recStream = null; $("recBar").classList.add("hidden"); $("composer").classList.toggle("hidden", !!(convInfo && convInfo.blocked));
-        if (cancel) { res(null); return; }
-        const type = (r.mimeType || "audio/webm").split(";")[0];
-        res(new File(recChunks, "voice." + (type.includes("mp4") ? "m4a" : type.split("/")[1]), { type })); };
-      try { r.stop(); } catch (e) { res(null); }
-    });
-  }
-  $("recCancel").onclick = () => stopRec(true);
-  $("recSend").onclick = async () => {
-    const dur = (Date.now() - recStart) / 1000; const f = await stopRec(false);
-    if (!f || dur < 0.8) { if (f) toast("Слишком короткое голосовое"); return; }
-    try { await sendPayload({ file: f, kind: "audio", duration: dur }); } catch (e) {}
-  };
+  function stopRec() {}
 
 /* ===== 85-moderation.js ===== */
   /* =====================================================
@@ -2712,7 +3174,7 @@
       const seen = new Set(), uniq = list.filter((r) => { const k = r.target_type + r.target_id; if (seen.has(k)) return false; seen.add(k); return true; });
       $("modSub").textContent = uniq.length ? uniq.length + " на проверке" : "все проверено";
       const admin = user && user.is_admin;
-      box.innerHTML = uniq.length ? uniq.map((r) => `<div class="rep" data-rep="${r.id}" data-tt="${r.target_type}" data-tid="${r.target_id}">
+      box.innerHTML = uniq.length ? uniq.map((r) => `<div class="rep" data-rep="${r.id}" data-tt="${r.target_type}" data-tid="${r.target_id}" data-tu="${r.target_user || ""}">
         <div class="rh"><span>${TT[r.target_type]} · жалоб: ${r.count}${r.source === "ai" ? ' <span class="tag-mini">ИИ</span>' : ""}</span><span>${timeAgo(r.created_at)}</span></div>
         <div class="rr">${esc(N.REASON_LABELS[r.reason] || r.reason)}</div>
         <div class="dim" style="font-size:11.5px">Автор: <b class="who-link" data-user="${r.target_user || ""}" translate="no">${esc(r.target.name)}</b>${r.target.banned ? " ⛔" : ""} · пожаловался: <span translate="no">${esc(r.reporter.name)}</span></div>
@@ -2720,7 +3182,7 @@
         <div class="pv" translate="no">${esc(r.preview || "—")}</div>${r.media ? (r.media.kind === "image" ? `<img class="rep-img" src="${esc(r.media.url)}" alt="" data-zoom>` : r.media.kind === "audio" ? `<audio controls src="${esc(r.media.url)}"></audio>` : `<video controls playsinline src="${esc(r.media.url)}"></video>`) : ""}
         <div class="ra">${r.target_type === "post" ? `<button data-act="open" data-post="${r.target_id}">Открыть</button><button class="danger" data-act="hide">Скрыть</button><button class="okb" data-act="restore">Вернуть</button>` : ""}
           ${r.target_type !== "user" ? `<button class="danger" data-act="delete">Удалить</button>` : ""}
-          ${admin && r.target_user && !r.target.banned ? `<button class="danger" data-act="ban">⛔ Забанить автора</button>` : ""}
+          ${admin && r.target_user && !r.target.banned ? `<button class="danger" data-act="ban">🛡 Решение по автору</button>` : ""}
           <button data-act="dismiss">Отклонить жалобу</button><button data-act="history">История</button></div></div>`).join("") : '<div class="empty"><b>Жалоб нет 🎉</b>Новые жалобы появятся здесь</div>';
     } catch (e) { box.innerHTML = `<div class="empty"><b>Нет доступа</b>${esc(e.message)}</div>`; }
   }
@@ -2794,6 +3256,7 @@
       const card3 = mb.closest("[data-mp]"), act = mb.dataset.mact, id = card3.dataset.mp;
       if (act === "open") return openPost(id);
       if (act === "history") return historySheet("post", id);
+      if (act === "ban") { await ShieldAdmin.open(); return ShieldAdmin.card(card3.dataset.uid); }
       const L = { hide: "Скрыть публикацию? Автор получит уведомление, файлы станут недоступны по ссылке.", restore: "Вернуть публикацию в ленту?", delete: "Удалить публикацию навсегда? Файлы будут стерты.", ban: "Забанить автора? Он не сможет публиковать и писать." };
       if (!(await confirmSheet("Модерация", L[act], "Да", act !== "restore"))) return;
       try {
@@ -2807,6 +3270,7 @@
     const card2 = b.closest("[data-rep]"), act = b.dataset.act;
     if (act === "open") return openPost(b.dataset.post);
     if (act === "history") return historySheet(card2.dataset.tt, card2.dataset.tid);
+    if (act === "ban") { const uid2 = card2.dataset.uid || card2.dataset.tu; if (uid2) { await ShieldAdmin.open(); return ShieldAdmin.card(uid2); } }
     const labels = { hide: "Скрыть публикацию?", restore: "Вернуть публикацию в ленту?", delete: "Удалить навсегда?", ban: "Забанить автора? Он не сможет публиковать и писать.", dismiss: "Отклонить жалобу? Она останется в истории." };
     if (!(await confirmSheet("Модерация", labels[act], "Да", act === "delete" || act === "ban"))) return;
     try {
@@ -2815,6 +3279,186 @@
       toast("✓ Готово"); wide = null; feedDirty = true; renderMod();
     } catch (er) { toast(er.message); }
   };
+
+/* ===== 86-shield-admin.js ===== */
+  /* =====================================================
+     NEAR SHIELD ADMIN: решения только с причиной, все действия — в журнале аудита.
+     Роли: модератор (временные санкции), старший администратор (бессрочные, пересмотр), аудит (журнал).
+     ===================================================== */
+  const ShieldAdmin = {
+    tab: "users", role: null,
+    async open() {
+      go("sv-shield"); const box = $("shBody"); box.innerHTML = '<div class="spin"></div>';
+      this.role = await api.staffRole().catch(() => null);
+      if (!this.role || !(this.role.moderator || this.role.admin || this.role.auditor)) { box.innerHTML = '<div class="empty">Раздел доступен модераторам и администраторам</div>'; return; }
+      if (this.role.mfa_required && this.role.aal !== "aal2") return this.mfa(box);
+      $("shSub").textContent = this.role.admin ? "старший администратор" : this.role.moderator ? "модератор" : "аудит";
+      let ov = {}; try { ov = await api.shieldOverview(); } catch (e) {}
+      box.innerHTML = `<div class="adm-tiles"><div><b class="red">${ov.active_bans ?? "—"}</b><span>Активные баны</span></div><div><b class="org">${ov.evasion ?? "—"}</b><span>Подозрения на обход</span></div>
+        <div><b class="vio">${ov.appeals ?? "—"}</b><span>Апелляции${ov.overdue_appeals ? ` · <em>${ov.overdue_appeals} просрочено</em>` : ""}</span></div><div><b>${ov.reports ?? "—"}</b><span>Новые жалобы</span></div></div>
+        <div class="seg" id="admSeg"><button data-t="users" class="${this.tab === "users" ? "on" : ""}">Пользователи</button><button data-t="queue" class="${this.tab === "queue" ? "on" : ""}">Очередь · ${ov.queue ?? 0}</button>${this.role.auditor || this.role.admin ? `<button data-t="audit" class="${this.tab === "audit" ? "on" : ""}">Журнал</button>` : ""}</div>
+        <div id="admBody"></div>`;
+      qa("#admSeg [data-t]").forEach((b) => (b.onclick = () => { this.tab = b.dataset.t; qa("#admSeg button").forEach((x) => x.classList.toggle("on", x === b)); this.render(); }));
+      this.render();
+    },
+    render() { if (this.tab === "users") this.users(); else if (this.tab === "queue") this.queue(); else this.audit(); },
+    async users(q = "") {
+      const box = $("admBody");
+      box.innerHTML = `<input class="qin" id="admQ" type="search" placeholder="🔍 Поиск по нику или ID" value="${esc(q)}" autocomplete="off"><div id="admList"><div class="spin"></div></div>`;
+      let t = null; $("admQ").oninput = () => { clearTimeout(t); t = setTimeout(() => this.list($("admQ").value), 300); };
+      this.list(q);
+    },
+    async list(q) {
+      const L = $("admList"); if (!L) return;
+      try {
+        const rows = await api.shieldFind(q);
+        const ST = { active: "", restricted: "ограничен", banned_until: "активная блокировка", banned_permanent: "бессрочная блокировка" };
+        L.innerHTML = rows.length ? rows.map((u) => `<button class="u-row" data-adm="${u.id}">${ava({ name: u.nickname || "?" })}<div class="tx"><b translate="no">@${esc(u.nickname || u.name || "")}</b><span>${ST[u.state] ? `<em class="red-t">${ST[u.state]}</em> · ` : ""}риск ${u.risk}</span></div><span class="chev">›</span></button>`).join("") : '<div class="empty-mini">Никого не нашли</div>';
+        L.onclick = (e) => { const b = e.target.closest("[data-adm]"); if (b) this.card(b.dataset.adm); };
+      } catch (e) { L.innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
+    },
+    async card(id) {
+      const box = $("admBody"); box.innerHTML = '<div class="spin"></div>';
+      let c; try { c = await api.shieldUserCard(id); } catch (e) { box.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+      const acc = c.account || {}, rep = c.reputation || {}, last = (c.decisions || [])[0];
+      const banned = /banned/.test(acc.state), term = acc.state === "banned_permanent" ? "Бессрочно" : acc.expires_at ? durWords(new Date(acc.expires_at) - new Date(acc.starts_at || Date.now())) : "—";
+      const RISK = { evasion: "Подозрение на обход бана", mass_reg: "Массовая регистрация", violation: "Подтвержденные нарушения", suspicious: "Подозрительная активность" };
+      box.innerHTML = `<button class="lnk" id="admBack">‹ К списку</button>
+        <div class="adm-card"><div class="adm-h">${ava({ name: c.user.nickname || "?" })}<div><b translate="no">@${esc(c.user.nickname || "")}</b>${banned ? '<em class="red-t"> Активная блокировка</em>' : acc.state === "restricted" ? '<em class="org-t"> Ограничение</em>' : ""}<small>В NEAR с ${dfmt(c.user.created_at, { day: "numeric", month: "long", year: "numeric" })}</small></div></div>
+        <div class="adm-grid">
+          <div><small>Репутация</small><b>${rep.score == null ? "нет данных" : rep.score + "/100"}</b></div><div><small>Risk Score</small><b class="${c.risk >= 75 ? "red-t" : c.risk >= 50 ? "org-t" : ""}">${c.risk}/100${c.hold ? " · на проверке" : ""}</b></div>
+          <div><small>Всего жалоб</small><b>${c.reports.total}</b></div><div><small>Подтверждено</small><b>${c.reports.confirmed}</b></div>
+          <div><small>Отклонено</small><b>${c.reports.rejected}</b></div><div><small>На проверке</small><b>${c.reports.open}</b></div>
+          <div><small>Связанные аккаунты — кандидаты</small><b>${(c.links || []).filter((l) => l.status === "pending").length}</b></div><div><small>Срок блокировки</small><b>${banned || acc.state === "restricted" ? term : "—"}</b></div></div>
+        ${last ? `<div class="adm-last"><small>Причина последнего решения · ${esc(last.no)}</small><p>${esc(last.reason)}</p></div>` : ""}
+        ${(c.risk_events || []).length ? `<div class="adm-risk"><b>NEAR Risk Engine</b>${c.risk_events.map((r) => `<div><span>${RISK[r.type] || r.type}${r.confirmed ? " ✓" : ""}</span><em>+${r.weight}</em></div>`).join("")}<p class="dim">Высокий риск сам по себе не основание для бессрочного бана. Сигналы без подтверждения истекают через 7 дней.</p></div>` : ""}
+        </div>
+        <div class="adm-acts">
+          <button class="btn adm-b vio" id="admLinks">Проверить связанные аккаунты</button>
+          ${banned && acc.expires_at ? '<button class="btn adm-b red" id="admExt">Продлить блокировку</button>' : ""}
+          ${acc.ban_id ? '<button class="btn btn-ghost" id="admLift">Снять ограничение</button>' : ""}
+          <button class="btn btn-main" id="admSanc">Вынести решение</button>
+          ${c.hold ? '<button class="btn btn-ghost" id="admRisk">Решение по проверке риска</button>' : ""}
+          <button class="btn btn-ghost" id="admHist">История нарушений</button>
+        </div>`;
+      $("admBack").onclick = () => this.users();
+      $("admLinks").onclick = () => this.links(c);
+      if ($("admExt")) $("admExt").onclick = () => this.extend(c);
+      if ($("admLift")) $("admLift").onclick = () => this.lift(c);
+      if ($("admRisk")) $("admRisk").onclick = () => this.riskDecide(c);
+      $("admSanc").onclick = () => this.sanction(c);
+      $("admHist").onclick = () => this.history(c);
+    },
+    // матрица пилота: срок предлагается по правилу и повторности, причина обязательна
+    sanction(c) {
+      const R = c.rules || N.BAN_RULES, prior = (c.decisions || []).filter((d) => d.status === "active" || d.status === "revoked").length;
+      openSheet("Решение по @" + (c.user.nickname || ""), `<div class="lbl">Нарушение</div><select id="snRule">${Object.entries(R).map(([k, v]) => `<option value="${k}">${esc(v.title)}</option>`).join("")}</select>
+        <div class="lbl mt8">Вид</div><div class="seg" id="snKind"><button data-k="warning">Предупреждение</button><button data-k="restricted">Ограничение</button><button data-k="ban" class="on">Бан</button></div>
+        <div class="lbl mt8">Срок</div><select id="snTerm"><option value="24">24 часа</option><option value="168">7 дней</option><option value="720">30 дней</option>${this.role.admin ? '<option value="perm">Бессрочно (старший администратор)</option>' : ""}</select>
+        <div class="s-note" id="snHint"></div>
+        <textarea id="snReason" maxlength="500" rows="3" placeholder="Причина (обязательно): что нарушено и где"></textarea>
+        <textarea id="snEv" maxlength="2000" rows="2" class="mt8" placeholder="Доказательства: ссылки на публикации, номера жалоб"></textarea>
+        <div class="sheet-btns"><button class="btn btn-ghost" id="snNo">Отмена</button><button class="btn btn-main" id="snYes">Подтвердить решение</button></div>`);
+      let kind = "ban";
+      const hint = () => { const r = R[$("snRule").value]; const h = prior ? r.repeat : r.first; $("snHint").textContent = `Матрица пилота: ${prior ? "повторное" : "первое"} нарушение — ${h === 0 ? "предупреждение" : h == null ? "бессрочно" : durWords(h * 3600e3)}. Окончательный выбор — по тяжести и доказательствам.`;
+        if (h && h <= 720) $("snTerm").value = String(h); };
+      $("snRule").onchange = hint; hint();
+      qa("#snKind [data-k]").forEach((b) => (b.onclick = () => { kind = b.dataset.k; qa("#snKind button").forEach((x) => x.classList.toggle("on", x === b)); $("snTerm").disabled = kind === "warning"; }));
+      $("snNo").onclick = closeSheet;
+      $("snYes").onclick = async () => {
+        const reason = $("snReason").value.trim(); if (reason.length < 5) return toast("Укажите причину решения");
+        const tv = $("snTerm").value, hours = kind === "warning" ? null : tv === "perm" ? null : +tv;
+        if (!(await confirmSheet("Подтвердить решение?", `${kind === "ban" ? "Бан" : kind === "restricted" ? "Ограничение" : "Предупреждение"}${hours ? " на " + durWords(hours * 3600e3) : kind === "warning" ? "" : " бессрочно"}. Решение получит номер и попадет в журнал.`, "Подтвердить", kind === "ban"))) return;
+        try { const r = await api.shieldSanction(c.user.id, $("snRule").value, kind, hours, reason, $("snEv").value.trim()); closeSheet(); toast("Решение " + (r.decision_no || "") + " вынесено"); this.card(c.user.id); }
+        catch (e) { toast(e.message); }
+      };
+    },
+    extend(c) {
+      openSheet("Продлить блокировку", `<p class="muted" style="font-size:13px">Только за доказанный обход блокировки, не больше 30 дней от нового решения.</p>
+        <select id="exDays"><option value="7">7 дней</option><option value="14">14 дней</option><option value="30">30 дней</option></select>
+        <textarea id="exWhy" class="mt8" rows="3" maxlength="500" placeholder="Доказательства обхода (обязательно)"></textarea>
+        <div class="sheet-btns"><button class="btn btn-ghost" id="exNo">Отмена</button><button class="btn btn-main" id="exYes">Продлить</button></div>`);
+      $("exNo").onclick = closeSheet;
+      $("exYes").onclick = async () => { try { await api.shieldExtend(c.account.ban_id, +$("exDays").value, $("exWhy").value); closeSheet(); toast("Блокировка продлена"); this.card(c.user.id); } catch (e) { toast(e.message); } };
+    },
+    lift(c) {
+      openSheet("Снять ограничение", `<p class="muted" style="font-size:13px">Права восстановятся, штраф репутации будет сторнирован. Другие действующие решения останутся.</p>
+        <textarea id="lfWhy" rows="3" maxlength="500" placeholder="Причина (обязательно)"></textarea>
+        <div class="sheet-btns"><button class="btn btn-ghost" id="lfNo">Отмена</button><button class="btn btn-main" id="lfYes">Снять</button></div>`);
+      $("lfNo").onclick = closeSheet;
+      $("lfYes").onclick = async () => { try { await api.shieldRevoke(c.account.ban_id, $("lfWhy").value); closeSheet(); toast("Ограничение снято"); this.card(c.user.id); } catch (e) { toast(e.message); } };
+    },
+    links(c) {
+      const L = c.links || [];
+      openSheet("Связанные аккаунты", L.length ? L.map((l) => `<div class="dec-row"><div><b translate="no">@${esc(l.nickname || "")}</b><small>совпадение: ${esc((l.evidence && l.evidence.match) === "installation" ? "установка NEAR" : JSON.stringify(l.evidence))} · ${l.status === "pending" ? "на проверке" : l.status === "confirmed" ? "подтверждено" : "отклонено"}</small></div>
+        ${l.status === "pending" ? `<button class="btn btn-ghost sm" data-lk="${l.id}" data-ok="1">Подтвердить</button><button class="btn btn-ghost sm" data-lk="${l.id}" data-ok="0">Отклонить</button>` : ""}</div>`).join("")
+        + '<p class="dim" style="font-size:12px;margin-top:8px">Совпадение установки, IP или телефона само по себе не доказывает обход. Подтверждение применяет оставшийся срок исходного бана.</p>'
+        : '<div class="empty-mini">Кандидатов нет</div>');
+      qa("[data-lk]", $("bsList")).forEach((b) => (b.onclick = async () => {
+        const note = await askText(b.dataset.ok === "1" ? "Обоснование подтверждения связи" : "Почему связь отклонена"); if (!note) return;
+        try { await api.shieldLinkDecide(b.dataset.lk, b.dataset.ok === "1", note); closeSheet(); toast("Решение по связи сохранено"); this.card(c.user.id); } catch (e) { toast(e.message); }
+      }));
+    },
+    riskDecide(c) {
+      openSheet("Проверка риска", `<p class="muted" style="font-size:13px">Рискованные действия ограничены не дольше 24 часов до вашего решения. Автоматически не продлевается.</p>
+        <textarea id="rkWhy" rows="2" maxlength="300" placeholder="Комментарий"></textarea>
+        <div class="sheet-btns"><button class="btn btn-ghost" id="rkKeep">Оставить</button><button class="btn btn-main" id="rkClear">Снять ограничение</button></div>`);
+      const go2 = async (clear) => { try { await api.riskDecide(c.user.id, clear, $("rkWhy").value); closeSheet(); toast("Решение сохранено"); this.card(c.user.id); } catch (e) { toast(e.message); } };
+      $("rkKeep").onclick = () => go2(false); $("rkClear").onclick = () => go2(true);
+    },
+    history(c) {
+      const K = { warning: "Предупреждение", restricted: "Ограничение", ban: "Бан" };
+      openSheet("История нарушений", (c.decisions || []).length ? c.decisions.map((d) => `<div class="dec-row"><div><b>${esc(d.no)} · ${K[d.kind] || d.kind}${d.scope !== "global" ? " (" + (d.scope === "meeting" ? "встреча" : "чат") + ")" : ""}</b>
+        <small>${fmtWhen(d.starts_at)}${d.expires_at ? " → " + fmtWhen(d.expires_at) : d.kind === "ban" ? " · бессрочно" : ""} · ${d.status === "revoked" ? "отменено" : "действует"} · автор @${esc(d.moderator || "—")}</small><p>${esc(d.reason)}</p></div></div>`).join("")
+        + (c.appeals || []).map((a) => `<div class="dec-row"><div><b>Апелляция · ${({ pending: "ждет", in_review: "на рассмотрении", upheld: "оставлено", overturned: "отменено" })[a.status] || a.status}</b><small>до ${fmtWhen(a.due_at)}</small><p>${esc(a.message)}</p></div>
+          ${["pending", "in_review"].includes(a.status) ? `<button class="btn btn-ghost sm" data-ap="${a.id}" data-ov="1">Отменить решение</button><button class="btn btn-ghost sm" data-ap="${a.id}" data-ov="0">Оставить</button>` : ""}</div>`).join("")
+        : '<div class="empty-mini">Нарушений нет</div>');
+      qa("[data-ap]", $("bsList")).forEach((b) => (b.onclick = async () => {
+        const note = await askText("Мотивировка решения по апелляции"); if (!note) return;
+        try { await api.appealDecide(b.dataset.ap, b.dataset.ov === "1", note); closeSheet(); toast("Апелляция рассмотрена, пользователь уведомлен"); this.card(c.user.id); } catch (e) { toast(e.message); }
+      }));
+    },
+    async queue() {
+      const box = $("admBody"); box.innerHTML = '<div class="spin"></div>';
+      try {
+        const rows = await api.shieldQueue();
+        const RS = { threat: "🚨 Угроза", minors: "⛔ Несовершеннолетние", intimate: "🔞 Интимный контент", insult: "Оскорбление", evasion: "Подозрение на обход", risk_hold: "Высокий риск", appeal: "Апелляция", media_review: "Файл на проверке", disputed: "Спорная посещаемость", ai_unavailable: "ИИ недоступен" };
+        box.innerHTML = rows.length ? rows.map((q) => `<div class="q-row p${q.priority}"><div><b>${RS[q.reason] || esc(q.reason)}</b><small>${esc(q.content_type)} · @${esc(q.nickname || "—")} · ${timeAgo(q.created_at)}</small>${q.preview ? `<p translate="no">${esc(q.preview)}</p>` : ""}</div>
+          ${q.content_type === "post_media" ? `<button class="btn btn-ghost sm" data-md="${q.content_id}" data-ok="1">Опубликовать</button><button class="btn btn-ghost sm" data-md="${q.content_id}" data-ok="0">Отклонить</button>` : q.user_id ? `<button class="btn btn-ghost sm" data-qu="${q.user_id}">Карточка</button>` : ""}</div>`).join("")
+          : '<div class="empty-mini">Очередь пуста 🎉</div>';
+        box.onclick = async (e) => {
+          const md = e.target.closest("[data-md]"); if (md) { try { await api.mediaDecide(md.dataset.md, md.dataset.ok === "1"); toast("Решение сохранено"); this.queue(); } catch (er) { toast(er.message); } return; }
+          const qu = e.target.closest("[data-qu]"); if (qu) { this.tab = "users"; qa("#admSeg button").forEach((x) => x.classList.toggle("on", x.dataset.t === "users")); this.card(qu.dataset.qu); }
+        };
+      } catch (e) { box.innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
+    },
+    async audit() {
+      const box = $("admBody"); box.innerHTML = '<div class="spin"></div>';
+      try {
+        const rows = await api.auditList();
+        box.innerHTML = rows.length ? rows.map((a) => `<div class="hist-row"><b>${esc(a.action)}</b><small>${fmtWhen(a.created_at)} · ${esc(JSON.stringify(a.details || {})).slice(0, 140)}</small></div>`).join("") : '<div class="empty-mini">Журнал пуст</div>';
+      } catch (e) { box.innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
+    },
+    // второй фактор для администраторов (TOTP)
+    async mfa(box) {
+      const f = api.mfaFactors ? await api.mfaFactors().catch(() => []) : [];
+      const verified = f.find((x) => x.status === "verified");
+      box.innerHTML = `<div class="empty"><b>Нужен второй фактор</b>Для панели NEAR Shield включите вход с кодом из приложения-аутентификатора (Google Authenticator, 1Password и др.).
+        ${verified ? "" : '<div id="mfaQr" class="mfa-qr"></div>'}<input id="mfaCode" class="mt12" inputmode="numeric" maxlength="6" placeholder="Код из приложения"><button class="btn btn-main mt12" id="mfaGo">${verified ? "Подтвердить" : "Подключить"}</button></div>`;
+      let factor = verified;
+      if (!verified) { try { factor = await api.mfaEnroll(); $("mfaQr").innerHTML = `<img src="${factor.totp.qr_code}" alt="QR-код для приложения-аутентификатора"><small>${esc(factor.totp.secret)}</small>`; } catch (e) { toast(e.message); } }
+      $("mfaGo").onclick = async () => { try { await api.mfaVerify(factor.id, $("mfaCode").value); toast("Второй фактор подтвержден"); this.open(); } catch (e) { toast(e.message); } };
+    }
+  };
+  // короткий ввод текста в нижней панели (вместо системного prompt)
+  function askText(title, ph = "") {
+    return new Promise((res) => {
+      openSheet(title, `<textarea id="askTx" rows="3" maxlength="500" placeholder="${esc(ph || "Минимум 5 символов")}"></textarea>
+        <div class="sheet-btns"><button class="btn btn-ghost" id="askNo">Отмена</button><button class="btn btn-main" id="askYes">Готово</button></div>`);
+      $("askNo").onclick = () => { closeSheet(); res(null); };
+      $("askYes").onclick = () => { const v = $("askTx").value.trim(); if (v.length < 5) return toast("Минимум 5 символов"); closeSheet(); res(v); };
+    });
+  }
 
 /* ===== 90-sos-demo.js ===== */
   /* =====================================================
@@ -2933,6 +3577,8 @@
   function onLive(type, row) {
     if (type === "post") {
       wide = null; if (mapReady) { clearTimeout(mapT); mapT = setTimeout(loadMapPosts, 800); }
+      // своя публикация прошла проверку файлов — появляется в ленте
+      if (row && user && row.user_id === user.id) { feedDirty = true; if (cur() === "v-feed") loadFeed(); toast("✓ Публикация прошла проверку и опубликована"); return; }
       if (row && N.dist(pos, row) <= R && (!user || row.user_id !== user.id)) {
         $("refreshBtn").classList.add("fresh"); toast(`${(CATS[row.category] || CATS.talk).e} Новая публикация рядом. Нажмите ↻`);
         if (["incident", "event", "deal"].includes(row.category) && prefOn(row.category)) Sound.play(row.is_sos ? "sos" : "post");
@@ -2993,16 +3639,20 @@
     api.onAuth((u, ev) => {
       if (ev === "recovery") { showAuth("reset"); return; }
       const was = user && user.id; user = u;
-      if (u && !was) { loadPrefs(); if (needsCompletion(u)) { showComplete(); return; } hideAuth(); applyPendingInsta(); startSeen(); onUserChange(); runIntent(); }
+      if (u && !was) {
+        loadPrefs();
+        Shield.gate().then((g) => { if (g !== "active") return; if (needsCompletion(user)) { showComplete(); return; } hideAuth(); applyPendingInsta(); startSeen(); onUserChange(); runIntent(); }).catch(() => {});
+      }
       else if (!u && was) { Cache.wipe(was); loadPrefs(); onUserChange(); }
       else if (u && ev === "USER_UPDATED") renderProfile();
     });
     const isRecovery = /type=recovery/.test(location.hash), lerr = linkError();
     if (isRecovery) showAuth("reset");
     else if (lerr) showAuth("login", lerr);
-    else if (user && needsCompletion(user)) showComplete();
     else hideAuth(); // AUTH-01: лента доступна без входа и без GPS
     guestBar();
+    // NEAR Shield: актуальная сессия этого устройства и состояние аккаунта (бан, ограничение)
+    if (user && !isRecovery) Shield.gate().then((g) => { if (g === "active" && needsCompletion(user)) showComplete(); }).catch(() => {});
     if (user) { applyPendingInsta(); startSeen(); }
     if (!document.querySelector(".view.on:not(#v-auth)")) $("v-feed").classList.add("on");
     // GPS спрашиваем только по нажатию "Определить"; если разрешение уже есть — берем место сразу

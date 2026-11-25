@@ -48,19 +48,14 @@
   $("radarBox").onclick = (e) => { const b = e.target.closest("[data-post]"); if (b) openPost(b.dataset.post); };
 
   // события по дням (идея из Posse): колонка даты слева, карточки справа; "Все / Сегодня / Неделя"
-  let evPeriod = "all", evKind = null;
-  // v14: быстрые входы ленты — "Встречи" и "События" открывают один календарь с фильтром по типу
-  qa("[data-quick]").forEach((b) => (b.onclick = () => { evKind = b.dataset.quick; go("sv-events"); }));
-  document.addEventListener("click", (e) => { const o = e.target.closest('[data-open="sv-events"]'); if (o && !o.closest("#quick")) evKind = null; }, true);
+  let evPeriod = "all";
   qa("#evSeg [data-ev]").forEach((b) => (b.onclick = () => { evPeriod = b.dataset.ev; qa("#evSeg button").forEach((x) => x.classList.toggle("on", x === b)); renderEvents(); }));
   const dayKey = (d) => d.toLocaleDateString("en-CA", { timeZone: "Asia/Almaty" });
   function renderEvents() {
     withWide("eventsList", (list) => {
       const now = new Date(), today = dayKey(now), wk = Date.now() + 7 * 86400e3;
-      $("evTitle").textContent = evKind === "meetup" ? "Встречи" : evKind === "event" ? "События" : "События и встречи";
-      const cb = document.querySelector("#sv-events [data-create]"); if (cb) { cb.dataset.create = evKind === "meetup" ? "meetup" : "event"; cb.textContent = evKind === "meetup" ? "+ Создать встречу" : "+ Создать событие"; }
-      const ev = upcoming(list).filter((p) => !evKind || p.category === evKind).filter((p) => { const t = new Date(p.event.starts_at); return evPeriod === "all" || (evPeriod === "today" ? dayKey(t) === today : t.getTime() < wk); });
-      if (!ev.length) { $("eventsList").innerHTML = `<div class="empty"><b>${evKind === "meetup" ? (evPeriod === "today" ? "Сегодня встреч нет" : "Ближайших встреч нет") : evPeriod === "today" ? "Сегодня событий нет" : "Ближайших событий нет"}</b>${evKind === "meetup" ? "Расширьте радиус или создайте встречу: футбол, настолки, прогулка" : "Создайте первое: концерт, ярмарку или встречу соседей"}</div>`; return; }
+      const ev = upcoming(list).filter((p) => { const t = new Date(p.event.starts_at); return evPeriod === "all" || (evPeriod === "today" ? dayKey(t) === today : t.getTime() < wk); });
+      if (!ev.length) { $("eventsList").innerHTML = `<div class="empty"><b>${evPeriod === "today" ? "Сегодня событий нет" : "Ближайших событий нет"}</b>Создайте первое: футбол, прогулку или встречу соседей</div>`; return; }
       const groups = []; ev.forEach((p) => { const k = dayKey(new Date(p.event.starts_at)); const g = groups.find((x) => x.k === k); if (g) g.items.push(p); else groups.push({ k, items: [p] }); });
       const tomorrow = dayKey(new Date(Date.now() + 86400e3));
       $("eventsList").innerHTML = groups.map((g) => {

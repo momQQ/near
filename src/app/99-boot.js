@@ -28,6 +28,8 @@
   function onLive(type, row) {
     if (type === "post") {
       wide = null; if (mapReady) { clearTimeout(mapT); mapT = setTimeout(loadMapPosts, 800); }
+      // своя публикация прошла проверку файлов — появляется в ленте
+      if (row && user && row.user_id === user.id) { feedDirty = true; if (cur() === "v-feed") loadFeed(); toast("✓ Публикация прошла проверку и опубликована"); return; }
       if (row && N.dist(pos, row) <= R && (!user || row.user_id !== user.id)) {
         $("refreshBtn").classList.add("fresh"); toast(`${(CATS[row.category] || CATS.talk).e} Новая публикация рядом. Нажмите ↻`);
         if (["incident", "event", "deal"].includes(row.category) && prefOn(row.category)) Sound.play(row.is_sos ? "sos" : "post");
@@ -88,16 +90,20 @@
     api.onAuth((u, ev) => {
       if (ev === "recovery") { showAuth("reset"); return; }
       const was = user && user.id; user = u;
-      if (u && !was) { loadPrefs(); if (needsCompletion(u)) { showComplete(); return; } hideAuth(); applyPendingInsta(); startSeen(); onUserChange(); runIntent(); }
+      if (u && !was) {
+        loadPrefs();
+        Shield.gate().then((g) => { if (g !== "active") return; if (needsCompletion(user)) { showComplete(); return; } hideAuth(); applyPendingInsta(); startSeen(); onUserChange(); runIntent(); }).catch(() => {});
+      }
       else if (!u && was) { Cache.wipe(was); loadPrefs(); onUserChange(); }
       else if (u && ev === "USER_UPDATED") renderProfile();
     });
     const isRecovery = /type=recovery/.test(location.hash), lerr = linkError();
     if (isRecovery) showAuth("reset");
     else if (lerr) showAuth("login", lerr);
-    else if (user && needsCompletion(user)) showComplete();
     else hideAuth(); // AUTH-01: лента доступна без входа и без GPS
     guestBar();
+    // NEAR Shield: актуальная сессия этого устройства и состояние аккаунта (бан, ограничение)
+    if (user && !isRecovery) Shield.gate().then((g) => { if (g === "active" && needsCompletion(user)) showComplete(); }).catch(() => {});
     if (user) { applyPendingInsta(); startSeen(); }
     if (!document.querySelector(".view.on:not(#v-auth)")) $("v-feed").classList.add("on");
     // GPS спрашиваем только по нажатию "Определить"; если разрешение уже есть — берем место сразу

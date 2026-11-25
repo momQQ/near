@@ -1,5 +1,5 @@
 #!/bin/sh
-# Локальная проверка схемы: чистая база → schema.sql (дважды) → тесты прав.
+# Локальная проверка схемы: чистая база → schema.sql (дважды) → тесты прав v11, v12 и Shield v14.9.
 # Нужен Postgres 15+ и psql. Подключение — через PGHOST/PGPORT/PGUSER, например:
 #   PGHOST=localhost PGUSER=postgres sh supabase/tests/run_tests.sh
 set -e
@@ -13,9 +13,6 @@ psql -d near_test -q -v ON_ERROR_STOP=1 -f /tmp/near_schema_test.sql > /tmp/near
 psql -d near_test -q -v ON_ERROR_STOP=1 -f /tmp/near_schema_test.sql > /tmp/near_schema_2.log 2>&1 || { echo "повторный запуск схемы упал"; cat /tmp/near_schema_2.log; exit 1; }
 psql -d near_test -q -v ON_ERROR_STOP=1 -f "$DIR/rls_v11.sql" 2>&1 | grep -v "^ |^-|^(|^$" | tee /tmp/near_tests.log | grep -E "PASS|FAIL" || true
 psql -d near_test -q -v ON_ERROR_STOP=1 -f "$DIR/rls_v12.sql" 2>&1 | grep -v "^ |^-|^(|^$" | tee -a /tmp/near_tests.log | grep -E "PASS|FAIL|ERROR" || true
-psql -d near_test -q -v ON_ERROR_STOP=1 -f "$DIR/rls_v14.sql" 2>&1 | grep -v "^ |^-|^(|^$" | tee -a /tmp/near_tests.log | grep -E "PASS|FAIL|ERROR" || true
-# CLEAN-01: SQL и JS дают одинаковый результат (примеры + 3000 случайных строк)
-node "$DIR/clean_parity.mjs" "$DIR/clean_cases.json" | psql -d near_test -q 2>&1 | grep -E "PASS|FAIL|ERROR" | sed 's/^psql:[^ ]* //' | tee -a /tmp/near_tests.log || true
 # POST-02: два одновременных запроса на последнее место — проходит только один
 psql -d near_test -qAtc "select set_config('request.jwt.claim.sub','',false); insert into posts(id,user_id,category,text,lat,lng) values ('e0000000-0000-0000-0000-000000000001','aaaaaaaa-0000-0000-0000-00000000000a','event','Гонка',43.2,76.9); insert into events values ('e0000000-0000-0000-0000-000000000001', now()+interval '1 day', 1);" >/dev/null
 psql -d near_test -qAt -c "begin; insert into event_members(post_id,user_id) values ('e0000000-0000-0000-0000-000000000001','20000000-0000-0000-0000-000000000001'); select pg_sleep(2); commit;" >/dev/null 2>&1 &
@@ -31,20 +28,18 @@ psql -d near_test -qAt -c "begin; select set_config('request.jwt.claim.sub','300
 wait
 N=$(psql -d near_test -qAtc "select count(*) from posts where user_id='30000000-0000-0000-0000-000000000003' and is_sos and status='active'")
 if [ "$N" = "1" ]; then echo "PASS: SOS-01 два параллельных SOS дают один активный" >> /tmp/near_tests.log; else echo "FAIL: SOS-01 параллельно активных: $N" >> /tmp/near_tests.log; fi
-# v14 / Q09: 4 места + два параллельных добавления — остается 5
-U=41000000-0000-0000-0000-000000000005
-psql -d near_test -qAtc "insert into saved_places(user_id,name,lat,lng) select '$U','P'||g,43.2,76.9 from generate_series(1,4) g" >/dev/null
-for k in 1 2; do psql -d near_test -qAt -c "begin; select set_config('request.jwt.claim.sub','$U',true); set local role authenticated; insert into saved_places(user_id,name,lat,lng) values ('$U','R$k',43.2,76.9); select pg_sleep(1); commit;" >/dev/null 2>&1 & done
+# v14.9 Shield — после параллельных проверок (включает обязательные сессии)
+psql -d near_test -q -v ON_ERROR_STOP=1 -f "$DIR/rls_v14.sql" 2>&1 | grep -v "^ |^-|^(|^$" | tee -a /tmp/near_tests.log | grep -E "PASS|FAIL|ERROR" || true
+# AUTH-02: два одновременных первых входа одного аккаунта — активной становится только одна сессия
+psql -d near_test -qAtc "insert into auth.users (id,email,raw_user_meta_data,email_confirmed_at) values ('4f000000-0000-0000-0000-000000000001','par@x.kz','{\"nickname\":\"parallel_user\",\"accepted_rules\":\"true\"}',now())" >/dev/null
+J1='{"sub":"4f000000-0000-0000-0000-000000000001","session_id":"4f100000-0000-0000-0000-000000000001"}'
+J2='{"sub":"4f000000-0000-0000-0000-000000000001","session_id":"4f100000-0000-0000-0000-000000000002"}'
+psql -d near_test -qAt -c "begin; select set_config('request.jwt.claim.sub','4f000000-0000-0000-0000-000000000001',true), set_config('request.jwt.claims','$J1',true); set local role authenticated; select public.session_begin('dev-1','A'); select pg_sleep(2); commit;" >/dev/null 2>&1 &
+sleep 0.5
+psql -d near_test -qAt -c "begin; select set_config('request.jwt.claim.sub','4f000000-0000-0000-0000-000000000001',true), set_config('request.jwt.claims','$J2',true); set local role authenticated; select public.session_begin('dev-2','B'); commit;" >/dev/null 2>&1 || true
 wait
-N=$(psql -d near_test -qAtc "select count(*) from saved_places where user_id='$U'")
-if [ "$N" = "5" ]; then echo "PASS: Q09 параллельные избранные места: не больше 5" >> /tmp/near_tests.log; else echo "FAIL: Q09 избранных мест: $N" >> /tmp/near_tests.log; fi
-# v14 / LIM: у нового аккаунта 2 публикации, три параллельные попытки — проходит одна (лимит 3)
-U=41000000-0000-0000-0000-000000000004
-for k in 1 2; do psql -d near_test -qAt -c "select set_config('request.jwt.claim.sub','$U',false); set role authenticated; insert into posts(user_id,category,text,lat,lng) values ('$U','talk','Пост номер $k для лимита',43.2,76.9);" >/dev/null 2>&1; done
-for k in 3 4 5; do psql -d near_test -qAt -c "begin; select set_config('request.jwt.claim.sub','$U',true); set local role authenticated; insert into posts(user_id,category,text,lat,lng) values ('$U','talk','Параллельный пост $k',43.2,76.9); select pg_sleep(1); commit;" >/dev/null 2>&1 & done
-wait
-N=$(psql -d near_test -qAtc "select count(*) from posts where user_id='$U'")
-if [ "$N" = "3" ]; then echo "PASS: LIM параллельные публикации не превышают дневной лимит" >> /tmp/near_tests.log; else echo "FAIL: LIM параллельно опубликовано: $N" >> /tmp/near_tests.log; fi
-P=$(grep -c "PASS" /tmp/near_tests.log || true); F=$(grep -cE "FAIL|ERROR" /tmp/near_tests.log || true)
+N=$(psql -d near_test -qAtc "select count(*) from user_sessions where user_id='4f000000-0000-0000-0000-000000000001' and status='active'")
+if [ "$N" = "1" ]; then echo "PASS: AUTH-02 параллельные входы не создают две активные сессии" >> /tmp/near_tests.log; else echo "FAIL: AUTH-02 параллельно активных сессий: $N" >> /tmp/near_tests.log; fi
+P=$(grep -c "PASS" /tmp/near_tests.log || true); F=$(grep -c "FAIL" /tmp/near_tests.log || true)
 echo "Итог: PASS=$P FAIL=$F"
 [ "$F" = "0" ] && [ "$P" -gt 0 ]

@@ -30,27 +30,27 @@ insert into auth.users (id, email, raw_user_meta_data) values
  ('20000000-0000-0000-0000-000000000002', 'o2@x.kz', '{}'), ('20000000-0000-0000-0000-000000000003', 'o3@x.kz', '{}');
 -- v12: публиковать могут только подтвердившие email и заполнившие профиль
 update auth.users set email_confirmed_at = now();
--- v14: вместо пола — никнейм (для старых проверок задаем напрямую от имени сервера)
-update public.profiles set nickname = 'u' || replace(id::text, '-', ''), accepted_rules_at = now(), verified = false;
-update public.profiles set nickname_norm = public.nick_norm(nickname);
--- регрессия v11/v12 проверяет старые правила: лимиты v14, возрастной допуск и запрет медиа без проверки — отдельно в rls_v14.sql
-update public.app_settings set age_gate = false, media_requires_check = false,
-  day_limits = '{"post":[1000,1000],"comment":[1000,1000],"chat_request":[1000,1000],"meeting":[1000,1000]}'::jsonb;
+update public.profiles set gender = 'f', accepted_rules_at = now(), verified = false;
+update public.profiles set gender = null where id = 'aaaaaaaa-0000-0000-0000-00000000000a';
 update public.profiles set is_moderator = true where id = 'dddddddd-0000-0000-0000-00000000000d';
 update public.profiles set is_admin = true where id = 'eeeeeeee-0000-0000-0000-00000000000e';
 update public.profiles set created_at = now() - interval '60 days' where id::text like '20000000%' or id::text like 'aaaa%' or id::text like 'bbbb%' or id::text like 'cccc%';
-update public.app_settings set limits = limits || '{"comment":[3,100,"1 hour"]}'::jsonb;
+update public.app_settings set limits = limits || '{"comment":[3,100,"1 hour"],"post":[10,40,"1 hour"],"chat":[100,400,"1 minute"]}'::jsonb;
+-- v14.9: проверки v11/v12 идут в режиме без обязательной сессии и MFA; Shield проверяется отдельно в rls_v14.sql
+update public.app_settings set shield = shield || '{"enforce_sessions":false,"admin_mfa":false,"dm":true}'::jsonb;
+update public.profiles set nickname = 'u' || left(md5(id::text), 12);
 
 -- ===== SEC-01: профиль =====
 set role authenticated; select t.as_user('aaaaaaaa-0000-0000-0000-00000000000a');
 select t.fail('SEC-01 A не может создать профиль напрямую', $$insert into public.profiles (id, name) values ('aaaaaaaa-0000-0000-0000-00000000000a', 'x')$$, '42501');
 select t.fail('SEC-01 upsert профиля запрещен', $$insert into public.profiles (id, name, is_admin) values ('aaaaaaaa-0000-0000-0000-00000000000a', 'x', true) on conflict (id) do update set is_admin = true$$, '42501');
-select t.fail('SEC-01 A не назначает себе роль и значок', $$update public.profiles set is_admin = true, is_moderator = true, verified = true, banned = false where id = 'aaaaaaaa-0000-0000-0000-00000000000a'$$, '42501');
-select t.ok('SEC-01 A не назначил себе роль и значок', (select not is_admin and not is_moderator and not verified from public.profiles where id = 'aaaaaaaa-0000-0000-0000-00000000000a'));
-update public.profiles set bio = 'Взлом' where id = 'bbbbbbbb-0000-0000-0000-00000000000b';
-select t.ok('SEC-01 A не меняет чужой профиль', (select bio is null from public.profiles where id = 'bbbbbbbb-0000-0000-0000-00000000000b'));
-select t.fail('SEC-01 v14: имя меняется только через никнейм', $$update public.profiles set name = 'Айгерим К.' where id = 'aaaaaaaa-0000-0000-0000-00000000000a'$$, '42501');
-select t.fail('SEC-01 v14: пол больше не принимается', $$update public.profiles set gender = 'm' where id = 'aaaaaaaa-0000-0000-0000-00000000000a'$$, '42501');
+update public.profiles set is_admin = true, is_moderator = true, verified = true, banned = false, name = 'Айгерим К.' where id = 'aaaaaaaa-0000-0000-0000-00000000000a';
+select t.ok('SEC-01 A не назначил себе роль и значок', (select not is_admin and not is_moderator and not verified and name = 'Айгерим К.' from public.profiles where id = 'aaaaaaaa-0000-0000-0000-00000000000a'));
+update public.profiles set name = 'Взлом' where id = 'bbbbbbbb-0000-0000-0000-00000000000b';
+select t.ok('SEC-01 A не меняет чужой профиль', (select name = 'Бекзат' from public.profiles where id = 'bbbbbbbb-0000-0000-0000-00000000000b'));
+update public.profiles set gender = 'f' where id = 'aaaaaaaa-0000-0000-0000-00000000000a';
+update public.profiles set gender = 'm' where id = 'aaaaaaaa-0000-0000-0000-00000000000a';
+select t.ok('SEC-01 пол задается один раз', (select gender = 'f' from public.profiles where id = 'aaaaaaaa-0000-0000-0000-00000000000a'));
 reset role;
 delete from public.profiles where id = '10000000-0000-0000-0000-000000000003';
 set role authenticated; select t.as_user('10000000-0000-0000-0000-000000000003');
@@ -86,6 +86,8 @@ select t.as_user('cccccccc-0000-0000-0000-00000000000c');
 insert into public.event_members (post_id, user_id) values ('a0000000-0000-0000-0000-000000000002', 'cccccccc-0000-0000-0000-00000000000c');
 select t.ok('POST-02 отмена участия освобождает место', (select count(*) = 1 from public.event_members where post_id = 'a0000000-0000-0000-0000-000000000002'));
 
+-- v14.9: файлы проверяет сервер; для этих проверок считаем их одобренными
+reset role; select t.as_user(null); update public.post_media set state = 'approved' where post_id = 'a0000000-0000-0000-0000-000000000001'; set role authenticated;
 -- ===== SEC-02: скрытый модератором пост =====
 select t.as_user('aaaaaaaa-0000-0000-0000-00000000000a');
 update public.posts set status = 'active' where id = 'a0000000-0000-0000-0000-000000000001';
@@ -277,7 +279,5 @@ select t.ok('ANALYTICS лишние свойства не сохраняются
 select t.ok('LOGS email и токены скрыты, адрес без параметров', (select message !~ '@' and message !~ 'eyJ' and route = '/app.html' from public.client_errors limit 1));
 set role authenticated; select t.as_user('eeeeeeee-0000-0000-0000-00000000000e');
 select t.ok('KPI админ получает сводку', (select public.kpi_summary() ? 'dau'));
-select public.mod_act('user', 'bbbbbbbb-0000-0000-0000-00000000000b', 'ban', 'тест');
+select t.fail('MOD v14.9: бан без причины закрыт — только NEAR Shield', $$select public.mod_act('user', 'bbbbbbbb-0000-0000-0000-00000000000b', 'ban', 'тест')$$, 'NR403');
 reset role;
-select t.ok('MOD админ банит, действие в журнале', (select banned from public.profiles where id = 'bbbbbbbb-0000-0000-0000-00000000000b')
-  and (select count(*) >= 1 from public.mod_actions where action = 'ban'));

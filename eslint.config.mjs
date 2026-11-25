@@ -5,7 +5,7 @@ const browser = Object.fromEntries(("window document navigator localStorage sess
   "AbortController AbortSignal XMLHttpRequest DataView Uint8Array caches self clients getComputedStyle innerWidth innerHeight screen CustomEvent HTMLElement " +
   "FormData Option maplibregl supabase turnstile").split(/\s+/).map((k) => [k, "readonly"]));
 export default [
-  { ignores: ["node_modules/**", "supabase/**", "tools/**"] },
+  { ignores: ["node_modules/**", "supabase/**", "tools/**", "js/*.min.js"] },
   {
     files: ["js/**/*.js", "sw.js", "src/**/*.js"],
     languageOptions: { ecmaVersion: 2022, sourceType: "script", globals: browser },

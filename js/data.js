@@ -15,10 +15,36 @@
     deal:     { e: "🏷️", n: "Акция",        c: "#ffb020", ttl: 48 },
     lost:     { e: "🔎", n: "Потеряно",     c: "#ff6a3d", ttl: 24 * 14 },
     found:    { e: "🙌", n: "Найдено",      c: "#2bd47d", ttl: 24 * 14 },
-    meetup:   { e: "⚽", n: "Ищу компанию", c: "#3da5ff", ttl: 24 },
+    meetup:   { e: "🤝", n: "Встреча",      c: "#A54EE7", ttl: 24 },
     ad:       { e: "📢", n: "Объявление",   c: "#00b4a6", ttl: 24 * 7 },
     talk:     { e: "💬", n: "Обсуждение",   c: "#ff2e88", ttl: 24 * 3 }
   };
+
+  // v14.9: 9 категорий встреч, теги отзывов, матрица санкций пилота
+  const MEET_CATS = {
+    sport: { e: "⚽", n: "Спорт" }, games: { e: "🎮", n: "Игры" }, walk: { e: "🚶", n: "Прогулки" }, food: { e: "☕", n: "Еда и кофе" },
+    study: { e: "📚", n: "Учеба" }, creative: { e: "🎨", n: "Творчество" }, volunteer: { e: "🤝", n: "Волонтерство" }, family: { e: "👨‍👩‍👧", n: "Семья и дети" }, other: { e: "✨", n: "Другое" }
+  };
+  const REVIEW_TAGS = { punctual: "Пунктуальный", polite: "Вежливый", responsible: "Ответственный", organized: "Хорошая организация", as_described: "Все по описанию", team: "Командный игрок" };
+  const BAN_RULES = {
+    minor: { title: "Незначительное нарушение", first: 0, repeat: 24 }, spam: { title: "Спам", first: 24, repeat: 168 }, ads: { title: "Массовая реклама", first: 24, repeat: 720 },
+    insult: { title: "Оскорбления", first: 0, repeat: 168 }, harassment: { title: "Домогательства", first: 720, repeat: null }, intimate: { title: "Интимный контент", first: 720, repeat: null },
+    threat: { title: "Угрозы", first: 720, repeat: null }, scam: { title: "Подтвержденный скам", first: null, repeat: null }, evasion: { title: "Подтвержденный обход бана", first: 720, repeat: null },
+    boosting: { title: "Накрутка рейтинга", first: 24, repeat: 720 }
+  };
+  // случайный идентификатор установки NEAR (не отпечаток устройства); очистка браузера создает новый
+  function installId() {
+    try { let v = localStorage.getItem("near_install"); if (!v) { v = (crypto.randomUUID ? crypto.randomUUID() : String(Math.random()).slice(2)); localStorage.setItem("near_install", v); } return v; }
+    catch (e) { return "no-storage"; }
+  }
+  function deviceLabel(ua = navigator.userAgent) {
+    const os = /iPhone/.test(ua) ? "iPhone" : /iPad/.test(ua) ? "iPad" : /Android/.test(ua) ? "Android" : /Mac OS X/.test(ua) ? "Mac" : /Windows/.test(ua) ? "Windows" : /Linux/.test(ua) ? "Linux" : "Устройство";
+    const br = /YaBrowser/.test(ua) ? "Яндекс" : /Edg\//.test(ua) ? "Edge" : /(Chrome|CriOS)\//.test(ua) ? "Chrome" : /(Firefox|FxiOS)\//.test(ua) ? "Firefox" : /Safari\//.test(ua) ? "Safari" : "Браузер";
+    return os + " · " + br;
+  }
+  const REP_LEVEL = (s) => (s == null ? "new" : s >= 90 ? "high" : s >= 75 ? "good" : s >= 50 ? "medium" : "low");
+  const repFormula = (v, a, sc, u, h) => { const parts = [[v, 0.3], [a, 0.25], [sc, 0.25], [u, 0.1], [h, 0.1]].filter(([x]) => x != null); const w = parts.reduce((t, [, k]) => t + k, 0); return w ? Math.round(parts.reduce((t, [x, k]) => t + x * k, 0) / w) : null; };
+  const attendance = (hm, sm) => (hm == null && sm == null ? "unknown" : hm != null && sm != null && hm !== sm ? "disputed" : (hm ?? sm) ? "attended" : "missed");
 
   /* ---------- утилиты ---------- */
   const rad = (x) => (x * Math.PI) / 180;
@@ -85,127 +111,51 @@
     const isImg = /^image\//.test(f.type), isVid = /^video\//.test(f.type) || /\.(mov|mp4|m4v|webm)$/i.test(f.name || "");
     if (!isImg && !isVid) throw new Error(`Файл "${f.name}" не поддерживается. Можно фото (JPG, PNG, WEBP) или видео (MP4, MOV).`);
     if (isImg && f.size > (CFG.MAX_IMAGE_MB || 15) * 1048576) throw new Error(`Фото "${f.name}" больше ${CFG.MAX_IMAGE_MB || 15} МБ.`);
-    if (isVid && f.size > (CFG.MAX_VIDEO_MB || 30) * 1048576) throw new Error(`Видео "${f.name}" больше ${CFG.MAX_VIDEO_MB || 30} МБ.`);
+    if (isVid && f.size > (CFG.MAX_VIDEO_MB || 20) * 1048576) throw new Error(`Видео "${f.name}" больше ${CFG.MAX_VIDEO_MB || 20} МБ. Обрежьте его на телефоне или выберите короче.`);
     return isImg ? "image" : "video";
   }
 
   /* фильтр грубых слов (такой же работает на сервере в schema.sql) */
-  /* @clean:start — вставляется из src/lib/clean.js сборкой (node tools/build.mjs), не правьте здесь */
-  /* =====================================================
-     NEAR Clean v1 (ТЗ v14.4, раздел 05): маскирование мата.
-     Первая буква сохраняется, каждая следующая графема слова → одна "*".
-     Тот же алгоритм работает в базе: supabase/migrations/014_v14.sql (near_clean).
-     Изменения — только парой (JS + SQL) и с прогоном supabase/tests/clean_cases.json.
-     ===================================================== */
-  const CLEAN_VERSION = "clean-1";
-  const cp = (c) => c.codePointAt(0);
-  const isZw = (k) => (k >= 0x200b && k <= 0x200d) || k === 0x2060 || k === 0xfeff || k === 0xad;
-  const isMark = (k) => k >= 0x300 && k <= 0x36f;
-  const isW = (k) => (k >= 48 && k <= 57) || (k >= 65 && k <= 90) || (k >= 97 && k <= 122) || (k >= 192 && k <= 591 && k !== 215 && k !== 247)
-    || (k >= 0x400 && k <= 0x4ff) || isMark(k) || isZw(k) || k === 64 || k === 36;
-  const isSep = (k) => k === 46 || k === 45 || k === 95 || k === 42 || k === 39 || k === 8217 || k === 96;
-  const isCyr = (k) => k >= 0x400 && k <= 0x4ff;
-  const isLat = (k) => (k >= 65 && k <= 90) || (k >= 97 && k <= 122) || (k >= 192 && k <= 591);
-  const mapChars = (s, m) => Array.from(s).map((c) => (m[c] !== undefined ? m[c] : c)).join("");
-  const collapse = (s) => Array.from(s).filter((c, i, a) => i === 0 || c !== a[i - 1]).join("");
-  // похожие латинские буквы и цифры внутри кириллического слова
-  const HG = { a: "а", c: "с", e: "е", o: "о", p: "р", x: "х", y: "у", k: "к", m: "м", t: "т", h: "н", i: "и", u: "и", n: "п", r: "г", 0: "о", 3: "з", 4: "ч", 6: "б", "@": "а", $: "с" };
-  const LEET = { 0: "o", 1: "i", 3: "e", 4: "a", 5: "s", 7: "t", "@": "a", $: "s" };
-  const TR2 = { shch: "щ", sch: "щ", sh: "ш", ch: "ч", zh: "ж", kh: "х", ts: "ц", ya: "я", yu: "ю", yo: "е", ye: "е", ja: "я", ju: "ю", jo: "е" };
-  const TR1 = { a: "а", b: "б", c: "к", d: "д", e: "е", f: "ф", g: "г", h: "х", i: "и", j: "й", k: "к", l: "л", m: "м", n: "н", o: "о", p: "п", q: "к", r: "р", s: "с", t: "т", u: "у", v: "в", w: "в", x: "кс", z: "з" };
-  function translit(s) {
-    let out = "";
-    for (let i = 0; i < s.length;) {
-      let hit = null;
-      for (const L of [4, 3, 2]) { const g = s.substr(i, L); if (g.length === L && TR2[g]) { hit = [TR2[g], L]; break; } }
-      if (hit) { out += hit[0]; i += hit[1]; continue; }
-      const c = s[i];
-      if (c === "y") out += /[аеиоуыэюя]$/.test(out) ? "й" : "ы";
-      else out += TR1[c] !== undefined ? TR1[c] : c;
-      i++;
+  const BAD = /[а-яёa-z]*(хуй|хуе|хуё|хуя|пизд|ебан|ебат|ебал|еблан|ёбан|выеб|заеб|уеб|бляд|блят|сука|суки|сучк|мудак|мудил|гандон|пидор|пидар|шлюх|долбоеб|залуп|қотақ|сігей|сигей|шешеңді)[а-яёa-zқңғүұөһі]*/giu;
+  /* NEAR Clean v14.9: та же логика, что clean_text на сервере (сервер проверяет всегда, это — для демо и подсказок) */
+  const LOOK = { a: "а", c: "с", e: "е", o: "о", p: "р", x: "х", y: "у", k: "к", m: "м", t: "т", b: "в", h: "н", 0: "о", 1: "и", 3: "з", 4: "ч", 6: "б", 9: "б", "@": "а", $: "с" };
+  const TR = [["sch", "щ"], ["sh", "ш"], ["ch", "ч"], ["zh", "ж"], ["kh", "х"], ["ya", "я"], ["yo", "е"], ["yu", "ю"], ["ts", "ц"], ["ye", "е"]];
+  const TR1 = { a: "а", b: "б", v: "в", g: "г", d: "д", e: "е", z: "з", i: "и", j: "й", k: "к", l: "л", m: "м", n: "н", o: "о", p: "п", r: "р", s: "с", t: "т", u: "у", f: "ф", h: "х", c: "ц", y: "ы", x: "х", w: "в", 0: "о", 1: "и", 3: "з", 4: "ч", 6: "б", "@": "а", $: "с" };
+  const fold = (s) => s.replace(/[ёъь]/g, (c) => (c === "ё" ? "е" : "")).replace(/[^\p{L}]/gu, "").replace(/(.)\1+/gu, "$1");
+  function skels(w) {
+    const s = String(w).normalize("NFKC").toLowerCase();
+    const a = [...s].map((c) => LOOK[c] || c).join("");
+    let b = s; TR.forEach(([k, v]) => (b = b.split(k).join(v))); b = [...b].map((c) => TR1[c] || c).join("").replace(/ый/g, "уй").replace(/ыя/g, "уя");
+    const c = [...s].map((ch) => ({ 0: "o", 1: "i", 3: "e", 4: "a", 5: "s", 7: "t", "@": "a", $: "s" }[ch] || ch)).join("");
+    return [fold(a), fold(b), fold(c), fold(s)];
+  }
+  const MAT = /^(на|по|за|от|вы|при|у|до|пере|рас|раз|из|под|о|об|недо|ни)?(ху[йеяюи]|пизд|пезд|еб[аеилнуоы]|еб$|бля|мудак|мудил|мудозв|пид[оа]р|педик|гандон|шлюх|залуп|манд[ауеы]$|сука$|суки$|суку$|сукой$|сукин|сучк|сучар)|^(motherf|fuck|fuk|fck|shit|bitch|cunt|asshole|dickhead|whore|slut)|^(қотақ|котак|сігейін|сигейин|сігем|сігіп|сігер|амыңды|аныңды)/u;
+  const INSULT = /^(дебил|идиот|урод|твар[ьи]|мраз|чмо$|лох$|лохи$|даун$|кретин|ублюд|сволоч|ақымақ|акымак|idiot|moron|retard)/u;
+  const wordKind = (w) => { const k = skels(w); if (k.some((x) => MAT.test(x))) return "mat"; if (k.some((x) => INSULT.test(x))) return "insult"; return null; };
+  const maskTok = (tok) => { const m = tok.match(/^([^\p{L}\p{N}@$]*)(.*?)([^\p{L}\p{N}@$]*)$/u); if (!m || !m[2]) return tok; return m[1] + [...m[2]][0] + "*".repeat(Math.max([...m[2]].length - 1, 3)) + m[3]; };
+  function clean(src, ctx = "text") {
+    let t = String(src == null ? "" : src), masked = false; const reasons = [];
+    if (!t) return { text: t, verdict: "allow", reasons, masked };
+    const n = t.normalize("NFKC").toLowerCase();
+    const warn = /(не\s+(сообщ|говор|перед|дава|отправл|скидыв)|никому\s+не|осторожн|мошенник|развод|аферист|алаяқ|абайла|scam|do not share|never share)/u.test(n);
+    t = t.replace(/(?<![\p{L}\p{N}@$])(?:[\p{L}\p{N}@$][ ._*-]+){2,}[\p{L}\p{N}@$](?![\p{L}\p{N}@$])/gu, (run) => { const j = run.replace(/[ ._*-]/g, ""); if (wordKind(j) === "mat") { masked = true; return run[0] + "*".repeat(Math.max(j.length - 1, 3)); } return run; });
+    t = t.split(/(\s+)/).map((tok) => { if (/^\s+$/.test(tok) || !tok) return tok; const k = wordKind(tok); if (k === "mat") { masked = true; return maskTok(tok); } if (k === "insult" && !reasons.includes("insult")) reasons.push("insult"); return tok; }).join("");
+    if (/((ищу|познаком|нужн[аы]?|кто\s+хочет).{0,40}(секс|интим|на\s+ночь|без\s+обязательств|вирт|эскорт)|интим[- ]?услуг|эскорт|проститут|nudes|hookup|sex\s*partner|onlyfans)/u.test(n)) reasons.push("sex");
+    if (/(\bубью\b|убить\s+тебя|зарежу|прибью|взорву|найду\s+тебя\s+и|тебе\s+конец|өлтіремін|i\s+will\s+kill)/u.test(n)) reasons.push("threat");
+    if (!warn && /((номер|данные|реквизит|цифр|фото)\S*\s.{0,20}(карт|card)|\bcvv2?\b|\bcvc\b|(код|пароль)\S*.{0,20}(смс|sms|сообщени)|(смс|sms)\W{0,3}код|(скаж|продикт|пришл|отправ|скин|назов)\S*.{0,15}(код|пароль)|card\s*number|sms\s*code)/u.test(n)) reasons.push("scam_request");
+    for (const m of n.matchAll(/((?:https?:\/\/)?(?:[a-z0-9-]+\.)+[a-z][a-z0-9-]{1,24}(?:\/\S*)?)/g)) {
+      const host = m[1].replace(/^https?:\/\//, "").split("/")[0];
+      if (/^[0-9.]+$/.test(host) || host.includes("@") || /(^|\.)xn--/.test(host) || /^(bit\.ly|tinyurl\.com|cutt\.ly|clck\.ru|t\.ly|goo\.su|is\.gd|rb\.gy|shorturl\.at|tiny\.cc|u\.to|vk\.cc)$/.test(host)
+        || /\.(xyz|top|click|zip|mov|icu|cfd|sbs|rest|gq|tk|ml|cf|buzz|cam)$/.test(host) || (/kaspi/.test(host) && !/(^|\.)kaspi\.kz$/.test(host)) || (/halyk/.test(host) && !/(^|\.)halykbank\.kz$/.test(host)) || (/egov/.test(host) && !/(^|\.)egov\.kz$/.test(host))) { if (!reasons.includes("bad_link")) reasons.push("bad_link"); }
     }
-    return collapse(out);
+    let verdict = reasons.includes("threat") ? "hold" : reasons.some((r) => ["sex", "scam_request", "bad_link"].includes(r)) ? "block" : reasons.includes("insult") ? "review" : "allow";
+    if (ctx === "nickname" && (masked || reasons.includes("insult"))) verdict = "block";
+    return { text: t, verdict, reasons, masked };
   }
-  // словарь v1: ключ — нормализованное слово целиком (без пробелов), поэтому .* безопасно
-  const PRE = "(вы|за|на|по|от|до|у|раз|рас|при|об|о|пере|под|недо|про|из|ис|без|бес|вз|съ|разъ|объ|подъ|отъ|изъ|въ|взъ)?";
-  const RU_FULL = new RegExp("^(" + PRE + "(ху[йяеёию].*|пизд.*|еб[аулнышиоеё].*|бля[дт].*|бля|долбоеб.*|мудак.*|мудил.*|мудо[хз].*|мудач.*|гандон.*|пид[оа]р.*|шлюх.*|залуп.*)"
-    + "|сук(а|и|е|у|ой|ою|ам|ами|ах|ин.*)|суч(к|ар|ий|ья|ье).*|котак.*|қотақ.*|сиг(ей|ейин|ем|у|ип).*|шешеңди.*)$");
-  const RU_STRICT = new RegExp("^(" + PRE + "(хуй.*|хуя.*|хуе[втлн].*|хую.*|пизд.*|еба[лнт].*|ебл.*|ебу.*|еби.*|ебн.*|ебош.*|бля[дт].*|бля|долбоеб.*|мудак.*|мудил.*|гандон.*|пид[оа]р.*|шлюх.*|залуп.*)"
-    + "|сук(а|и|е|у|ой|ам|ами|ах|ин.*))$");
-  const EN = /^(mother|motha|mutha|holy)?(fuck.*|fuk.*|fck.*|phuck.*|shit.*|bitch.*|cunt.*|asshole.*|bullshit.*|dickhead.*|whore.*|slut.*)$/;
-  const EXC = new Set(["shiitake", "shitake", "shiite", "shiites", "fukuoka", "fukushima", "hue", "hues", "huey", "hui", "ebay", "ebola", "ebony", "ebook", "ebooks", "suki", "sukiyaki", "scunthorpe"]);
-  function badToken(tok) {
-    let s = Array.from(tok.normalize("NFKC").toLowerCase()).filter((c) => { const k = cp(c); return !isZw(k) && !isMark(k) && !isSep(k); }).join("");
-    if (!s) return false;
-    if (EXC.has(s)) return false;
-    if (Array.from(s).some((c) => isCyr(cp(c)))) {
-      const k = collapse(mapChars(mapChars(s, HG), { "ё": "е", "і": "и" }));
-      return RU_FULL.test(k);
-    }
-    if (!Array.from(s).some((c) => isLat(cp(c)))) return false; // только цифры
-    const en = collapse(mapChars(s, LEET));
-    if (EXC.has(en)) return false;
-    if (EN.test(en)) return true;
-    if (RU_STRICT.test(translit(en))) return true;
-    const hg = collapse(mapChars(s, HG));
-    return !Array.from(hg).some((c) => isLat(cp(c))) && RU_FULL.test(hg);
-  }
-  const maskTok = (chars) => chars.map((c, i) => { if (i === 0) return c; const k = cp(c); if (isMark(k)) return chars.slice(1, i).every((x) => isMark(cp(x))) ? c : ""; return isZw(k) ? "" : "*"; }).join("");
-  // слова текста: буквы/цифры, внутри допускаются разделители (б.л.я, х-у-й)
-  function tokens(ch) {
-    const out = [], n = ch.length; let i = 0;
-    while (i < n) {
-      if (!isW(cp(ch[i]))) { i++; continue; }
-      let j = i;
-      for (;;) {
-        while (j < n && isW(cp(ch[j]))) j++;
-        if (j < n && isSep(cp(ch[j]))) { let k = j; while (k < n && isSep(cp(ch[k]))) k++; if (k < n && isW(cp(ch[k]))) { j = k; continue; } }
-        break;
-      }
-      out.push([i, j]); i = j;
-    }
-    return out;
-  }
-  // возвращает { text, hits }: text — маскированный текст
-  function cleanText(t) {
-    if (t == null) return { text: t, hits: 0 };
-    const ch = Array.from(String(t)), tk = tokens(ch), out = ch.slice(), done = new Set(); let hits = 0;
-    // "х у й": три и больше одиночных букв через один пробел проверяются вместе
-    for (let a = 0; a < tk.length;) {
-      let b = a;
-      while (b + 1 < tk.length && tk[b][1] - tk[b][0] === 1 && tk[b + 1][1] - tk[b + 1][0] === 1 && tk[b + 1][0] === tk[b][1] + 1 && ch[tk[b][1]] === " ") b++;
-      if (b - a >= 2 && tk[a][1] - tk[a][0] === 1 && badToken(tk.slice(a, b + 1).map((x) => ch[x[0]]).join(""))) {
-        for (let q = a + 1; q <= b; q++) out[tk[q][0]] = "*";
-        for (let q = a; q <= b; q++) done.add(q); hits++; a = b + 1; continue;
-      }
-      a++;
-    }
-    tk.forEach(([i, j], q) => {
-      if (done.has(q)) return;
-      const w = ch.slice(i, j);
-      if (badToken(w.join(""))) { hits++; const m = maskTok(w); out[i] = m; for (let x = i + 1; x < j; x++) out[x] = ""; }
-    });
-    return { text: out.join(""), hits };
-  }
-  // явные угрозы не маскируются, а не публикуются (решение — сервер; здесь подсказка до отправки)
-  const THREAT = /(^|[^а-яa-z])(убью (тебя|вас|его|ее|тебе)|зарежу|пристрелю|задушу (тебя|вас)|урою|тебе конец|найду тебя и|сожгу (тебя|вас|твой|твою|ваш)|i will kill you|i'll kill you|kill you|өлтіремін)([^а-яa-z]|$)/;
-  const isThreat = (t) => THREAT.test(String(t || "").toLowerCase().replace(/ё/g, "е"));
-  const mask = (t) => (t == null ? t : cleanText(t).text);
-  const hasBad = (t) => cleanText(String(t || "")).hits > 0;
-  /* @clean:end */
-  // никнейм: те же правила, что nick_problem в базе (окончательно проверяет сервер)
-  const NICK_OK = /^[A-Za-z0-9_А-Яа-яЁёӘәҒғҚқҢңӨөҰұҮүҺһІі]+$/, NICK_LAT = /[A-Za-z]/, NICK_CYR = /[А-Яа-яЁёӘәҒғҚқҢңӨөҰұҮүҺһІі]/;
-  function nickProblem(t) {
-    const n = String(t || "").trim(), l = n.toLowerCase();
-    if (n.length < 3 || n.length > 20) return "Никнейм: от 3 до 20 символов";
-    if (!NICK_OK.test(n)) return "Никнейм: только буквы, цифры и _ (без пробелов и ссылок)";
-    if (!NICK_LAT.test(n) && !NICK_CYR.test(n)) return "В никнейме нужна хотя бы одна буква";
-    if (NICK_LAT.test(n) && NICK_CYR.test(n)) return "Никнейм: используйте одну раскладку — только латиницу или только кириллицу";
-    if (hasBad(n) || hasBad(n.replace(/[_0-9]+/g, " "))) return "Никнейм содержит недопустимые слова. Выберите другой";
-    if (/(near|admin|moder|support|official|offical|akimat|police|mvd|админ|модер|поддержк|официал|акимат|полици|мвд)/.test(l) || /^(112|101|102|103|104)/.test(l)) return "Такой никнейм похож на официальный аккаунт. Выберите другой";
-    return "";
-  }
-  const nickNorm = (t) => mapChars(String(t || "").normalize("NFKC").toLowerCase(), { "а": "a", "е": "e", "ё": "e", "о": "o", "р": "p", "с": "c", "у": "y", "х": "x", "к": "k", "м": "m", "т": "t", "н": "h", "в": "b", "і": "i" });
+  const CLEAN_MSG = { sex: "Поиск интимных знакомств и интимный контент в NEAR запрещены", scam_request: "Нельзя просить данные карт, коды из SMS и пароли", bad_link: "Ссылка выглядит небезопасной. Уберите ее или дайте официальный адрес" };
+  function cleanOrThrow(t, ctx) { const r = clean(t, ctx); if (r.verdict === "block") throw new Error(CLEAN_MSG[r.reasons.find((x) => CLEAN_MSG[x])] || "Текст не прошел проверку NEAR Clean"); return r; }
+  const mask = (t) => (t == null ? t : clean(t).text);
+  const hasBad = (t) => { BAD.lastIndex = 0; const r = BAD.test(String(t || "")); BAD.lastIndex = 0; return r; };
   const cleanInsta = (v) => { v = String(v || "").trim().replace(/^https?:\/\/(www\.)?instagram\.com\//i, "").replace(/^@/, "").replace(/\/.*$/, ""); if (v && !/^[A-Za-z0-9._]{1,30}$/.test(v)) throw new Error("Ник Instagram: только латиница, цифры, точка и _"); return v || null; };
   function validateChatFile(f) {
     const t = f.type || "";
@@ -214,7 +164,7 @@
     if (/^audio\//.test(t)) return "audio";
     throw new Error("Можно отправить фото, видео или голосовое");
   }
-  const REASONS = { spam: "Спам или реклама", abuse: "Оскорбления, травля", fraud: "Мошенничество", nsfw: "Неприемлемые фото или видео", fake: "Ложная информация", danger: "Опасность, насилие", other: "Другое" };
+  const REASONS = { spam: "Спам или реклама", abuse: "Оскорбления, травля", fraud: "Мошенничество", threat: "Угрозы", intimate: "Интимный контент", minors: "Вред несовершеннолетним", nsfw: "Неприемлемые фото или видео", fake: "Ложная информация", danger: "Опасность, насилие", other: "Другое" };
   // подписи причин в панели модератора (в т.ч. автоматические)
   const REASON_LABELS = { ...REASONS, ai_unavailable: "ИИ-проверка недоступна — нужна ручная проверка" };
 
@@ -247,7 +197,7 @@
   const fail = (e) => {
     const code = e && e.code ? String(e.code) : "";
     const msg = /^NR\d{3}$/.test(code) && e.message ? e.message : CODES[code] && !/[а-я]/i.test(e.message || "") ? CODES[code] : ruError(e);
-    const err = new Error(msg); err.raw = e; err.code = code; err.hint = (e && e.hint) || ""; err.requestId = lastReq; throw err;
+    const err = new Error(msg); err.raw = e; err.code = code; err.requestId = lastReq; throw err;
   };
   const rid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
   // курсор ленты: время + id (у публикаций с одинаковым временем порядок по id)
@@ -302,13 +252,14 @@
 
     function seed() {
       const U = [
-        ["u-erlan", "Ерлан_77"], ["u-dinara", "dinara_k"], ["u-asel", "Асель_М"], ["u-timur", "timur_almaty"],
-        ["u-arman", "Kofe_Arman"], ["u-arbat", "ArbatLive"], ["u-aliya", "Әлия_02"], ["u-max", "maksat01"]
+        ["u-erlan", "Ерлан"], ["u-dinara", "Динара"], ["u-asel", "Асель"], ["u-timur", "Тимур"],
+        ["u-arman", "Кофейня \"Арман\""], ["u-arbat", "Арбат Live"], ["u-aliya", "Алия"], ["u-max", "Максат"]
       ];
-      const d = { v: 2, users: [], session: null, posts: [], media: [], comments: [], likes: [], saved: [], events: [], members: [], notifs: [] };
-      const SEEN = { "u-erlan": 0, "u-dinara": 7, "u-asel": 95, "u-timur": 1500, "u-aliya": 2 };
-      U.forEach(([id, name]) => d.users.push({ id, email: id + "@demo.near", pwh: null, name, nickname: name, avatar_url: null, district: "Бостандыкский", created_at: nowISO(),
-        age_status: "adult", verified: id !== "u-max", last_seen_at: SEEN[id] != null ? new Date(Date.now() - SEEN[id] * 60000).toISOString() : null }));
+      const d = { v: 2, users: [], session: null, sid: null, sessions: [], challenges: [], bans: [], appeals: [], reviews: [], chats: [], chatMsgs: [], reactions: [], audit: [], posts: [], media: [], comments: [], likes: [], saved: [], events: [], members: [], notifs: [] };
+      const G = { "u-erlan": "m", "u-dinara": "f", "u-asel": "f", "u-timur": "m", "u-aliya": "f", "u-max": "m" }, SEEN = { "u-erlan": 0, "u-dinara": 7, "u-asel": 95, "u-timur": 1500, "u-aliya": 2 };
+      const NICK = { "u-erlan": "erlan", "u-dinara": "dinara.k", "u-asel": "asel_a", "u-timur": "timur", "u-arman": "arman.coffee", "u-arbat": "arbat.live", "u-aliya": "aliya", "u-max": "maksat" };
+      U.forEach(([id, name]) => d.users.push({ id, email: id + "@demo.near", pwh: null, name, nickname: NICK[id], accepted_rules_at: nowISO(), avatar_url: null, district: "Бостандыкский", created_at: nowISO(),
+        gender: G[id] || null, verified: id !== "u-max", last_seen_at: SEEN[id] != null ? new Date(Date.now() - SEEN[id] * 60000).toISOString() : null }));
       const ago = (min) => new Date(Date.now() - min * 60000).toISOString();
       const P = [
         ["u-erlan", "meetup", "Ищем 4 игроков на футбол 5×5 сегодня в 19:00. Уровень любой, мяч есть 🙂", 43.1885, 76.8835, 12],
@@ -354,6 +305,7 @@
       // демо-медиа: галерея из 3 фото и видео
       ["1", "2", "3"].forEach((n, i) => d.media.push({ id: uid(), post_id: "p-4", url: `media/demo/${n}.jpg`, thumb: `media/demo/${n}.jpg`, type: "image", w: 1080, h: 1350 }));
       d.media.push({ id: uid(), post_id: "p-2", url: "media/onb-ru.mp4", poster: "media/onb-ru-2.jpg", thumb: "media/onb-ru-2.jpg", type: "video", w: 720, h: 1280, duration: 12 });
+      shieldSeed(d, ago);
       const c0 = uid();
       d.comments.push({ id: c0, post_id: "p-4", user_id: "u-asel", text: "А до скольки работают фудтраки?", created_at: ago(60) });
       d.comments.push({ id: uid(), post_id: "p-4", user_id: "u-arbat", parent_id: c0, text: "До 22:00, приходите 🙂", created_at: ago(55) });
@@ -363,15 +315,46 @@
       return d;
     }
 
+    // демо: видео "обрабатывается" и "проверяется" пару секунд, затем публикуется (настоящую обработку делает worker на сервере)
+    function demoProcess(m) {
+      setTimeout(() => { m.state = "pending_review"; emit("media", m); }, 1200);
+      setTimeout(() => { m.state = "approved"; save(); emit("media", m); const p = db.posts.find((x) => x.id === m.post_id); if (p && p.status === "draft" && !db.media.some((x) => x.post_id === p.id && x.state !== "approved")) { p.status = "active"; p.created_at = nowISO(); save(); emit("post", shape(p)); } }, 3200);
+    }
+    // демо Shield: общие чаты, прошедшая встреча с отзывами, аккаунты для проверки входа и бана
+    function shieldSeed(d, ago) {
+      const city = { id: "chat-city", kind: "city", title: "Алматы — общий чат", district: null, post_id: null };
+      d.chats.push(city);
+      ["Алмалинский", "Бостандыкский", "Медеуский", "Ауэзовский", "Алатауский", "Наурызбайский", "Жетысуский", "Турксибский"].forEach((n) =>
+        d.chats.push({ id: "chat-" + n, kind: "district", title: n + " район — чат района", district: n + " район", post_id: null }));
+      const M = [["u-timur", "Б****, опять пробки на Абая", 14], ["u-max", "Там ремонт дороги, лучше объехать", 13], ["u-aliya", "Спасибо! А по Сатпаева свободно?", 9], ["u-dinara", "Да, по Сатпаева едем нормально 👍", 6]];
+      M.forEach(([u, t, m], i) => d.chatMsgs.push({ id: "cm-" + i, chat_id: "chat-city", sender_id: u, text: t, mod_status: "ok", created_at: ago(m), reply_to: i === 3 ? "cm-2" : null }));
+      d.reactions.push({ message_id: "cm-1", user_id: "u-erlan", emoji: "👍" }, { message_id: "cm-1", user_id: "u-asel", emoji: "👍" }, { message_id: "cm-3", user_id: "u-aliya", emoji: "❤️" });
+      d.posts.forEach((p) => { if (p.category === "meetup" || p.category === "event") { const e = d.events.find((x) => x.post_id === p.id); if (e) { e.host_id = p.user_id; e.status = "scheduled"; if (p.category === "meetup") e.meet_cat = p.text.includes("футбол") ? "sport" : p.text.includes("коньк") ? "sport" : "walk"; } } });
+      d.members.forEach((m) => { m.status = "going"; });
+      // прошедшая встреча "CS2 — собираем команду": отзывы о Ерлане (организатор) и посещаемость
+      d.posts.push({ id: "p-cs2", user_id: "u-erlan", category: "meetup", text: "CS2 — собираем команду на вечер в компьютерном клубе", lat: 43.2390, lng: 76.9050, status: "active", created_at: ago(60 * 30), updated_at: ago(60 * 30) });
+      d.events.push({ post_id: "p-cs2", starts_at: ago(60 * 5), ends_at: ago(60 * 2), capacity: 10, host_id: "u-erlan", status: "scheduled", meet_cat: "games", chat_id: "chat-p-cs2" });
+      d.chats.push({ id: "chat-p-cs2", kind: "meeting", title: "CS2 — собираем команду", post_id: "p-cs2" });
+      ["u-dinara", "u-asel", "u-timur", "u-aliya"].forEach((u) => d.members.push({ post_id: "p-cs2", user_id: u, status: "going", host_mark: true, self_mark: true }));
+      [["u-dinara", 5], ["u-asel", 5], ["u-timur", 4], ["u-aliya", 5]].forEach(([u, r]) => d.reviews.push({ id: uid(), meeting_id: "p-cs2", reviewer_id: u, target_id: "u-erlan", target_role: "host", rating: r, tags: ["punctual", "organized"], comment: null, status: "visible", created_at: ago(60) }));
+      // еще две прошедшие встречи Ерлана — у него есть публичный балл
+      ["p-old1", "p-old2"].forEach((id, i) => {
+        d.posts.push({ id, user_id: "u-erlan", category: "meetup", text: i ? "Пробежка в парке Горького" : "Настолки во дворе", lat: 43.24, lng: 76.92, status: "closed", created_at: ago(60 * 24 * (10 + i)), updated_at: ago(60 * 24 * (10 + i)) });
+        d.events.push({ post_id: id, starts_at: ago(60 * 24 * (9 + i)), ends_at: ago(60 * 24 * (9 + i) - 120), capacity: 8, host_id: "u-erlan", status: "scheduled", meet_cat: i ? "sport" : "games" });
+        d.members.push({ post_id: id, user_id: "u-asel", status: "going", host_mark: true, self_mark: true });
+      });
+      // аккаунт для проверки входа с нового устройства (активен на "iPhone · Safari")
+      d.users.push({ id: "u-almaty", email: "almaty@demo.near", pwh: "demo", nickname: "almatyuser", name: "AlmatyUser", avatar_url: null, district: "Бостандыкский", created_at: ago(60 * 24 * 40), accepted_rules_at: nowISO(), verified: true, demo_pw: "demo1234" });
+      d.sessions.push({ id: "s-iphone", user_id: "u-almaty", install: "demo-iphone", device: "iPhone · Safari", status: "active", created_at: ago(600), last_seen: ago(5) });
+      // аккаунт с действующим баном 30 дней (решение NS-00241)
+      d.users.push({ id: "u-spam", email: "spam@demo.near", pwh: "demo", nickname: "spam.king", name: "Spam King", avatar_url: null, district: null, created_at: ago(60 * 24 * 5), accepted_rules_at: nowISO(), verified: true, demo_pw: "demo1234" });
+      d.bans.push({ id: "b-241", decision_no: "NS-00241", user_id: "u-spam", kind: "ban", scope: "global", rule: "spam", reason: "Систематическая рассылка спама", starts_at: ago(60 * 9 + 27), expires_at: new Date(Date.now() + (29 * 86400 + 14 * 3600 + 32 * 60 + 8) * 1000).toISOString(), status: "active", moderator_id: "u-erlan", created_at: ago(60) });
+    }
     function load() {
       try { db = JSON.parse(localStorage.getItem(KEY)); } catch (e) { db = null; }
-      if (!db || (db.v !== 1 && db.v !== 2)) { db = seed(); save(); }
-      if (db.v === 1) {
-        // v14: демо-данные v12 → никнеймы; у своих аккаунтов (с паролем) никнейм выбирается при входе, имя и пол стираются
-        const seedNick = Object.fromEntries(seed().users.map((x) => [x.id, x.nickname]));
-        db.users.forEach((x) => { delete x.gender; if (seedNick[x.id]) { x.nickname = x.name = seedNick[x.id]; x.age_status = "adult"; } else if (!x.nickname) { x.name = "Новый пользователь"; x.nickname = null; } });
-        db.v = 2; save();
-      }
+      if (!db || db.v !== 2) { db = seed(); save(); }
+      ["sessions", "challenges", "bans", "appeals", "reviews", "chats", "chatMsgs", "reactions", "audit"].forEach((k) => { if (!db[k]) db[k] = []; });
+      db.media = db.media.filter((m) => !String(m.url || "").startsWith("blob:"));
       ["friends", "blocks", "convs", "msgs", "reports"].forEach((k) => { if (!db[k]) db[k] = []; });
     }
     function save() {
@@ -385,40 +368,41 @@
       } catch (e) { return "plain:" + s; }
     }
     const me = () => db.users.find((u) => u.id === db.session) || null;
-    const need = () => { const u = me(); if (!u) throw new Error("Войдите, чтобы сделать это"); return u; };
-    const prof = (u) => u && { id: u.id, email: u.email, name: u.name, avatar_url: u.avatar_url, district: u.district, instagram: u.instagram || null, is_admin: !!u.is_admin, is_mod: !!(u.is_admin || u.is_moderator), banned: !!u.banned,
-      nickname: u.nickname || null, verified: !!u.verified, last_seen_at: u.last_seen_at || null, accepted_rules: !!u.accepted_rules_at, bio: u.bio || null, show_seen: u.show_seen !== false, provider: "email",
-      account: { age_status: u.age_status || "unknown", age_ok: u.age_status === "adult", phone_verified: !!u.phone_verified, media_ok: true,
-        nickname_next_change: u.nick_at && Date.now() - new Date(u.nick_at) < 30 * 86400e3 ? new Date(new Date(u.nick_at).getTime() + 30 * 86400e3).toISOString() : null } };
+    const curSess = () => db.sessions.find((x) => x.id === db.sid) || null;
+    const banOf = (uid) => db.bans.filter((b) => b.user_id === uid && b.status === "active" && (b.scope || "global") === "global" && b.kind !== "warning" && (!b.expires_at || b.expires_at > nowISO()))
+      .sort((a, b) => (b.kind === "ban") - (a.kind === "ban") || (!b.expires_at) - (!a.expires_at) || String(b.expires_at).localeCompare(String(a.expires_at)))[0] || null;
+    function accState(uid) {
+      const b = uid && banOf(uid);
+      if (!b) return { state: uid ? "active" : "guest", server_now: nowISO() };
+      const ap = db.appeals.find((a) => a.ban_id === b.id);
+      return { state: b.kind === "restricted" ? "restricted" : b.expires_at ? "banned_until" : "banned_permanent", ban_id: b.id, decision_no: b.decision_no, rule: b.rule,
+        rule_title: (BAN_RULES[b.rule] || {}).title, reason: b.reason, starts_at: b.starts_at, expires_at: b.expires_at || null, server_now: nowISO(), appeal: ap ? ap.status : null };
+    }
+    // запись: актуальная сессия этого устройства и нет ограничений (как guard на сервере)
+    const need = () => {
+      const u = me(); if (!u) throw new Error("Войдите, чтобы сделать это");
+      const cs = curSess();
+      if (!cs || cs.status !== "active") { const e = new Error(cs && cs.status === "revoked" ? "Вы вышли из аккаунта: выполнен вход на другом устройстве" : "Подтвердите вход с этого устройства"); e.code = "NR401"; throw e; }
+      const st = accState(u.id).state;
+      if (st === "banned_until" || st === "banned_permanent") { const e = new Error("Аккаунт заблокирован"); e.code = "NR403"; throw e; }
+      if (st === "restricted") throw new Error("Действие ограничено решением модератора");
+      return u;
+    };
+    const prof = (u) => u && { id: u.id, email: u.email, nickname: u.nickname || null, meetings_pilot: true, name: u.name, avatar_url: u.avatar_url, district: u.district, instagram: u.instagram || null, is_admin: !!u.is_admin, is_mod: !!(u.is_admin || u.is_moderator), banned: !!u.banned,
+      gender: u.gender || null, verified: !!u.verified, last_seen_at: u.last_seen_at || null, accepted_rules: !!u.accepted_rules_at, bio: u.bio || null, show_seen: u.show_seen !== false, provider: "email" };
     const blockedByMe = () => { const u = me(); return new Set(u ? db.blocks.filter((b) => b.blocker_id === u.id).map((b) => b.blocked_id) : []); };
     const isBlocked = (a, b) => db.blocks.some((x) => (x.blocker_id === a && x.blocked_id === b) || (x.blocker_id === b && x.blocked_id === a));
     const friendRow = (a, b) => db.friends.find((f) => (f.requester_id === a && f.addressee_id === b) || (f.requester_id === b && f.addressee_id === a));
-    const pubProfile = (x) => x && { id: x.id, name: x.name, avatar_url: x.avatar_url, district: x.district, instagram: x.instagram || null, created_at: x.created_at,
-      verified: !!x.verified, last_seen_at: x.show_seen === false ? null : x.last_seen_at || null, banned: !!x.banned, bio: x.bio || null };
-    // v14 / 08: дневные лимиты как на сервере (демо считает на этом телефоне)
-    const DAY_LIMITS = { post: [3, 15], comment: [20, 100], chat_request: [3, 10] };
-    function demoTake(u, action) {
-      if (u.is_admin || u.is_moderator) return;
-      const day = new Date(Date.now() + 5 * 3600e3).toISOString().slice(0, 10), k = u.id + "|" + action + "|" + day, lim = DAY_LIMITS[action][u.phone_verified ? 1 : 0];
-      db.rate = db.rate || {};
-      if ((db.rate[k] || 0) >= lim) {
-        const left = Math.max(60, Math.ceil((Date.parse(day + "T00:00:00+05:00") + 86400e3 - Date.now()) / 1000));
-        const e = new Error(`Лимит на сегодня исчерпан: ${lim} ${{ post: ["публикация", "публикации", "публикаций"], comment: ["комментарий", "комментария", "комментариев"], chat_request: ["новый запрос в чат", "новых запроса в чат", "новых запросов в чат"] }[action][lim % 10 === 1 && lim % 100 !== 11 ? 0 : lim % 10 >= 2 && lim % 10 <= 4 && (lim % 100 < 10 || lim % 100 >= 20) ? 1 : 2]}. Снова можно через ${left >= 3600 ? Math.floor(left / 3600) + " ч " + Math.floor((left % 3600) / 60) + " мин" : Math.ceil(left / 60) + " мин"}`);
-        e.code = "NR429"; e.hint = "retry_after=" + left + ";action=" + action; throw e;
-      }
-      db.rate[k] = (db.rate[k] || 0) + 1;
-    }
-    const textKey = (t) => String(t || "").toLowerCase().replace(/ё/g, "е").replace(/[^a-zа-яәғқңөұүһі0-9]+/g, "");
-    function demoCheckText(t) { if (isThreat(t)) { const e = new Error("Угрозы запрещены правилами NEAR. Текст не опубликован"); e.code = "NR422"; throw e; } }
+    const pubProfile = (x) => x && { id: x.id, nickname: x.nickname || null, name: x.name, avatar_url: x.avatar_url, district: x.district, instagram: x.instagram || null, created_at: x.created_at,
+      gender: x.gender || null, verified: !!x.verified, last_seen_at: x.show_seen === false ? null : x.last_seen_at || null, banned: !!x.banned, bio: x.bio || null };
     function shapeMsg(m) { return { ...m }; }
     function demoWelcome(u) {
-      // демо: заявка в друзья и сообщение от незнакомца, чтобы было что проверить
+      // демо: заявка в друзья и прошедшая встреча, по которой можно оставить отзыв
       if (!db.friends.some((f) => f.addressee_id === u.id)) {
         db.friends.push({ requester_id: "u-erlan", addressee_id: u.id, status: "pending", created_at: nowISO() });
         db.notifs.push({ id: uid(), user_id: u.id, actor_id: "u-erlan", type: "friend_request", text: "хочет добавить вас в друзья", read: false, created_at: nowISO() });
-        const a = u.id < "u-dinara" ? u.id : "u-dinara", b = u.id < "u-dinara" ? "u-dinara" : u.id, cid = uid();
-        db.convs.push({ id: cid, user_a: a, user_b: b, created_at: nowISO(), last_message_at: nowISO(), status: "request", initiator: "u-dinara" });
-        db.msgs.push({ id: uid(), conversation_id: cid, sender_id: "u-dinara", kind: "text", text: "Здравствуйте! Видела вашу публикацию рядом, можно вопрос?", mod_status: "ok", read_at: null, created_at: nowISO() });
+        if (!db.members.some((m) => m.post_id === "p-cs2" && m.user_id === u.id)) db.members.push({ post_id: "p-cs2", user_id: u.id, status: "going", host_mark: true, self_mark: true });
+        db.notifs.push({ id: uid(), user_id: u.id, actor_id: "u-erlan", type: "review", post_id: "p-cs2", text: "Встреча завершена. Оцените участников", read: false, created_at: nowISO() });
       }
     }
     function notify(to, type, post_id, text) {
@@ -431,16 +415,18 @@
       return {
         id: p.id, user_id: p.user_id, category: p.category, text: p.text, lat: p.lat, lng: p.lng, status: p.status,
         created_at: p.created_at, updated_at: p.updated_at, is_sos: !!p.is_sos, exact: !!p.exact, expires_at: p.expires_at || null, resolved_at: p.resolved_at || null,
-        author: a ? { id: a.id, name: a.name, avatar_url: a.avatar_url, verified: !!a.verified } : { id: p.user_id, name: "Пользователь", avatar_url: null },
-        media: db.media.filter((m) => m.post_id === p.id).map((m) => ({ url: m.url, type: m.type, mod_status: m.mod_status || "ok", thumb: m.thumb || null, poster: m.poster || null, w: m.w || null, h: m.h || null, duration: m.duration || null })),
+        author: a ? { id: a.id, name: a.name, nickname: a.nickname || null, avatar_url: a.avatar_url, verified: !!a.verified } : { id: p.user_id, name: "Пользователь", avatar_url: null },
+        media: db.media.filter((m) => m.post_id === p.id && (m.state || "approved") === "approved" || (m.post_id === p.id && u && p.user_id === u.id))
+          .map((m) => ({ id: m.id, url: m.url, type: m.type, mod_status: m.mod_status || "ok", state: m.state || "approved", error: m.error || null, thumb: m.thumb || null, poster: m.poster || null, w: m.w || null, h: m.h || null, duration: m.duration || null, edit: m.edit || null })),
         likes: db.likes.filter((l) => l.post_id === p.id).length,
         comments: db.comments.filter((c) => c.post_id === p.id).length,
         liked: !!u && db.likes.some((l) => l.post_id === p.id && l.user_id === u.id),
         saved: !!u && db.saved.some((l) => l.post_id === p.id && l.user_id === u.id),
         event: ev ? {
           starts_at: ev.starts_at, capacity: ev.capacity,
-          members: db.members.filter((m) => m.post_id === p.id).length,
-          joined: !!u && db.members.some((m) => m.post_id === p.id && m.user_id === u.id)
+          members: db.members.filter((m) => m.post_id === p.id && (m.status || "going") === "going").length,
+          joined: !!u && db.members.some((m) => m.post_id === p.id && m.user_id === u.id && (m.status || "going") === "going"),
+          meet_cat: ev.meet_cat || null, ends_at: ev.ends_at || null, host_id: ev.host_id || p.user_id, cohost_id: ev.cohost_id || null, status: ev.status || "scheduled", chat_id: ev.chat_id || null
         } : null
       };
     }
@@ -454,24 +440,253 @@
       subscribe(cb) { listeners.push(cb); return () => { const i = listeners.indexOf(cb); if (i >= 0) listeners.splice(i, 1); }; },
 
       async signUp({ nickname, email, password, district }) {
-        email = (email || "").trim().toLowerCase(); nickname = String(nickname || "").trim();
-        const np = nickProblem(nickname); if (np) throw new Error(np);
-        if (db.users.some((x) => x.nickname && nickNorm(x.nickname) === nickNorm(nickname))) throw new Error("Этот никнейм уже занят. Попробуйте другой");
+        email = (email || "").trim().toLowerCase();
+        const nick = String(nickname || "").trim().replace(/^@/, "").toLowerCase();
+        const chk = await this.nicknameAvailable(nick); if (!chk.ok) throw new Error(chk.reason);
         if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error("Проверьте правильность email");
-        if ((password || "").length < 6) throw new Error("Пароль должен быть не короче 6 символов");
-        if (db.users.some((u) => u.email === email)) throw new Error("Этот email уже зарегистрирован. Попробуйте войти.");
-        const firstReal = !db.users.some((x) => x.pwh);
-        const u = { id: uid(), email, pwh: await hash(password), name: nickname, nickname, nick_at: nowISO(), avatar_url: null, district: district || null, created_at: nowISO(), accepted_rules_at: nowISO(), is_admin: firstReal, age_status: "unknown", verified: false, last_seen_at: nowISO() };
-        db.users.push(u); db.session = u.id; demoWelcome(u); save(); emit("auth", prof(u));
+        if ((password || "").length < 8) throw new Error("Пароль должен быть не короче 8 символов");
+        // существующую почту не раскрываем: ответ как при успешной регистрации, второй аккаунт не создается
+        if (db.users.some((u) => u.email === email)) return { needsConfirm: true };
+        const firstReal = !db.users.some((x) => x.pwh && x.pwh !== "demo");
+        const u = { id: uid(), email, pwh: await hash(password), nickname: nick, name: nick, avatar_url: null, district: district || null, created_at: nowISO(), accepted_rules_at: nowISO(), is_admin: firstReal, gender: null, verified: false, last_seen_at: nowISO() };
+        db.users.push(u); db.session = u.id; db.sid = null; demoWelcome(u); save();
         return { needsConfirm: false };
       },
-      async signIn({ email, password }) {
-        email = (email || "").trim().toLowerCase();
-        const u = db.users.find((x) => x.email === email);
-        if (!u || !u.pwh || u.pwh !== (await hash(password || ""))) throw new Error("Неверная почта или пароль");
-        db.session = u.id; save(); emit("auth", prof(u)); return prof(u);
+      async signIn({ login, email, password }) {
+        login = String(login || email || "").trim().toLowerCase().replace(/^@/, "");
+        const u = db.users.find((x) => x.email === login || x.nickname === login);
+        const ok = u && (u.pwh === "demo" ? password === u.demo_pw : u.pwh && u.pwh === (await hash(password || "")));
+        if (!ok) throw new Error("Не удалось войти. Проверьте данные или восстановите доступ");
+        db.session = u.id; db.sid = null; save(); return prof(u);
       },
-      async signOut() { db.session = null; save(); emit("auth", null); },
+      async nicknameAvailable(n) {
+        const v = String(n || "").trim().replace(/^@/, "").normalize("NFKC").toLowerCase();
+        if (!/^[a-z0-9_.]{3,20}$/.test(v) || /^[._]|[._]$|\.\./.test(v)) return { ok: false, reason: "Никнейм: 3–20 символов, латинские буквы, цифры, точка и _" };
+        if (/^(admin|administrator|near|nearapp|support|moderator|modera|root|system|official|help|security)/.test(v)) return { ok: false, reason: "Этот никнейм зарезервирован" };
+        if (clean(v, "nickname").verdict === "block") return { ok: false, reason: "Такой никнейм нельзя использовать" };
+        if (db.users.some((u) => u.nickname === v)) return { ok: false, reason: "Никнейм уже занят" };
+        return { ok: true, nickname: v };
+      },
+      /* ---------- Shield: сессия этого устройства ---------- */
+      async sessionBegin() {
+        const u = me(); if (!u) return { state: "guest" };
+        const acc = accState(u.id);
+        if (acc.state === "banned_until" || acc.state === "banned_permanent") return { state: "banned", account: acc };
+        const inst = installId(), dev = deviceLabel();
+        let cs = curSess();
+        if (cs && cs.user_id === u.id && cs.status === "active") { cs.last_seen = nowISO(); save(); return { state: "active", account: acc }; }
+        if (cs && cs.user_id === u.id && cs.status === "revoked") return { state: "revoked", reason: cs.reason };
+        const act = db.sessions.find((x) => x.user_id === u.id && x.status === "active");
+        if (!act || act.install === inst) {
+          if (act) { act.status = "revoked"; act.reason = "same_device"; act.revoked_at = nowISO(); }
+          cs = { id: uid(), user_id: u.id, install: inst, device: dev, status: "active", created_at: nowISO(), last_seen: nowISO() };
+          db.sessions.push(cs); db.sid = cs.id; save(); emit("auth", prof(u)); return { state: "active", account: acc };
+        }
+        if (!cs || cs.user_id !== u.id) { cs = { id: uid(), user_id: u.id, install: inst, device: dev, status: "pending", created_at: nowISO(), last_seen: nowISO() }; db.sessions.push(cs); db.sid = cs.id; }
+        let ch = db.challenges.find((c) => c.sid === cs.id && !c.done && c.expires_at > nowISO());
+        if (!ch) { ch = { id: uid(), sid: cs.id, user_id: u.id, old: act.id, code: String(Math.floor(100000 + Math.random() * 900000)), attempts: 0, sends: 1, expires_at: new Date(Date.now() + 600e3).toISOString(), resend_at: new Date(Date.now() + 60e3).toISOString() }; db.challenges.push(ch); }
+        save();
+        return { state: "challenge", challenge_id: ch.id, expires_at: ch.expires_at, resend_at: ch.resend_at, attempts_left: 5 - ch.attempts, old_device: act.device, old_last_seen: act.last_seen, server_now: nowISO(), demo_code: ch.code };
+      },
+      async sessionConfirm(id, code) {
+        const ch = db.challenges.find((c) => c.id === id && c.sid === db.sid);
+        if (!ch || ch.done) return { ok: false, error: "Код больше не действует. Войдите заново", final: true };
+        if (ch.expires_at <= nowISO()) return { ok: false, error: "Срок кода истек. Запросите новый код", expired: true };
+        if (ch.attempts >= 5) { ch.done = true; save(); return { ok: false, error: "Слишком много попыток. Войдите заново", final: true }; }
+        if (String(code).trim() !== ch.code) { ch.attempts++; save(); return { ok: false, error: "Неверный код", attempts_left: 5 - ch.attempts, final: ch.attempts >= 5 }; }
+        const act = db.sessions.find((x) => x.user_id === ch.user_id && x.status === "active");
+        if ((act && act.id) !== ch.old) { ch.done = true; save(); return { ok: false, error: "Вход уже выполнен на другом устройстве. Войдите заново", final: true }; }
+        ch.done = true;
+        if (act) { act.status = "revoked"; act.reason = "new_device"; act.revoked_at = nowISO(); }
+        const cs = curSess(); cs.status = "active"; cs.last_seen = nowISO();
+        db.audit.push({ id: db.audit.length + 1, actor_id: ch.user_id, action: "session_new_device", target_id: ch.user_id, details: { old: act && act.device }, created_at: nowISO() });
+        save(); emit("auth", prof(me())); return { ok: true, state: "active" };
+      },
+      async sessionResend(id) {
+        const ch = db.challenges.find((c) => c.id === id && !c.done); if (!ch) return { ok: false, error: "Войдите заново" };
+        if (ch.resend_at > nowISO()) return { ok: false, error: "Повторно — через минуту", resend_at: ch.resend_at };
+        if (ch.sends >= 3) return { ok: false, error: "Лимит писем исчерпан. Войдите заново позже" };
+        ch.code = String(Math.floor(100000 + Math.random() * 900000)); ch.sends++; ch.resend_at = new Date(Date.now() + 60e3).toISOString(); ch.expires_at = new Date(Date.now() + 600e3).toISOString(); save();
+        return { ok: true, resend_at: ch.resend_at, demo_code: ch.code };
+      },
+      async sessionCancel() { const cs = curSess(); if (cs && cs.status === "pending") { cs.status = "revoked"; cs.reason = "cancelled"; } db.challenges.forEach((c) => { if (c.sid === db.sid) c.done = true; }); db.session = null; db.sid = null; save(); emit("auth", null); },
+      async sessionState() {
+        const u = me(); if (!u) return { state: "guest", server_now: nowISO() };
+        const cs = curSess();
+        return { state: cs && cs.user_id === u.id ? cs.status : "none", reason: cs && cs.reason, account: accState(u.id), server_now: nowISO(), captcha: false, hold: false };
+      },
+      async sessionList() { const u = me(); if (!u) return []; return db.sessions.filter((x) => x.user_id === u.id).sort((a, b) => b.created_at.localeCompare(a.created_at)).slice(0, 30)
+        .map((x) => ({ device_label: x.device, status: x.status, created_at: x.created_at, last_seen: x.last_seen, revoked_at: x.revoked_at || null, revoke_reason: x.reason || null, current: x.id === db.sid })); },
+      async accountState() { const u = me(); return accState(u && u.id); },
+      async myDecisions() { const u = me(); if (!u) return []; return db.bans.filter((b) => b.user_id === u.id && (b.scope || "global") === "global").map((b) => { const a = db.appeals.find((x) => x.ban_id === b.id);
+        return { id: b.id, decision_no: b.decision_no, kind: b.kind, rule: b.rule, rule_title: (BAN_RULES[b.rule] || {}).title, reason: b.reason, starts_at: b.starts_at, expires_at: b.expires_at || null,
+          status: b.status === "revoked" ? "revoked" : b.expires_at && b.expires_at <= nowISO() ? "expired" : "active", appeal_status: a ? a.status : null, appeal_note: a ? a.note : null }; }); },
+      async appealSubmit(banId, text) {
+        const u = me(); if (!u) throw new Error("Войдите");
+        const b = db.bans.find((x) => x.id === banId && x.user_id === u.id && x.status === "active"); if (!b) throw new Error("Решение не найдено");
+        if (String(text || "").trim().length < 10) throw new Error("Опишите ситуацию: минимум 10 символов");
+        let a = db.appeals.find((x) => x.ban_id === b.id);
+        if (!a) { a = { id: uid(), ban_id: b.id, user_id: u.id, message: String(text).trim().slice(0, 1000), status: "pending", created_at: nowISO(), due_at: new Date(Date.now() + 72 * 3600e3).toISOString() }; db.appeals.push(a); save(); }
+        return { id: a.id, status: a.status, due_at: a.due_at };
+      },
+      /* ---------- репутация и отзывы ---------- */
+      async reputation(id) {
+        const target = id || (me() || {}).id;
+        const rv = db.reviews.filter((r) => r.target_id === target && r.status === "visible");
+        const people = new Set(rv.map((r) => r.reviewer_id)).size;
+        const avg = (l) => (l.length ? l.reduce((t, r) => t + r.rating, 0) / l.length : null);
+        const hostR = rv.filter((r) => r.target_role === "host"), memR = rv.filter((r) => r.target_role === "participant");
+        const ended = (e) => new Date(e.ends_at || new Date(e.starts_at).getTime() + 3 * 3600e3) < Date.now();
+        const mine = db.members.filter((m) => m.user_id === target && m.status === "going").filter((m) => { const e = db.events.find((x) => x.post_id === m.post_id); const p = db.posts.find((x) => x.id === m.post_id); return e && p && p.category === "meetup" && e.status !== "cancelled" && ended(e); });
+        const att = mine.map((m) => attendance(m.host_mark ?? null, m.self_mark ?? null));
+        const committed = att.filter((x) => x === "attended" || x === "missed").length, attended = att.filter((x) => x === "attended").length;
+        const hosted = db.events.filter((e) => e.host_id === target && e.status !== "cancelled" && ended(e) && (db.posts.find((p) => p.id === e.post_id) || {}).category === "meetup").length;
+        const done = hosted + attended;
+        const pen = db.bans.filter((b) => b.user_id === target && b.status === "active").reduce((t, b) => t + ({ warning: 5, restricted: 15, ban: 30 }[b.kind] || 0), 0);
+        const thanks = new Set(db.likes.filter((l) => l.user_id !== target && db.posts.some((p) => p.id === l.post_id && p.user_id === target && ["lost", "found", "incident", "talk"].includes(p.category))).map((l) => l.user_id)).size;
+        const a = db.users.find((x) => x.id === target); const months = a ? (Date.now() - new Date(a.created_at)) / 2592e6 : 0;
+        const V = rv.length ? 25 * (avg(rv) - 1) : null, A = committed ? (100 * attended) / committed : null, S = Math.max(0, 100 - pen);
+        const Uc = thanks ? Math.min(100, 40 + 10 * thanks) : null, H = months >= 1 ? Math.min(100, 50 + 10 * Math.floor(months)) : null;
+        const score = people >= 3 && done >= 3 ? repFormula(V, A, S, Uc, H) : null;
+        return { score, level: REP_LEVEL(score), review_count: rv.length, host_rating: avg(hostR) && +avg(hostR).toFixed(2), host_reviews: hostR.length, member_rating: avg(memR) && +avg(memR).toFixed(2), member_reviews: memR.length,
+          attendance_pct: A == null ? null : Math.round(A), thanks, meetings_done: done, formula: "rep-1", components: target === (me() || {}).id ? { V: V && Math.round(V), A: A && Math.round(A), S, U: Uc, H } : null };
+      },
+      async userReviews(id) { return db.reviews.filter((r) => r.target_id === id && r.status === "visible").sort((a, b) => b.created_at.localeCompare(a.created_at)).map((r) => { const w = db.users.find((x) => x.id === r.reviewer_id) || {}; const p = db.posts.find((x) => x.id === r.meeting_id) || {};
+        return { ...r, reviewer: { id: w.id, nickname: w.nickname, avatar_url: w.avatar_url }, meeting_title: p.text }; }); },
+      async reviewTargets(postId) {
+        const u = me(); if (!u) return [];
+        const e = db.events.find((x) => x.post_id === postId); if (!e || e.status === "cancelled") return [];
+        const end = new Date(e.ends_at || new Date(e.starts_at).getTime() + 3 * 3600e3).getTime();
+        if (!(end < Date.now() && end + 7 * 86400e3 > Date.now())) return [];
+        const att = (uid2) => uid2 === e.host_id || uid2 === e.cohost_id || db.members.some((m) => m.post_id === postId && m.user_id === uid2 && m.status === "going" && attendance(m.host_mark ?? null, m.self_mark ?? null) === "attended");
+        if (!att(u.id)) return [];
+        const people = [[e.host_id, "host"], ...(e.cohost_id ? [[e.cohost_id, "host"]] : []), ...db.members.filter((m) => m.post_id === postId && m.status === "going").map((m) => [m.user_id, "participant"])];
+        const seen = new Set();
+        return people.filter(([x]) => x !== u.id && att(x) && !seen.has(x) && seen.add(x)).map(([x, role]) => { const w = db.users.find((y) => y.id === x) || {};
+          return { user_id: x, nickname: w.nickname, avatar_url: w.avatar_url, role, done: db.reviews.some((r) => r.meeting_id === postId && r.reviewer_id === u.id && r.target_id === x) }; });
+      },
+      async reviewSubmit(postId, target, rating, tags, comment) {
+        const u = need(); const t = (await this.reviewTargets(postId)).find((x) => x.user_id === target);
+        if (!t) throw new Error("Отзыв могут оставить только подтвержденные участники в течение 7 дней после встречи");
+        if (!(rating >= 1 && rating <= 5)) throw new Error("Поставьте оценку от 1 до 5");
+        const ex = db.reviews.find((r) => r.meeting_id === postId && r.reviewer_id === u.id && r.target_id === target); if (ex) return { id: ex.id, repeat: true };
+        const c = cleanOrThrow(String(comment || "").trim().slice(0, 500), "review");
+        const r = { id: uid(), meeting_id: postId, reviewer_id: u.id, target_id: target, target_role: t.role, rating, tags: (tags || []).filter((x) => REVIEW_TAGS[x]), comment: c.text || null, status: c.verdict === "hold" ? "pending" : "visible", created_at: nowISO() };
+        db.reviews.push(r); save(); return { id: r.id };
+      },
+      async reviewsPending() {
+        const u = me(); if (!u) return [];
+        const out = [];
+        for (const e of db.events) { const p = db.posts.find((x) => x.id === e.post_id); if (!p || p.category !== "meetup") continue; const t = await this.reviewTargets(e.post_id); const left = t.filter((x) => !x.done).length; if (left) out.push({ post_id: e.post_id, title: p.text.slice(0, 80), ended_at: e.ends_at, left_count: left }); }
+        return out;
+      },
+      /* ---------- встречи ---------- */
+      async meetingInfo(postId) {
+        const e = db.events.find((x) => x.post_id === postId); if (!e) return null; const u = me();
+        const mem = db.members.filter((m) => m.post_id === postId).map((m) => { const w = db.users.find((x) => x.id === m.user_id) || {}; return { user_id: m.user_id, nickname: w.nickname, avatar_url: w.avatar_url, status: m.status || "going", attendance: attendance(m.host_mark ?? null, m.self_mark ?? null), host_mark: m.host_mark ?? null, self_mark: m.self_mark ?? null }; });
+        const role = !u ? null : e.host_id === u.id ? "host" : e.cohost_id === u.id ? "cohost" : mem.some((m) => m.user_id === u.id && m.status === "going") ? "member" : null;
+        const host = db.users.find((x) => x.id === e.host_id) || {};
+        return { ...e, role, members: mem, host: { id: host.id, nickname: host.nickname, avatar_url: host.avatar_url } };
+      },
+      async meetingJoin(postId) {
+        const u = need(); const e = db.events.find((x) => x.post_id === postId); if (!e) throw new Error("Встреча не найдена");
+        if (e.status === "cancelled") throw new Error("Встреча отменена"); if (new Date(e.starts_at) < Date.now()) throw new Error("Встреча уже началась");
+        let m = db.members.find((x) => x.post_id === postId && x.user_id === u.id);
+        if (m && m.status === "excluded") throw new Error("Организатор исключил вас из этой встречи");
+        const n = db.members.filter((x) => x.post_id === postId && (x.status || "going") === "going").length;
+        if (e.capacity && n >= e.capacity && !(m && m.status === "going")) throw new Error("Мест нет");
+        if (m) m.status = "going"; else db.members.push((m = { post_id: postId, user_id: u.id, status: "going" }));
+        save(); return { ok: true, chat_id: e.chat_id || null };
+      },
+      async meetingLeave(postId) { const u = need(); const m = db.members.find((x) => x.post_id === postId && x.user_id === u.id); if (m) { m.status = "withdrawn"; m.withdrawn_at = nowISO(); } save(); },
+      async meetingMark(postId, target, val) {
+        const u = need(); const e = db.events.find((x) => x.post_id === postId); if (new Date(e.starts_at) > Date.now()) throw new Error("Отмечать можно после начала встречи");
+        const m = db.members.find((x) => x.post_id === postId && x.user_id === target && x.status === "going"); if (!m) throw new Error("Участник не найден");
+        if (target === u.id) m.self_mark = val; else if (u.id === e.host_id || u.id === e.cohost_id) m.host_mark = val; else throw new Error("Отмечать других может только организатор");
+        save(); return attendance(m.host_mark ?? null, m.self_mark ?? null);
+      },
+      async meetingCancel(postId, reason) { const u = need(); const e = db.events.find((x) => x.post_id === postId); if (e.host_id !== u.id) throw new Error("Только организатор встречи"); e.status = "cancelled"; e.cancel_reason = reason || "Организатор отменил встречу"; db.members.filter((m) => m.post_id === postId && m.status === "going").forEach((m) => db.notifs.push({ id: uid(), user_id: m.user_id, actor_id: u.id, type: "meeting", post_id: postId, text: e.cancel_reason, read: false, created_at: nowISO() })); save(); },
+      async meetingSetCohost(postId, target) { const u = need(); const e = db.events.find((x) => x.post_id === postId); if (e.host_id !== u.id) throw new Error("Только организатор встречи"); e.cohost_id = target || null; save(); },
+      async meetingExclude(postId, target, reason) { const u = need(); const e = db.events.find((x) => x.post_id === postId); if (u.id !== e.host_id && u.id !== e.cohost_id) throw new Error("Только организатор встречи"); if (target === e.host_id) throw new Error("Нельзя исключить организатора"); const m = db.members.find((x) => x.post_id === postId && x.user_id === target); if (m) m.status = "excluded"; db.bans.push({ id: uid(), user_id: target, kind: "restricted", scope: "meeting", scope_id: postId, rule: "minor", reason: reason || "Исключен организатором встречи", status: "active", starts_at: nowISO(), created_at: nowISO() }); save(); },
+      /* ---------- общие чаты ---------- */
+      async chatList() {
+        const u = me(); if (!u) return [];
+        const blocked = blockedByMe();
+        const mine = new Set(db.events.filter((e) => e.chat_id && (e.host_id === u.id || e.cohost_id === u.id || db.members.some((m) => m.post_id === e.post_id && m.user_id === u.id && m.status === "going"))).map((e) => e.chat_id));
+        const dist = (u.district || "").replace(/ район$/, "");
+        return db.chats.filter((c) => c.kind === "city" || mine.has(c.id) || (c.kind === "district" && c.title.startsWith(dist) && dist)).map((c) => {
+          const ms = db.chatMsgs.filter((m) => m.chat_id === c.id && m.mod_status === "ok" && !blocked.has(m.sender_id)).sort((a, b) => a.created_at.localeCompare(b.created_at));
+          const last = ms[ms.length - 1]; const lw = last && db.users.find((x) => x.id === last.sender_id);
+          const lr = (u.chatRead || {})[c.id] || "";
+          return { id: c.id, kind: c.kind, title: c.title, district: c.district, post_id: c.post_id, last_message_at: last ? last.created_at : null, last_text: last ? last.text : null, last_nick: lw ? lw.nickname : null,
+            unread: ms.filter((m) => m.sender_id !== u.id && m.created_at > lr).length, member: true, role: null };
+        }).sort((a, b) => (b.kind === "city") - (a.kind === "city") || String(b.last_message_at).localeCompare(String(a.last_message_at)));
+      },
+      async chatPage(chatId, before) {
+        const u = me(); const blocked = blockedByMe();
+        return db.chatMsgs.filter((m) => m.chat_id === chatId && (m.mod_status === "ok" || (u && m.sender_id === u.id)) && !blocked.has(m.sender_id) && (!before || m.created_at < before))
+          .sort((a, b) => b.created_at.localeCompare(a.created_at)).slice(0, 40).map((m) => {
+            const w = db.users.find((x) => x.id === m.sender_id) || {}, r = m.reply_to && db.chatMsgs.find((x) => x.id === m.reply_to), rw = r && db.users.find((x) => x.id === r.sender_id);
+            const rs = db.reactions.filter((x) => x.message_id === m.id && !blocked.has(x.user_id)); const agg = {}; rs.forEach((x) => (agg[x.emoji] = (agg[x.emoji] || 0) + 1));
+            return { id: m.id, chat_id: m.chat_id, sender_id: m.sender_id, nickname: w.nickname, avatar_url: w.avatar_url, text: m.text, mod_status: m.mod_status, created_at: m.created_at,
+              reply_to: m.reply_to || null, reply_nick: rw ? rw.nickname : null, reply_text: r ? r.text.slice(0, 80) : null, reactions: agg, mine_reactions: u ? rs.filter((x) => x.user_id === u.id).map((x) => x.emoji) : [] };
+          });
+      },
+      async chatSend(chatId, text, key, replyTo) {
+        const u = need(); const c = db.chats.find((x) => x.id === chatId); if (!c) throw new Error("Чат не найден");
+        if (key) { const ex = db.chatMsgs.find((m) => m.sender_id === u.id && m.client_key === key); if (ex) return ex; }
+        const r = cleanOrThrow(String(text || "").trim().slice(0, 1000), "chat"); if (!r.text) throw new Error("Пустое сообщение");
+        const recent = db.chatMsgs.filter((m) => m.sender_id === u.id && Date.now() - new Date(m.created_at) < 60e3);
+        if (recent.length >= 10) throw new Error("Слишком часто. Попробуйте немного позже");
+        if (recent.some((m) => m.raw === text.trim())) throw new Error("Такое же сообщение уже отправлено. Подождите минуту");
+        const m = { id: uid(), chat_id: chatId, sender_id: u.id, text: r.text, raw: text.trim(), client_key: key || null, reply_to: replyTo || null, mod_status: r.verdict === "hold" ? "pending" : "ok", created_at: nowISO() };
+        db.chatMsgs.push(m); (u.chatRead = u.chatRead || {})[chatId] = m.created_at; save(); emit("chatmsg", m); return m;
+      },
+      async chatRead(chatId) { const u = me(); if (!u) return; (u.chatRead = u.chatRead || {})[chatId] = nowISO(); save(); },
+      async chatReact(msgId, emoji) { const u = need(); const i = db.reactions.findIndex((x) => x.message_id === msgId && x.user_id === u.id && x.emoji === emoji); if (i >= 0) { db.reactions.splice(i, 1); save(); return false; } db.reactions.push({ message_id: msgId, user_id: u.id, emoji }); save(); return true; },
+      subscribeChat(chatId, cb) { const f = (t, d) => { if (t === "chatmsg" && d.chat_id === chatId) cb("insert", d); }; listeners.push(f); return () => { const i = listeners.indexOf(f); if (i >= 0) listeners.splice(i, 1); }; },
+      async chatRestrict() { need(); },
+      /* ---------- медиа ---------- */
+      async changeEmail(email) { const u = need(); email = String(email || "").trim().toLowerCase(); if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error("Проверьте правильность почты"); if (db.users.some((x) => x.email === email)) return; u.email = email; save(); },
+      async myReports() { const u = me(); return u ? db.reports.filter((r) => r.reporter_id === u.id).map((r) => ({ reason: r.reason, status: r.status, created_at: r.created_at })) : []; },
+      async mediaRetry(id) { const m = db.media.find((x) => x.id === id); if (m) { m.state = "processing"; m.error = null; save(); demoProcess(m); } },
+      async mediaView() {},
+      async mediaSigned(url) { return url; },
+      /* ---------- NEAR Shield: панель администратора (демо) ---------- */
+      async staffRole() { const u = me(); return { admin: !!(u && u.is_admin), moderator: !!(u && (u.is_admin || u.is_moderator)), auditor: !!(u && u.is_admin), mfa_required: false, aal: "aal2" }; },
+      async shieldOverview() { return { active_bans: db.bans.filter((b) => b.kind === "ban" && b.status === "active" && (!b.expires_at || b.expires_at > nowISO())).length, evasion: 1, appeals: db.appeals.filter((a) => ["pending", "in_review"].includes(a.status)).length, reports: db.reports.filter((r) => r.status === "open").length, queue: 2, overdue_appeals: 0 }; },
+      async shieldFind(q) { q = String(q || "").toLowerCase().replace(/^@/, ""); return db.users.filter((u) => !q || (u.nickname || "").startsWith(q) || u.id === q).slice(0, 20).map((u) => ({ id: u.id, nickname: u.nickname, name: u.name, state: accState(u.id).state, risk: u.id === "u-spam" ? 87 : 0, created_at: u.created_at })); },
+      async shieldUserCard(id) {
+        const u = db.users.find((x) => x.id === id); if (!u) throw new Error("Пользователь не найден");
+        const rep = await this.reputation(id);
+        return { user: { id: u.id, nickname: u.nickname, name: u.name, created_at: u.created_at, verified: !!u.verified }, account: accState(id), reputation: rep,
+          risk: id === "u-spam" ? 87 : 0, hold: false,
+          risk_events: id === "u-spam" ? [{ type: "evasion", weight: 35, confirmed: false }, { type: "mass_reg", weight: 20, confirmed: false }, { type: "violation", weight: 20, confirmed: true }, { type: "suspicious", weight: 12, confirmed: false }] : [],
+          reports: { total: id === "u-spam" ? 12 : db.reports.filter((r) => r.target_user === id).length, confirmed: id === "u-spam" ? 5 : 0, rejected: id === "u-spam" ? 4 : 0, open: id === "u-spam" ? 3 : 0 },
+          links: id === "u-spam" ? [{ id: "l1", candidate: "u-max", nickname: "maksat", evidence: { match: "installation" }, status: "pending" }] : [],
+          decisions: db.bans.filter((b) => b.user_id === id).map((b) => ({ id: b.id, no: b.decision_no, kind: b.kind, scope: b.scope || "global", rule: b.rule, reason: b.reason, starts_at: b.starts_at, expires_at: b.expires_at || null, status: b.status, moderator: (db.users.find((x) => x.id === b.moderator_id) || {}).nickname })),
+          appeals: db.appeals.filter((a) => a.user_id === id).map((a) => ({ id: a.id, ban: a.ban_id, message: a.message, status: a.status, due_at: a.due_at })),
+          sessions: db.sessions.filter((x) => x.user_id === id).slice(-5).reverse().map((x) => ({ device: x.device, status: x.status, at: x.created_at })), rules: BAN_RULES };
+      },
+      async shieldSanction(target, rule, kind, hours, reason) {
+        const u = need(); if (!u.is_admin && !u.is_moderator) throw new Error("Только для модераторов");
+        if (!BAN_RULES[rule]) throw new Error("Выберите правило из матрицы"); if (String(reason || "").trim().length < 5) throw new Error("Укажите причину решения");
+        if (target === u.id) throw new Error("Нельзя выносить решение о себе");
+        const no = "NS-" + String(241 + db.bans.length).padStart(5, "0");
+        const b = { id: uid(), decision_no: no, user_id: target, kind, scope: "global", rule, reason: reason.trim(), starts_at: nowISO(), expires_at: kind === "warning" || hours == null ? null : new Date(Date.now() + hours * 3600e3).toISOString(), status: "active", moderator_id: u.id, created_at: nowISO() };
+        db.bans.push(b); if (kind === "ban") db.sessions.forEach((x) => { if (x.user_id === target && x.status !== "revoked") { x.status = "revoked"; x.reason = "banned"; } });
+        db.audit.push({ id: db.audit.length + 1, actor_id: u.id, action: "sanction", target_id: target, details: { no, rule, kind, hours, reason }, created_at: nowISO() });
+        save(); return { id: b.id, decision_no: no, expires_at: b.expires_at };
+      },
+      async shieldRevoke(banId, reason) { const u = need(); const b = db.bans.find((x) => x.id === banId); if (!b) throw new Error("Решение не найдено"); if (String(reason || "").trim().length < 5) throw new Error("Укажите причину"); b.status = "revoked"; b.revoked_at = nowISO(); db.audit.push({ id: db.audit.length + 1, actor_id: u.id, action: "sanction_revoke", target_id: b.user_id, details: { no: b.decision_no, reason }, created_at: nowISO() }); save(); },
+      async shieldExtend(banId, days, reason) { const u = need(); const b = db.bans.find((x) => x.id === banId); if (!b || !b.expires_at) throw new Error("Действующий срочный бан не найден"); if (days < 1 || days > 30) throw new Error("Продление — от 1 до 30 дней"); if (String(reason || "").trim().length < 10) throw new Error("Опишите доказательства обхода"); b.expires_at = new Date(Math.max(new Date(b.expires_at), Date.now() + days * 86400e3)).toISOString(); db.audit.push({ id: db.audit.length + 1, actor_id: u.id, action: "sanction_extend", target_id: b.user_id, details: { days, reason }, created_at: nowISO() }); save(); },
+      async shieldLinkDecide() { return { ok: true }; },
+      async riskDecide() {},
+      async appealDecide(id, overturn, note) { const u = need(); const a = db.appeals.find((x) => x.id === id); if (!a) throw new Error("Апелляция не найдена"); const b = db.bans.find((x) => x.id === a.ban_id); if (b && b.moderator_id === u.id) throw new Error("Апелляцию рассматривает другой модератор"); a.status = overturn ? "overturned" : "upheld"; a.note = note; if (overturn && b) b.status = "revoked"; save(); },
+      async shieldQueue() { return db.appeals.filter((a) => a.status === "pending").map((a) => ({ id: "q-" + a.id, content_type: "appeal", content_id: a.id, user_id: a.user_id, nickname: (db.users.find((x) => x.id === a.user_id) || {}).nickname, reason: "appeal", priority: 3, created_at: a.created_at, preview: a.message })); },
+      async auditList() { return db.audit.slice().reverse(); },
+      async mediaDecide() {},
+      async signOut() { const cs = curSess(); if (cs && cs.status !== "revoked") { cs.status = "revoked"; cs.reason = "logout"; } db.session = null; db.sid = null; save(); emit("auth", null); },
       async resetPassword(email) {
         email = (email || "").trim().toLowerCase();
         if (!db.users.some((x) => x.email === email && x.pwh)) throw new Error("Аккаунт с таким email не найден на этом устройстве");
@@ -503,26 +718,15 @@
       },
       async touchSeen() { const u = me(); if (u && u.show_seen !== false) { u.last_seen_at = nowISO(); save(); } },
       async signOutAll() { return this.signOut(); },
-      async nicknameCheck(n) {
-        const np = nickProblem(n); if (np) return { ok: false, error: np };
-        const u = me(); if (db.users.some((x) => x !== u && x.nickname && nickNorm(x.nickname) === nickNorm(n))) return { ok: false, error: "Этот никнейм уже занят" };
-        return { ok: true };
-      },
-      async setNickname(n) {
-        const u = need(); n = String(n || "").trim();
-        const np = nickProblem(n); if (np) throw new Error(np);
-        const same = u.nickname && nickNorm(u.nickname) === nickNorm(n);
-        if (u.nickname && !same && u.nick_at && Date.now() - new Date(u.nick_at) < 30 * 86400e3 && !u.is_admin) throw new Error(`Никнейм можно менять раз в 30 дней. Следующая смена через ${Math.ceil((new Date(u.nick_at).getTime() + 30 * 86400e3 - Date.now()) / 86400e3)} дн.`);
-        if (db.users.some((x) => x !== u && x.nickname && nickNorm(x.nickname) === nickNorm(n))) throw new Error("Этот никнейм уже занят. Попробуйте другой");
-        if (!same) u.nick_at = nowISO();
-        u.nickname = u.name = n; delete u.gender; save(); emit("auth", prof(u)); return prof(u);
-      },
-      async updateProfile({ district, avatarFile, instagram, acceptRules, bio, show_seen }) {
+      async updateProfile({ name, nickname, district, avatarFile, instagram, gender, acceptRules, bio, show_seen }) {
         const u = need();
+        if (nickname !== undefined && String(nickname).trim().toLowerCase().replace(/^@/, "") !== u.nickname) { const r = await this.nicknameAvailable(nickname); if (!r.ok) throw new Error(r.reason); u.nickname = r.nickname; if (!u.name || u.name === "Пользователь") u.name = r.nickname; }
+        if (gender !== undefined && !u.gender && ["m", "f"].includes(gender)) u.gender = gender;
         if (acceptRules && !u.accepted_rules_at) u.accepted_rules_at = nowISO();
+        if (name !== undefined) { if (!name.trim()) throw new Error("Имя не может быть пустым"); u.name = mask(name.trim()); }
         if (instagram !== undefined) u.instagram = cleanInsta(instagram);
         if (district !== undefined) u.district = district;
-        if (bio !== undefined) { if (String(bio).length > 160) throw new Error("Описание не длиннее 160 символов"); demoCheckText(bio); u.bio = mask(String(bio).trim()) || null; }
+        if (bio !== undefined) { if (String(bio).length > 160) throw new Error("Описание не длиннее 160 символов"); u.bio = mask(String(bio).trim()) || null; }
         if (show_seen !== undefined) { u.show_seen = !!show_seen; if (!show_seen) u.last_seen_at = null; }
         if (avatarFile) { validateFile(avatarFile); u.avatar_url = await blobToDataURL(await compressImage(avatarFile, 400, 0.8)); }
         save(); emit("auth", prof(u)); return prof(u);
@@ -570,41 +774,47 @@
         const by = {}; list.forEach((p) => (by[p.category] = (by[p.category] || 0) + 1)); return by;
       },
       async getPost(id) { const p = db.posts.find((x) => x.id === id && x.status !== "deleted"); if (!p) throw new Error("Публикация удалена или не найдена"); return shape(p); },
-      async createPost({ category, text, lat, lng, files = [], event, exact = false, is_sos = false }, onProgress = () => {}) {
+      async createPost({ category, text, lat, lng, files = [], event, exact = false, is_sos = false, edits }, onProgress = () => {}) {
         const u = need();
+        const cl = cleanOrThrow(String(text || ""), "post");
         if (!CATS[category]) throw new Error("Выберите тип публикации");
         if (!text || !text.trim()) throw new Error("Добавьте описание");
         if (lat == null || lng == null) throw new Error("Укажите место на карте");
         if (files.length > 5) throw new Error("Не больше 5 вложений в публикации");
         if (is_sos && db.posts.some((p) => p.user_id === u.id && p.is_sos && p.status === "active" && (!p.expires_at || p.expires_at > nowISO())))
           throw new Error("У вас уже есть активный SOS. Закройте его, чтобы отправить новый");
-        if (!u.nickname || !u.accepted_rules_at) { const e = new Error("Заполните профиль: никнейм и согласие с правилами"); e.code = "NR403"; throw e; }
-        demoCheckText(text);
-        if (!is_sos) {
-          if (text.trim().length >= 10 && db.posts.some((p) => p.user_id === u.id && Date.now() - new Date(p.created_at) < 86400e3 && textKey(p.text) === textKey(mask(text.trim())))) throw new Error("Вы уже публиковали такой же текст сегодня");
-          demoTake(u, "post");
-        }
         if (!exact) ({ lat, lng } = snap(lat, lng));
         const id = uid(), t = nowISO();
         const media = [];
         for (let i = 0; i < files.length; i++) {
           const kind = validateFile(files[i]);
-          if (kind === "video") throw new Error("Видео в демо-режиме не сохраняется. Подключите сервер Supabase или выберите фото.");
+          if (kind === "video") {
+            // демо: видео живет только в этой вкладке (после перезагрузки пропадет); на сервере его обработает worker
+            const meta = await probeVideo(files[i]).catch(() => ({}));
+            media.push({ id: uid(), post_id: id, url: URL.createObjectURL(files[i]), type: "video", state: "processing", w: meta.w || null, h: meta.h || null, duration: meta.duration || null, edit: (edits && edits[i]) || {} });
+            continue;
+          }
           onProgress(`Сжимаем фото ${i + 1} из ${files.length}...`, i / files.length);
           const full = await compressImage(files[i], 1080, 0.72, true);
           media.push({ id: uid(), post_id: id, url: await blobToDataURL(full.blob), thumb: await blobToDataURL(await compressImage(files[i], 360, 0.7)), w: full.w, h: full.h, type: "image" });
         }
         if (u.banned) throw new Error("Аккаунт заблокирован модератором");
         const ttl = is_sos ? 3 * 3600e3 : category === "incident" ? 86400e3 : 0;
-        db.posts.push({ id, user_id: u.id, category, text: mask(text.trim().slice(0, 1000)), lat, lng, status: "active", created_at: t, updated_at: t, is_sos: !!is_sos, exact: !!exact,
+        const waiting = media.some((m) => m.state === "processing") || cl.verdict === "hold";
+        db.posts.push({ id, user_id: u.id, category, text: cl.text.trim().slice(0, 1000), lat, lng, status: waiting ? "draft" : "active", created_at: t, updated_at: t, is_sos: !!is_sos, exact: !!exact,
           expires_at: ttl ? new Date(Date.now() + ttl).toISOString() : null });
         db.media.push(...media);
-        if (event && event.starts_at) db.events.push({ post_id: id, starts_at: event.starts_at, capacity: event.capacity || null });
+        if (event && event.starts_at) {
+          const ev = { post_id: id, starts_at: event.starts_at, ends_at: event.ends_at || null, capacity: event.capacity || null, host_id: u.id, status: "scheduled", meet_cat: category === "meetup" ? event.meet_cat || "other" : null };
+          if (category === "meetup") { ev.chat_id = "chat-" + id; db.chats.push({ id: ev.chat_id, kind: "meeting", title: cl.text.slice(0, 60), post_id: id }); }
+          db.events.push(ev);
+        }
         try { save(); } catch (e) {
           db.posts = db.posts.filter((p) => p.id !== id); db.media = db.media.filter((m) => m.post_id !== id); db.events = db.events.filter((x) => x.post_id !== id);
           throw e;
         }
-        const p = shape(db.posts.find((x) => x.id === id)); emit("post", p); return p;
+        media.filter((m) => m.state === "processing").forEach(demoProcess);
+        const p = shape(db.posts.find((x) => x.id === id)); if (p.status === "active") emit("post", p); return p;
       },
       async updatePost(id, { text, category, status, event }) {
         const u = need(), p = db.posts.find((x) => x.id === id);
@@ -660,9 +870,6 @@
         let par = parentId ? db.comments.find((c) => c.id === parentId && c.post_id === id) : null;
         if (parentId && !par) throw new Error("Комментарий для ответа не найден");
         if (par && par.parent_id) par = db.comments.find((c) => c.id === par.parent_id) || par;
-        demoCheckText(text);
-        if (text.length >= 10 && db.comments.some((c) => c.user_id === u.id && Date.now() - new Date(c.created_at) < 600e3 && textKey(c.text) === textKey(mask(text)))) throw new Error("Такой же комментарий вы уже отправляли. Напишите по-другому");
-        demoTake(u, "comment");
         const row = { id: uid(), post_id: id, user_id: u.id, text: mask(text.slice(0, 500)), created_at: nowISO(), parent_id: par ? par.id : null };
         db.comments.push(row);
         const p = db.posts.find((x) => x.id === id); if (p) notify(p.user_id, "comment", id, "прокомментировал(а): " + text.slice(0, 60));
@@ -693,7 +900,9 @@
       },
       async stats() {
         const u = me(); if (!u) return { posts: 0, saved: 0, events: 0 };
-        return { posts: db.posts.filter((p) => p.user_id === u.id).length, saved: db.saved.filter((s) => s.user_id === u.id).length, events: db.members.filter((m) => m.user_id === u.id).length };
+        const mine = new Set(db.posts.filter((p) => p.user_id === u.id).map((p) => p.id));
+        return { posts: mine.size, saved: db.saved.filter((s) => s.user_id === u.id).length, likes: db.likes.filter((l) => mine.has(l.post_id) && l.user_id !== u.id).length,
+          events: db.members.filter((m) => m.user_id === u.id && (m.status || "going") === "going").length + db.events.filter((e) => e.host_id === u.id && (db.posts.find((p) => p.id === e.post_id) || {}).category === "meetup").length };
       },
       async notifications() {
         const u = me(); if (!u) return [];
@@ -776,9 +985,7 @@
         const a = u.id < other ? u.id : other, b = u.id < other ? other : u.id;
         let c = db.convs.find((x) => x.user_a === a && x.user_b === b);
         if (!c) {
-          const fr = friendRow(u.id, other), isFr = fr && fr.status === "accepted", o = db.users.find((x) => x.id === other);
-          if (!isFr && !(u.age_status === "adult" && o && o.age_status === "adult")) { const e = new Error("Личные сообщения незнакомым пока недоступны. Добавьте человека в друзья — после принятия заявки можно писать"); e.code = "NR403"; e.hint = "age_gate"; throw e; }
-          if (!isFr) demoTake(u, "chat_request");
+          const fr = friendRow(u.id, other);
           c = { id: uid(), user_a: a, user_b: b, created_at: nowISO(), last_message_at: nowISO(), status: fr && fr.status === "accepted" ? "accepted" : "request", initiator: u.id };
           db.convs.push(c); save();
         }
@@ -924,15 +1131,15 @@
       if (!blockedSet) { const { data } = await sb.from("blocks").select("blocked_id").eq("blocker_id", session.user.id); blockedSet = new Set((data || []).map((x) => x.blocked_id)); }
       return blockedSet;
     }
-    const PUB = "id,name,nickname,avatar_url,district,instagram,created_at,verified,last_seen_at,banned,bio";
+    const PUB = "id,name,nickname,avatar_url,district,instagram,created_at,gender,verified,last_seen_at,banned,bio";
     // v11: ИИ-проверку запускает сама база (триггер ai_fire) — клиент ничего не вызывает
     async function moderate() {}
     const authCbs = [];
     const BUCKET = "post-media";
     const POST_SELECT = "id,user_id,category,text,lat,lng,status,created_at,updated_at,is_sos,exact,expires_at,resolved_at," +
-      "author:profiles!posts_user_id_fkey(id,name,avatar_url,verified),post_media!post_media_post_id_fkey(url,type,position,mod_status,thumb_url,poster_url,w,h,duration)," +
+      "author:profiles!posts_user_id_fkey(id,name,nickname,avatar_url,verified),post_media!post_media_post_id_fkey(id,url,type,position,mod_status,state,error,bucket,thumb_url,poster_url,w,h,duration,edit)," +
       "likes!likes_post_id_fkey(count),comments!comments_post_id_fkey(count)," +
-      "events!events_post_id_fkey(starts_at,capacity),event_members!event_members_post_id_fkey(count)";
+      "events!events_post_id_fkey(starts_at,ends_at,capacity,meet_cat,host_id,cohost_id,status,chat_id),event_members!event_members_post_id_fkey(count)";
     const one = (x) => (Array.isArray(x) ? x[0] : x) || null;
     const cnt = (x) => (Array.isArray(x) && x[0] ? x[0].count : 0);
 
@@ -941,11 +1148,9 @@
       let { data, error } = await sb.from("profiles").select("*").eq("id", session.user.id).maybeSingle();
       if (error) console.warn(error);
       if (!data && !error) { await sb.rpc("ensure_profile"); ({ data } = await sb.from("profiles").select("*").eq("id", session.user.id).maybeSingle()); }
-      // v14: приватный статус аккаунта (возрастной допуск, телефон, срок смены ника, доступность файлов)
-      let account = null; try { const r = await sb.rpc("my_account"); account = r.data || null; } catch (e) {}
-      profile = { id: session.user.id, email: session.user.email, name: (data && (data.nickname || data.name)) || "Новый пользователь", account, avatar_url: data && data.avatar_url, district: (data && data.district) || "",
+      profile = { id: session.user.id, email: session.user.email, nickname: (data && data.nickname) || null, meetings_pilot: !!(data && (data.meetings_pilot || data.is_admin)), name: (data && data.name) || session.user.email.split("@")[0], avatar_url: data && data.avatar_url, district: (data && data.district) || "",
         instagram: data && data.instagram, is_admin: !!(data && data.is_admin), is_mod: !!(data && (data.is_admin || data.is_moderator)), banned: !!(data && data.banned),
-        nickname: (data && data.nickname) || null, verified: !!(data && data.verified) || !!session.user.email_confirmed_at, last_seen_at: data && data.last_seen_at,
+        gender: (data && data.gender) || null, verified: !!(data && data.verified) || !!session.user.email_confirmed_at, last_seen_at: data && data.last_seen_at,
         accepted_rules: !!(data && data.accepted_rules_at), bio: (data && data.bio) || null, show_seen: data ? data.show_seen !== false : true, provider: (session.user.app_metadata && session.user.app_metadata.provider) || "email" };
       blockedSet = null;
       return profile;
@@ -955,13 +1160,15 @@
     async function enrich(rows) {
       const u = session && session.user;
       // файлы скрытых модератором публикаций лежат в приватном бакете: ссылка на 10 минут (видит автор и модератор)
-      const priv = [];
-      rows.forEach((r) => (r.post_media || []).forEach((m) => ["url", "thumb_url", "poster_url"].forEach((k) => { if (m[k] && m[k].startsWith("private:")) priv.push(m[k].slice(8)); })));
-      if (priv.length) {
-        const { data: sg } = await sb.storage.from("post-quarantine").createSignedUrls([...new Set(priv)], 600);
+      // и свои файлы "на проверке" из приватного staging — тоже по короткой ссылке, только автору
+      const priv = {};
+      rows.forEach((r) => (r.post_media || []).forEach((m) => ["url", "thumb_url", "poster_url"].forEach((k) => { if (m[k] && m[k].startsWith("private:")) (priv[m.bucket === "post-staging" ? "post-staging" : "post-quarantine"] ||= new Set()).add(m[k].slice(8)); })));
+      for (const [bk, set] of Object.entries(priv)) {
+        const { data: sg } = await sb.storage.from(bk).createSignedUrls([...set], 600);
         const map = new Map((sg || []).filter((x) => x && x.signedUrl).map((x) => [x.path, x.signedUrl]));
-        rows.forEach((r) => (r.post_media || []).forEach((m) => ["url", "thumb_url", "poster_url"].forEach((k) => { if (m[k] && m[k].startsWith("private:")) m[k] = map.get(m[k].slice(8)) || null; })));
+        rows.forEach((r) => (r.post_media || []).forEach((m) => ["url", "thumb_url", "poster_url"].forEach((k) => { if (m[k] && m[k].startsWith("private:") && map.has(m[k].slice(8))) m[k] = map.get(m[k].slice(8)); })));
       }
+      rows.forEach((r) => (r.post_media || []).forEach((m) => ["url", "thumb_url", "poster_url"].forEach((k) => { if (m[k] && m[k].startsWith("private:")) m[k] = null; })));
       const ids = rows.map((r) => r.id);
       let liked = new Set(), saved = new Set(), joined = new Set();
       if (u && ids.length) {
@@ -980,17 +1187,18 @@
           id: r.id, user_id: r.user_id, category: r.category, text: r.text, lat: r.lat, lng: r.lng, status: r.status,
           created_at: r.created_at, updated_at: r.updated_at, is_sos: !!r.is_sos, exact: !!r.exact, expires_at: r.expires_at || null, resolved_at: r.resolved_at || null,
           author: one(r.author) || { id: r.user_id, name: "Пользователь", avatar_url: null },
-          media: (r.post_media || []).sort((a, b) => (a.position || 0) - (b.position || 0)).map((m) => ({ url: m.url, type: m.type, mod_status: m.mod_status || "ok", thumb: m.thumb_url || null, poster: m.poster_url || null, w: m.w || null, h: m.h || null, duration: m.duration || null })),
+          media: (r.post_media || []).sort((a, b) => (a.position || 0) - (b.position || 0)).map((m) => ({ id: m.id, state: m.state || "approved", error: m.error || null, edit: m.edit || null, url: m.url, type: m.type, mod_status: m.mod_status || "ok", thumb: m.thumb_url || null, poster: m.poster_url || null, w: m.w || null, h: m.h || null, duration: m.duration || null })),
           likes: cnt(r.likes), comments: cnt(r.comments), liked: liked.has(r.id), saved: saved.has(r.id),
-          event: ev ? { starts_at: ev.starts_at, capacity: ev.capacity, members: cnt(r.event_members), joined: joined.has(r.id) } : null
+          event: ev ? { starts_at: ev.starts_at, capacity: ev.capacity, members: cnt(r.event_members), joined: joined.has(r.id), meet_cat: ev.meet_cat || null, ends_at: ev.ends_at || null,
+            host_id: ev.host_id || r.user_id, cohost_id: ev.cohost_id || null, status: ev.status || "scheduled", chat_id: ev.chat_id || null } : null
         };
       });
     }
     // загрузка с прогрессом (XHR) и двумя повторами при обрыве связи
-    function xhrUpload(path, blob, contentType, onPct) {
+    function xhrUpload(path, blob, contentType, onPct, bucket = BUCKET) {
       return new Promise((res, rej) => {
-        const x = new XMLHttpRequest();
-        x.open("POST", `${CFG.SUPABASE_URL}/storage/v1/object/${BUCKET}/${path.split("/").map(encodeURIComponent).join("/")}`);
+        const x = new XMLHttpRequest(); xhrNow = x;
+        x.open("POST", `${CFG.SUPABASE_URL}/storage/v1/object/${bucket}/${path.split("/").map(encodeURIComponent).join("/")}`);
         x.setRequestHeader("Authorization", "Bearer " + session.access_token);
         x.setRequestHeader("apikey", CFG.SUPABASE_ANON_KEY);
         x.setRequestHeader("Content-Type", contentType || "application/octet-stream");
@@ -999,21 +1207,25 @@
         x.upload.onprogress = (e) => { if (e.lengthComputable && onPct) onPct(e.loaded / e.total); };
         x.onload = () => { if (x.status >= 200 && x.status < 300) res(); else { let m = x.responseText; try { m = JSON.parse(m).message || m; } catch (e) {} const er = new Error(m || "Ошибка загрузки " + x.status); er.status = x.status; rej(er); } };
         x.onerror = () => { const er = new Error("Нет связи с сервером"); er.net = true; rej(er); };
+        x.onabort = () => { const er = new Error("Загрузка отменена"); er.cancelled = true; rej(er); };
         x.send(blob);
       });
     }
-    async function uploadBlob(path, blob, contentType, onPct) {
+    let xhrNow = null;
+    async function uploadBlob(path, blob, contentType, onPct, bucket = BUCKET) {
       for (let attempt = 0; ; attempt++) {
         try {
-          if (typeof XMLHttpRequest !== "undefined" && session) await xhrUpload(path, blob, contentType, onPct);
-          else { const { error } = await sb.storage.from(BUCKET).upload(path, blob, { contentType, upsert: false, cacheControl: "31536000" }); if (error) fail(error); }
+          if (typeof XMLHttpRequest !== "undefined" && session) await xhrUpload(path, blob, contentType, onPct, bucket);
+          else { const { error } = await sb.storage.from(bucket).upload(path, blob, { contentType, upsert: true, cacheControl: "31536000" }); if (error) fail(error); }
           break;
         } catch (e) {
+          if (e.cancelled) throw e;
+          if (e.status === 409 && bucket === "post-staging") break;   // повтор той же загрузки — файл уже на месте
           if (attempt >= 2 || !(e.net || e.status >= 500)) throw new Error(ruError(e.message));
           await new Promise((r) => setTimeout(r, 1500 * (attempt + 1)));
         }
       }
-      return sb.storage.from(BUCKET).getPublicUrl(path).data.publicUrl;
+      return bucket === BUCKET ? sb.storage.from(BUCKET).getPublicUrl(path).data.publicUrl : "private:" + path;
     }
     const redirect = () => location.origin + location.pathname;
     // файлы переписки лежат в приватном бакете: показываем по временной ссылке (1 час)
@@ -1075,25 +1287,108 @@
       async reauth(password) {
         if (!session) throw new Error("Войдите, чтобы сделать это");
         if ((profile && profile.provider) === "google") return this.signInWithGoogle();
-        const { error } = await sb.auth.signInWithPassword({ email: session.user.email, password });
-        if (error) fail(error);
+        const { data, error } = await sb.functions.invoke("shield-login", { body: { mode: "reauth", password } });
+        if (error || !data || !data.ok) throw new Error("Не удалось подтвердить. Проверьте пароль");
       },
 
       async signUp({ nickname, email, password, district, captchaToken }) {
-        nickname = String(nickname || "").trim();
-        const np = nickProblem(nickname); if (np) throw new Error(np);
-        // v14: в метаданные уходит только никнейм (имя, фамилия и пол не собираются)
-        const { data, error } = await sb.auth.signUp({ email: (email || "").trim(), password, options: { data: { nickname, accepted_rules: true, district: district || null }, emailRedirectTo: redirect(), captchaToken } });
-        if (error) fail(error);
-        if (data.user && data.user.identities && data.user.identities.length === 0) throw new Error("Этот email уже зарегистрирован. Попробуйте войти.");
+        const chk = await this.nicknameAvailable(nickname); if (!chk.ok) throw new Error(chk.reason);
+        const { data, error } = await sb.auth.signUp({ email: (email || "").trim(), password,
+          options: { data: { nickname: chk.nickname, accepted_rules: true, district: district || null }, emailRedirectTo: redirect(), captchaToken } });
+        if (error) { if (/Database error/i.test(error.message)) throw new Error("Никнейм уже занят или недопустим. Выберите другой"); fail(error); }
+        // существующая почта: Supabase не создает второй аккаунт; ответ одинаковый, наличие email не раскрывается
         return { needsConfirm: !data.session };
       },
-      async signIn({ email, password, captchaToken }) {
-        const { error } = await sb.auth.signInWithPassword({ email: (email || "").trim(), password, options: { captchaToken } });
-        if (error) fail(error);
-        const { data } = await sb.auth.getSession(); session = data.session; return loadProfile();
+      // вход по никнейму или почте через функцию shield-login (лимиты, CAPTCHA, одинаковая ошибка)
+      async signIn({ login, email, password, captchaToken }) {
+        const { data, error } = await sb.functions.invoke("shield-login", { body: { mode: "login", login: String(login || email || "").trim(), password, captcha: captchaToken } });
+        if (error || !data || !data.access_token) {
+          let msg = "Не удалось войти. Проверьте данные или восстановите доступ";
+          try { const b = error && error.context && (await error.context.json()); if (b && b.error) msg = b.error; if (b && b.captcha_required) { const e = new Error(msg); e.captcha = true; throw e; } } catch (x) { if (x.captcha) throw x; }
+          throw new Error(msg);
+        }
+        const { error: se } = await sb.auth.setSession({ access_token: data.access_token, refresh_token: data.refresh_token });
+        if (se) fail(se);
+        const { data: d2 } = await sb.auth.getSession(); session = d2.session; return loadProfile();
       },
+      async nicknameAvailable(n) { const { data, error } = await sb.rpc("nickname_available", { p: String(n || "") }); if (error) fail(error); return data; },
+      /* ---------- Shield: сессия этого устройства ---------- */
+      async sessionBegin() { if (!session) return { state: "guest" }; const { data, error } = await sb.rpc("session_begin", { p_installation: installId(), p_label: deviceLabel() }); if (error) fail(error); return data; },
+      async sessionConfirm(id, code) { const { data, error } = await sb.rpc("session_confirm", { p_challenge: id, p_code: String(code) }); if (error) fail(error); return data; },
+      async sessionResend(id) { const { data, error } = await sb.rpc("session_resend", { p_challenge: id }); if (error) fail(error); return data; },
+      async sessionCancel() { try { await sb.rpc("session_cancel"); } catch (e) {} await sb.auth.signOut({ scope: "local" }).catch(() => {}); session = null; profile = null; },
+      async sessionState() { const { data, error } = await sb.rpc("session_state"); if (error) fail(error); return data; },
+      async sessionList() { const { data, error } = await sb.rpc("session_list"); if (error) fail(error); return data || []; },
+      async accountState() { const { data, error } = await sb.rpc("account_state", {}); if (error) fail(error); return data; },
+      async myDecisions() { const { data, error } = await sb.rpc("my_decisions"); if (error) fail(error); return data || []; },
+      async appealSubmit(banId, text) { const { data, error } = await sb.rpc("appeal_submit", { p_ban: banId, p_message: text }); if (error) fail(error); return data; },
+      /* ---------- репутация, отзывы, встречи ---------- */
+      async reputation(id) { const { data, error } = await sb.rpc("reputation", { p_user: id || (session && session.user.id) }); if (error) fail(error); return data; },
+      async userReviews(id) {
+        const { data, error } = await sb.from("user_reviews").select("id,meeting_id,rating,tags,comment,target_role,created_at,reviewer:profiles!user_reviews_reviewer_id_fkey(id,nickname,avatar_url),meeting:posts!user_reviews_meeting_id_fkey(text)")
+          .eq("target_id", id).eq("status", "visible").order("created_at", { ascending: false }).limit(50);
+        if (error) fail(error); return (data || []).map((r) => ({ ...r, meeting_title: r.meeting && r.meeting.text }));
+      },
+      async reviewTargets(postId) { const { data, error } = await sb.rpc("review_targets", { p_post: postId }); if (error) fail(error); return (data || []).map((x) => ({ ...x })); },
+      async reviewSubmit(postId, target, rating, tags, comment) { const { data, error } = await sb.rpc("review_submit", { p_post: postId, p_target: target, p_rating: rating, p_tags: tags || [], p_comment: comment || "" }); if (error) fail(error); return data; },
+      async reviewsPending() { if (!session) return []; const { data, error } = await sb.rpc("reviews_pending"); if (error) return []; return data || []; },
+      async meetingInfo(postId) {
+        const [{ data: e }, { data: m }, { data: role }] = await Promise.all([
+          sb.from("events").select("post_id,starts_at,ends_at,capacity,meet_cat,host_id,cohost_id,status,chat_id,cancel_reason,host:profiles!events_host_id_fkey(id,nickname,avatar_url)").eq("post_id", postId).maybeSingle(),
+          sb.from("event_members").select("user_id,status,host_mark,self_mark,p:profiles!event_members_user_id_fkey(nickname,avatar_url)").eq("post_id", postId),
+          session ? sb.rpc("meeting_role", { p_post: postId }) : Promise.resolve({ data: null })]);
+        if (!e) return null;
+        return { ...e, role, members: (m || []).map((x) => ({ user_id: x.user_id, nickname: x.p && x.p.nickname, avatar_url: x.p && x.p.avatar_url, status: x.status, host_mark: x.host_mark, self_mark: x.self_mark, attendance: attendance(x.host_mark, x.self_mark) })) };
+      },
+      async meetingJoin(postId) { const { data, error } = await sb.rpc("meeting_join", { p_post: postId }); if (error) fail(error); return data; },
+      async meetingLeave(postId) { const { error } = await sb.rpc("meeting_leave", { p_post: postId }); if (error) fail(error); },
+      async meetingMark(postId, target, val) { const { data, error } = await sb.rpc("meeting_mark", { p_post: postId, p_user: target, p_attended: val }); if (error) fail(error); return data; },
+      async meetingCancel(postId, reason) { const { error } = await sb.rpc("meeting_cancel", { p_post: postId, p_reason: reason || "" }); if (error) fail(error); },
+      async meetingSetCohost(postId, target) { const { error } = await sb.rpc("meeting_set_cohost", { p_post: postId, p_user: target }); if (error) fail(error); },
+      async meetingExclude(postId, target, reason) { const { error } = await sb.rpc("meeting_exclude", { p_post: postId, p_user: target, p_reason: reason || "" }); if (error) fail(error); },
+      /* ---------- общие чаты ---------- */
+      async chatList() { if (!session) return []; const { data, error } = await sb.rpc("chat_list"); if (error) fail(error); return data || []; },
+      async chatPage(chatId, before) { const { data, error } = await sb.rpc("chat_page", { p_chat: chatId, p_before: before || null, p_limit: 40 }); if (error) fail(error); return data || []; },
+      async chatSend(chatId, text, key, replyTo) { const { data, error } = await sb.rpc("chat_send2", { p_chat: chatId, p_text: text, p_key: key, p_reply: replyTo || null }); if (error) fail(error); return data; },
+      async chatRead(chatId) { if (session) await sb.rpc("chat_read", { p_chat: chatId }); },
+      async chatReact(msgId, emoji) { const { data, error } = await sb.rpc("chat_react", { p_msg: msgId, p_emoji: emoji }); if (error) fail(error); return data; },
+      async chatRestrict(chatId, target, hours) { const { error } = await sb.rpc("chat_restrict", { p_chat: chatId, p_user: target, p_hours: hours }); if (error) fail(error); },
+      // Realtime только для открытого чата; права проверяет RLS на каждое событие (отозванная сессия перестает получать)
+      subscribeChat(chatId, cb, onState) {
+        const ch = sb.channel("chat-" + chatId).on("postgres_changes", { event: "INSERT", schema: "public", table: "chat_messages", filter: "chat_id=eq." + chatId }, (p) => cb("insert", p.new));
+        ch.subscribe((st) => onState && onState(st));
+        return () => sb.removeChannel(ch);
+      },
+      /* ---------- медиа ---------- */
+      async mediaRetry(id) { const { error } = await sb.rpc("media_retry", { p_media: id }); if (error) fail(error); },
+      async changeEmail(email) { const { error } = await sb.auth.updateUser({ email: String(email || "").trim() }, { emailRedirectTo: redirect() }); if (error) fail(error); },
+      async myReports() { if (!session) return []; const { data } = await sb.from("reports").select("reason,status,created_at").eq("reporter_id", session.user.id).order("created_at", { ascending: false }).limit(50); return data || []; },
+      async mediaView(id, sec) { try { await sb.rpc("media_view", { p_media: id, p_seconds: sec }); } catch (e) {} },
+      async mediaStats(postId) { const { data } = await sb.rpc("media_stats", { p_post: postId }); return data; },
+      cancelUpload() { if (xhrNow) try { xhrNow.abort(); } catch (e) {} },
+      /* ---------- NEAR Shield: панель ---------- */
+      async staffRole() { if (!session) return null; const { data } = await sb.rpc("staff_role"); return data; },
+      async mfaEnroll() { const { data, error } = await sb.auth.mfa.enroll({ factorType: "totp", friendlyName: "NEAR Admin" }); if (error) fail(error); return data; },
+      async mfaVerify(factorId, code) {
+        const { data: ch, error: ce } = await sb.auth.mfa.challenge({ factorId }); if (ce) fail(ce);
+        const { error } = await sb.auth.mfa.verify({ factorId, challengeId: ch.id, code: String(code) }); if (error) fail(error);
+        const { data } = await sb.auth.getSession(); session = data.session;
+      },
+      async mfaFactors() { const { data } = await sb.auth.mfa.listFactors(); return (data && data.totp) || []; },
+      async shieldOverview() { const { data, error } = await sb.rpc("shield_overview"); if (error) fail(error); return data; },
+      async shieldFind(q) { const { data, error } = await sb.rpc("shield_find", { p_q: q || "" }); if (error) fail(error); return data || []; },
+      async shieldUserCard(id) { const { data, error } = await sb.rpc("shield_user_card", { p_user: id }); if (error) fail(error); return data; },
+      async shieldSanction(target, rule, kind, hours, reason, evidence) { const { data, error } = await sb.rpc("shield_sanction", { p_user: target, p_rule: rule, p_kind: kind, p_hours: hours, p_reason: reason, p_evidence: evidence || null, p_key: rid() }); if (error) fail(error); return data; },
+      async shieldRevoke(banId, reason) { const { error } = await sb.rpc("shield_revoke", { p_ban: banId, p_reason: reason }); if (error) fail(error); },
+      async shieldExtend(banId, days, reason) { const { error } = await sb.rpc("shield_extend", { p_ban: banId, p_days: days, p_reason: reason }); if (error) fail(error); },
+      async shieldLinkDecide(id, confirm, note) { const { data, error } = await sb.rpc("shield_link_decide", { p_link: id, p_confirm: confirm, p_note: note }); if (error) fail(error); return data; },
+      async riskDecide(id, clear, note) { const { error } = await sb.rpc("risk_decide", { p_user: id, p_clear: clear, p_note: note || "" }); if (error) fail(error); },
+      async appealDecide(id, overturn, note) { await sb.rpc("appeal_take", { p_appeal: id }); const { error } = await sb.rpc("appeal_decide", { p_appeal: id, p_overturn: overturn, p_note: note }); if (error) fail(error); },
+      async shieldQueue() { const { data, error } = await sb.rpc("shield_queue"); if (error) fail(error); return data || []; },
+      async auditList(target) { const { data, error } = await sb.rpc("audit_list", { p_target: target || null }); if (error) fail(error); return data || []; },
+      async mediaDecide(id, approve) { const { error } = await sb.rpc("media_decide", { p_media: id, p_approve: approve }); if (error) fail(error); },
       async signOut() {
+        try { await sb.rpc("session_end"); } catch (e) {}
         // SEC-04: подписка push этого браузера отвязывается от аккаунта до выхода
         try { const r = await navigator.serviceWorker?.getRegistration(); const s2 = r && (await r.pushManager.getSubscription()); if (s2) await sb.rpc("push_unsubscribe", { p_endpoint: s2.endpoint }); } catch (e) {}
         this.unsubscribeAll(); await sb.auth.signOut(); session = null; profile = null;
@@ -1141,20 +1436,13 @@
         try { const r = await navigator.serviceWorker?.getRegistration(); const s2 = r && (await r.pushManager.getSubscription()); if (s2) await sb.rpc("push_unsubscribe", { p_endpoint: s2.endpoint }); } catch (e) {}
         this.unsubscribeAll(); await sb.auth.signOut({ scope: "global" }); session = null; profile = null;
       },
-      async nicknameCheck(n) {
-        const np = nickProblem(n); if (np) return { ok: false, error: np };
-        const { data, error } = await sb.rpc("nickname_check", { p_nick: String(n).trim() }); if (error) return { ok: true };
-        return data || { ok: true };
-      },
-      async setNickname(n) {
-        need(); const np = nickProblem(n); if (np) throw new Error(np);
-        const { error } = await sb.rpc("set_nickname", { p_nick: String(n).trim() }); if (error) fail(error);
-        return loadProfile();
-      },
-      async updateProfile({ district, avatarFile, instagram, acceptRules, bio, show_seen }) {
+      async updateProfile({ name, nickname, district, avatarFile, instagram, gender, acceptRules, bio, show_seen }) {
         const u = need(), patch = { updated_at: nowISO() };
+        if (nickname !== undefined && String(nickname).trim()) patch.nickname = String(nickname).trim().replace(/^@/, "");
+        if (gender !== undefined && ["m", "f"].includes(gender)) patch.gender = gender;
         if (acceptRules) patch.accepted_rules_at = nowISO();
         if (instagram !== undefined) patch.instagram = cleanInsta(instagram);
+        if (name !== undefined) { if (!name.trim()) throw new Error("Имя не может быть пустым"); patch.name = name.trim(); }
         if (district !== undefined) patch.district = district;
         if (bio !== undefined) { if (String(bio).length > 160) throw new Error("Описание не длиннее 160 символов"); patch.bio = String(bio).trim() || null; }
         if (show_seen !== undefined) patch.show_seen = !!show_seen;
@@ -1184,15 +1472,14 @@
           const lim = Math.min(limit || 12, 12);
           let q = sb.rpc("feed_sorted", { ...base, p_sort: sort, p_period: period || null, p_friends: !!friends,
             p_after_ts: before && before.ts ? before.ts : null, p_after_dist: before && before.d != null ? before.d : null, p_after_id: before ? before.id || null : null,
-            p_offset: 0, p_limit: lim, p_after_score: before && before.s != null ? before.s : null, p_snapshot: before && before.snap ? before.snap : null });
+            p_offset: before && before.o ? before.o : 0, p_limit: lim });
           if (signal) q = q.abortSignal(signal);
           const { data: ids, error } = await q; if (error) fail(error);
           const order = (ids || []).map((r) => r.post_id);
           let rows = [];
           if (order.length) { const r2 = await sb.from("posts").select(POST_SELECT).in("id", order); if (r2.error) fail(r2.error); rows = order.map((id) => (r2.data || []).find((x) => x.id === id)).filter(Boolean); }
           const l = (ids || [])[order.length - 1];
-          // "Для вас": курсор (балл, id) и время снимка — следующие страницы считаются на тот же момент
-          const next = !l ? before || null : sort === "near" ? { d: l.sort_dist, id: l.post_id } : sort === "top" ? { s: l.sort_score, id: l.post_id, snap: l.snapshot } : { ts: l.sort_ts, id: l.post_id };
+          const next = !l ? before || null : sort === "near" ? { d: l.sort_dist, id: l.post_id } : sort === "top" ? { o: ((before && before.o) || 0) + order.length } : { ts: l.sort_ts, id: l.post_id };
           return { posts: await enrich(rows), next, done: order.length < lim };
         }
         if (after) {
@@ -1230,14 +1517,13 @@
       },
       // POST-01: публикация создается черновиком с ключом повтора; файлы догружаются, затем публикуется.
       // Повтор после обрыва с тем же clientKey продолжает с места остановки и не создает дубль.
-      async createPost({ category, text, lat, lng, files = [], event, exact = false, is_sos = false, clientKey }, onProgress = () => {}) {
+      async createPost({ category, text, lat, lng, files = [], event, exact = false, is_sos = false, clientKey, edits }, onProgress = () => {}) {
         const u = need();
         if (!CATS[category]) throw new Error("Выберите тип публикации");
         if (!text || !text.trim()) throw new Error("Добавьте описание");
         if (lat == null || lng == null) throw new Error("Укажите место на карте");
         if (files.length > 5) throw new Error("Не больше 5 вложений в публикации");
         files.forEach(validateFile);
-        if (files.length && profile && profile.account && profile.account.media_ok === false) throw new Error("Фото и видео временно недоступны: на сервере не включена проверка файлов. Опубликуйте текст без файлов");
         const key = clientKey || rid() + rid();
         onProgress("Сохраняем публикацию...");
         let post = null;
@@ -1255,28 +1541,27 @@
         for (let i = 0; i < files.length; i++) {
           if (done.has(i)) continue;
           const f0 = files[i], isImg = validateFile(f0) === "image", lbl = `${isImg ? "фото" : "видео"} ${i + 1} из ${files.length}`;
-          const base = `${u.id}/${post.id}/${i}-${Date.now()}`, row = { post_id: post.id, user_id: u.id, type: isImg ? "image" : "video", position: i };
-          const pr = (frac) => onProgress(`Загружаем ${lbl}... ${Math.round(frac * 100)}%`, (i + frac) / files.length);
+          // ключ объекта детерминирован: повтор после обрыва не создает дубль
+          const ext = isImg ? "jpg" : ((f0.name.split(".").pop() || "mp4").toLowerCase().replace(/[^a-z0-9]/g, "") || "mp4");
+          const key = `${u.id}/${post.id}/${i}-${post.id.slice(0, 8)}.${ext}`;
+          const row = { post_id: post.id, user_id: u.id, type: isImg ? "image" : "video", position: i, path: key, url: "private:" + key, edit: (edits && edits[i]) || {} };
+          const pr = (frac) => onProgress(`Загрузка ${lbl}: ${Math.round(frac * 100)}%`, (i + frac) / files.length);
           if (isImg) {
             onProgress(`Сжимаем ${lbl}...`, i / files.length);
-            // перекодирование через canvas убирает EXIF (в том числе GPS)
-            const full = await compressImage(f0, 1600, 0.82, true), th = await compressImage(f0, 480, 0.75);
-            row.url = await uploadBlob(base + ".jpg", full.blob, "image/jpeg", (x) => pr(x * 0.85));
-            row.thumb_url = await uploadBlob(base + "-t.jpg", th, "image/jpeg", (x) => pr(0.85 + x * 0.15));
-            row.w = full.w; row.h = full.h; row.path = base + ".jpg";
+            const full = await compressImage(f0, 1600, 0.82, true);
+            await uploadBlob(key, full.blob, "image/jpeg", pr, "post-staging");
+            row.w = full.w; row.h = full.h; row.size_bytes = full.blob.size;
           } else {
-            onProgress(`Проверяем ${lbl}...`, i / files.length);
-            const meta = await probeVideo(f0), f = await stripVideoMeta(f0), ext = ((f0.name.split(".").pop() || "mp4").toLowerCase());
-            if (meta.poster) { const pu = await uploadBlob(base + "-p.jpg", meta.poster, "image/jpeg"); row.poster_url = pu; row.thumb_url = pu; }
-            row.url = await uploadBlob(base + "." + ext, f, f0.type || "video/mp4", pr);
-            row.w = meta.w; row.h = meta.h; row.duration = Math.round(meta.duration * 10) / 10; row.path = base + "." + ext;
+            // исходник загружается без изменений; обрезку, поворот и звук применяет сервер по параметрам редактора
+            const meta = await probeVideo(f0).catch(() => ({}));
+            await uploadBlob(key, f0, f0.type || "video/mp4", pr, "post-staging");
+            row.w = meta.w || null; row.h = meta.h || null; row.duration = meta.duration ? Math.round(meta.duration * 10) / 10 : null; row.size_bytes = f0.size;
           }
-          const { data: pm, error: me } = await sb.from("post_media").insert(row).select("id").single();
-          if (me) { await sb.storage.from(BUCKET).remove([row.path, base + "-t.jpg", base + "-p.jpg"]).catch(() => {}); fail(me); }
-          if (isImg) moderate("post_media", pm.id);
+          const { error: me } = await sb.from("post_media").insert(row);
+          if (me) fail(me);
         }
         if (event && event.starts_at) {
-          const { error: ee } = await sb.from("events").upsert({ post_id: post.id, starts_at: event.starts_at, capacity: event.capacity || null });
+          const { error: ee } = await sb.from("events").upsert({ post_id: post.id, starts_at: event.starts_at, ends_at: event.ends_at || null, capacity: event.capacity || null, meet_cat: category === "meetup" ? event.meet_cat || "other" : null });
           if (ee) fail(ee);
         }
         const { error: pe } = await sb.from("posts").update({ status: "active" }).eq("id", post.id);
@@ -1327,7 +1612,7 @@
       },
       async addComment(id, text, parentId) {
         const u = need(); text = (text || "").trim(); if (!text) throw new Error("Комментарий пустой");
-        const { data, error } = await sb.from("comments").insert({ post_id: id, user_id: u.id, text: text.slice(0, 500), parent_id: parentId || null, client_key: rid() + rid() })
+        const { data, error } = await sb.from("comments").insert({ post_id: id, user_id: u.id, text: text.slice(0, 500), parent_id: parentId || null })
           .select("id,text,created_at,user_id,parent_id").single();
         if (error) fail(error);
         return { ...data, author: { id: u.id, name: profile ? profile.name : "Вы", avatar_url: profile && profile.avatar_url, verified: profile && profile.verified } };
@@ -1355,12 +1640,13 @@
       async stats() {
         if (!session) return { posts: 0, saved: 0, events: 0 };
         const id = session.user.id, h = { count: "exact", head: true };
-        const [a, b, c] = await Promise.all([
+        const [a, b, c, d] = await Promise.all([
           sb.from("posts").select("id", h).eq("user_id", id),
           sb.from("saved_posts").select("post_id", h).eq("user_id", id),
-          sb.from("event_members").select("post_id", h).eq("user_id", id)
+          sb.from("event_members").select("post_id", h).eq("user_id", id).eq("status", "going"),
+          sb.from("likes").select("post_id,posts!inner(user_id)", h).eq("posts.user_id", id).neq("user_id", id)
         ]);
-        return { posts: a.count || 0, saved: b.count || 0, events: c.count || 0 };
+        return { posts: a.count || 0, saved: b.count || 0, events: c.count || 0, likes: d.count || 0 };
       },
       async notifications() {
         if (!session) return [];
@@ -1612,7 +1898,7 @@
   /* ---------- выбор режима ---------- */
   const hasSupabase = !!(CFG.SUPABASE_URL && CFG.SUPABASE_ANON_KEY);
   window.NEAR = {
-    CATS, CITY, dist, boundsAround, compressImage, validateFile, probeVideo, validateChatFile, ruError, mask, hasBad, cleanText, isThreat, nickProblem, CLEAN_VERSION, REASONS, REASON_LABELS, stripVideoMeta, snap, rid,
+    CATS, CITY, dist, boundsAround, compressImage, validateFile, probeVideo, validateChatFile, ruError, mask, hasBad, clean, cleanOrThrow, MEET_CATS, REVIEW_TAGS, BAN_RULES, deviceLabel, installId, REASONS, REASON_LABELS, stripVideoMeta, snap, rid,
     api: null,
     async start() {
       // demo — только локальные данные; staging/prod — только сервер, без тихого перехода в демо

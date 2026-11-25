@@ -15,7 +15,7 @@
       const seen = new Set(), uniq = list.filter((r) => { const k = r.target_type + r.target_id; if (seen.has(k)) return false; seen.add(k); return true; });
       $("modSub").textContent = uniq.length ? uniq.length + " на проверке" : "все проверено";
       const admin = user && user.is_admin;
-      box.innerHTML = uniq.length ? uniq.map((r) => `<div class="rep" data-rep="${r.id}" data-tt="${r.target_type}" data-tid="${r.target_id}">
+      box.innerHTML = uniq.length ? uniq.map((r) => `<div class="rep" data-rep="${r.id}" data-tt="${r.target_type}" data-tid="${r.target_id}" data-tu="${r.target_user || ""}">
         <div class="rh"><span>${TT[r.target_type]} · жалоб: ${r.count}${r.source === "ai" ? ' <span class="tag-mini">ИИ</span>' : ""}</span><span>${timeAgo(r.created_at)}</span></div>
         <div class="rr">${esc(N.REASON_LABELS[r.reason] || r.reason)}</div>
         <div class="dim" style="font-size:11.5px">Автор: <b class="who-link" data-user="${r.target_user || ""}" translate="no">${esc(r.target.name)}</b>${r.target.banned ? " ⛔" : ""} · пожаловался: <span translate="no">${esc(r.reporter.name)}</span></div>
@@ -23,7 +23,7 @@
         <div class="pv" translate="no">${esc(r.preview || "—")}</div>${r.media ? (r.media.kind === "image" ? `<img class="rep-img" src="${esc(r.media.url)}" alt="" data-zoom>` : r.media.kind === "audio" ? `<audio controls src="${esc(r.media.url)}"></audio>` : `<video controls playsinline src="${esc(r.media.url)}"></video>`) : ""}
         <div class="ra">${r.target_type === "post" ? `<button data-act="open" data-post="${r.target_id}">Открыть</button><button class="danger" data-act="hide">Скрыть</button><button class="okb" data-act="restore">Вернуть</button>` : ""}
           ${r.target_type !== "user" ? `<button class="danger" data-act="delete">Удалить</button>` : ""}
-          ${admin && r.target_user && !r.target.banned ? `<button class="danger" data-act="ban">⛔ Забанить автора</button>` : ""}
+          ${admin && r.target_user && !r.target.banned ? `<button class="danger" data-act="ban">🛡 Решение по автору</button>` : ""}
           <button data-act="dismiss">Отклонить жалобу</button><button data-act="history">История</button></div></div>`).join("") : '<div class="empty"><b>Жалоб нет 🎉</b>Новые жалобы появятся здесь</div>';
     } catch (e) { box.innerHTML = `<div class="empty"><b>Нет доступа</b>${esc(e.message)}</div>`; }
   }
@@ -97,6 +97,7 @@
       const card3 = mb.closest("[data-mp]"), act = mb.dataset.mact, id = card3.dataset.mp;
       if (act === "open") return openPost(id);
       if (act === "history") return historySheet("post", id);
+      if (act === "ban") { await ShieldAdmin.open(); return ShieldAdmin.card(card3.dataset.uid); }
       const L = { hide: "Скрыть публикацию? Автор получит уведомление, файлы станут недоступны по ссылке.", restore: "Вернуть публикацию в ленту?", delete: "Удалить публикацию навсегда? Файлы будут стерты.", ban: "Забанить автора? Он не сможет публиковать и писать." };
       if (!(await confirmSheet("Модерация", L[act], "Да", act !== "restore"))) return;
       try {
@@ -110,6 +111,7 @@
     const card2 = b.closest("[data-rep]"), act = b.dataset.act;
     if (act === "open") return openPost(b.dataset.post);
     if (act === "history") return historySheet(card2.dataset.tt, card2.dataset.tid);
+    if (act === "ban") { const uid2 = card2.dataset.uid || card2.dataset.tu; if (uid2) { await ShieldAdmin.open(); return ShieldAdmin.card(uid2); } }
     const labels = { hide: "Скрыть публикацию?", restore: "Вернуть публикацию в ленту?", delete: "Удалить навсегда?", ban: "Забанить автора? Он не сможет публиковать и писать.", dismiss: "Отклонить жалобу? Она останется в истории." };
     if (!(await confirmSheet("Модерация", labels[act], "Да", act === "delete" || act === "ban"))) return;
     try {

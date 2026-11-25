@@ -18,14 +18,6 @@ if (existsSync(root + dir)) {
   console.log(`✓ js/app.js из ${parts.length} модулей`);
 }
 
-// 1b. NEAR Clean: один источник (src/lib/clean.js) для приложения; та же логика в базе — 014_v14.sql
-{
-  const d = R("js/data.js"), c = R("src/lib/clean.js");
-  const re = /  \/\* @clean:start[^\n]*\n[\s\S]*?  \/\* @clean:end \*\/\n/;
-  if (!re.test(d)) fail("js/data.js: нет меток @clean:start/@clean:end");
-  else writeFileSync(root + "js/data.js", d.replace(re, (m) => m.split("\n")[0] + "\n" + c + "  /* @clean:end */\n"));
-}
-
 // 2. app.html
 const parts = JSON.parse(R("parts.json"));
 let html = R("app.tpl.html").replace(/\{\{(\w+)\}\}/g, (m, k) => (k in parts ? parts[k] : (fail("нет блока " + k), m)));

@@ -1,6 +1,6 @@
 const now = () => new Date().toISOString();
 const DB = { deletion_jobs: [], messages: [{ id: "m1", sender_id: "U", media_path: "U/c/1.jpg", text: null, kind: "image" }, { id: "m2", sender_id: "U", media_path: "U/c/2.jpg", text: "подпись", kind: "image" }, { id: "m3", sender_id: "X", media_path: "X/c/3.jpg", text: null, kind: "image" }], push_subs: [{ user_id: "U" }], conversations: [] };
-const FILES = { "chat-media": ["U/c/1.jpg", "U/c/2.jpg", "X/c/3.jpg"], "post-media": ["U/p/a.jpg", "U/avatar.jpg", "X/p/b.jpg"], "post-quarantine": [], "post-private": ["U/p1/0.webp", "U/p1/0-t.webp", "X/p2/0.webp"], "avatars": ["U/avatar-1.webp"] };
+const FILES = { "chat-media": ["U/c/1.jpg", "U/c/2.jpg", "X/c/3.jpg"], "post-media": ["U/p/a.jpg", "U/avatar.jpg", "X/p/b.jpg"], "post-quarantine": [], "post-staging": ["U/d1/v.mov", "U/d1/v-720.mp4", "X/d2/z.mov"] };
 let failRemove = true, lastSign = Date.now() - 60e3, deleted = false;
 function q(t) { let rows = DB[t]; const f = []; const b = {
   select() { return b; }, eq(k, v) { f.push((r) => r[k] === v); return b; }, neq(k, v) { f.push((r) => r[k] !== v); return b; },
@@ -14,7 +14,8 @@ const storage = { from: (bk) => ({
   list: async (prefix) => { const names = [...new Set(FILES[bk].filter((p) => p.startsWith(prefix + "/")).map((p) => p.slice(prefix.length + 1).split("/")[0]))];
     return { data: names.map((n) => ({ name: n, id: FILES[bk].includes(prefix + "/" + n) ? "f" : null })), error: null }; },
   remove: async (paths) => { if (failRemove && bk === "post-media") return { error: { message: "storage down" } }; FILES[bk] = FILES[bk].filter((p) => !paths.includes(p)); return { error: null }; } }) };
-globalThis.__fake = () => ({ from: q, storage, auth: { getUser: async (t) => ({ data: t === "T" ? { user: { id: "U", last_sign_in_at: new Date(lastSign).toISOString() } } : null }), admin: { deleteUser: async () => { deleted = true; return { error: null }; } } } });
+let PRE = 0;
+globalThis.__fake = () => ({ from: q, storage, rpc: async (fn) => { if (fn === "account_predelete") PRE++; return { data: {} }; }, auth: { getUser: async (t) => ({ data: t === "T" ? { user: { id: "U", last_sign_in_at: new Date(lastSign).toISOString() } } : null }), admin: { deleteUser: async () => { deleted = true; return { error: null }; } } } });
 let handler; globalThis.Deno = { env: { get: () => "x" }, serve: (h) => (handler = h) };
 console.error = console.log = ((o) => (...a) => { if (!String(a[0]).startsWith("{")) o(...a); })(console.log);
 await import("./.del.ts");
@@ -30,3 +31,4 @@ console.log("повтор:", await call(), "| job:", DB.deletion_jobs[0].status,
 console.log("файлы:", JSON.stringify(FILES));
 console.log("сообщения:", JSON.stringify(DB.messages.map((m) => [m.id, m.kind, m.text, m.media_path])));
 console.log("push подписки:", DB.push_subs.length);
+console.log("встречи переданы/отменены перед удалением:", PRE > 0, "| staging пользователя очищен:", !FILES["post-staging"].some((p) => p.startsWith("U/")), "| чужие файлы целы:", FILES["post-staging"].includes("X/d2/z.mov"));

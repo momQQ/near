@@ -1,18 +1,19 @@
 -- NEAR v12: дополнительные проверки (запускаются после rls_v11.sql на той же базе)
 reset role; select t.as_user(null);
 insert into auth.users (id, email, raw_user_meta_data, email_confirmed_at) values
- ('30000000-0000-0000-0000-000000000001', 'u1@x.kz', '{"nickname":"user_one","accepted_rules":"true"}', null),   -- не подтвердил email
- ('30000000-0000-0000-0000-000000000002', 'u2@x.kz', '{"accepted_rules":"true"}', now()),               -- без никнейма (v14; в v12 — без пола)
- ('30000000-0000-0000-0000-000000000003', 'u3@x.kz', '{"nickname":"user_three","accepted_rules":"true"}', now()),
- ('30000000-0000-0000-0000-000000000004', 'u4@x.kz', '{"nickname":"user_four","accepted_rules":"true"}', now());
+ ('30000000-0000-0000-0000-000000000001', 'u1@x.kz', '{"gender":"m","accepted_rules":"true"}', null),   -- не подтвердил email
+ ('30000000-0000-0000-0000-000000000002', 'u2@x.kz', '{"accepted_rules":"true"}', now()),               -- без пола
+ ('30000000-0000-0000-0000-000000000003', 'u3@x.kz', '{"gender":"f","accepted_rules":"true"}', now()),
+ ('30000000-0000-0000-0000-000000000004', 'u4@x.kz', '{"gender":"m","accepted_rules":"true"}', now());
 update public.profiles set created_at = now() - interval '60 days' where id::text like '30000000%';
 update public.profiles set accepted_rules_at = now() where id::text like '30000000%';
+update public.profiles set nickname = 'u' || right(id::text, 4) where id::text like '30000000%' and id <> '30000000-0000-0000-0000-000000000002';
 
 -- ===== UX-01: email и профиль =====
 set role authenticated; select t.as_user('30000000-0000-0000-0000-000000000001');
 select t.fail('UX-01 без подтвержденного email публиковать нельзя', $$insert into public.posts (user_id, category, text, lat, lng) values ('30000000-0000-0000-0000-000000000001', 'talk', 'x', 43.2, 76.9)$$, 'NR403');
 select t.as_user('30000000-0000-0000-0000-000000000002');
-select t.fail('UX-01 v14: без никнейма публиковать нельзя', $$insert into public.posts (user_id, category, text, lat, lng) values ('30000000-0000-0000-0000-000000000002', 'talk', 'x', 43.2, 76.9)$$, 'NR403');
+select t.fail('UX-01 без никнейма публиковать нельзя (v14.9: пол не нужен)', $$insert into public.posts (user_id, category, text, lat, lng) values ('30000000-0000-0000-0000-000000000002', 'talk', 'x', 43.2, 76.9)$$, 'NR403');
 
 -- ===== SOS-01: срок назначает сервер, закрытый не открывается =====
 select t.as_user('30000000-0000-0000-0000-000000000003');
@@ -54,7 +55,7 @@ select t.ok('UX-02 "Рядом" — по расстоянию', (select array_ag
 select t.ok('UX-02 "Для вас" — срочное происшествие первым, даже если дальше', (select post_id = '5f000000-0000-0000-0000-000000000001' from public.feed_sorted(43.2, 77.5, 3000, null, 'top') limit 1));
 select t.ok('UX-02 "Новое" — по времени', (select post_id = '5f000000-0000-0000-0000-000000000003' from public.feed_sorted(43.2, 77.5, 3000, null, 'new') limit 1));
 select t.ok('UX-02 период "сегодня" скрывает старое', (select count(*) = 0 from public.feed_sorted(43.2, 77.5, 3000, null, 'new', 'today') where post_id = '5f000000-0000-0000-0000-000000000002'));
-select t.ok('UX-02 v14.8: фильтр "Друзья" отключен — друзей больше нет', (select count(*) = 0 from public.feed_sorted(43.2, 77.5, 3000, null, 'new', null, true)));
+select t.ok('UX-02 "Друзья" — только публикации друзей', (select count(*) = 3 from public.feed_sorted(43.2, 77.5, 3000, null, 'new', null, true)));
 select t.as_user('30000000-0000-0000-0000-000000000002');
 select t.ok('UX-02 "Друзья" у человека без друзей пусто', (select count(*) = 0 from public.feed_sorted(43.2, 77.5, 3000, null, 'new', null, true)));
 -- курсор "Рядом" без пропусков и дублей на 30 постах из v11 (одинаковое время)
@@ -84,8 +85,8 @@ reset role;
 select t.ok('ANALYTICS filter_changed без координат и текста', (select props = '{"sort":"near"}'::jsonb from public.analytics_events where name = 'filter_changed' order by id desc limit 1));
 
 -- ===== PRIV-01: переписка удаленного аккаунта =====
--- v14.8: новые переписки не создаются; старые (созданные до отключения) по-прежнему помечаются при удалении аккаунта
-reset role; select t.as_user(null);
-insert into public.conversations (user_a, user_b) values ('30000000-0000-0000-0000-000000000003', '30000000-0000-0000-0000-000000000004') on conflict do nothing;
+reset role; select t.as_user('30000000-0000-0000-0000-000000000003');
+select public.get_or_create_conversation('30000000-0000-0000-0000-000000000004');
+reset role;
 delete from auth.users where id = '30000000-0000-0000-0000-000000000004';
 select t.ok('PRIV-01 у переписки удаленного отмечена дата (удаление через 30 дней)', (select orphaned_at is not null from public.conversations where user_a = '30000000-0000-0000-0000-000000000003' or user_b = '30000000-0000-0000-0000-000000000003'));

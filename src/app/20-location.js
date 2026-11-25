@@ -65,37 +65,3 @@
       } catch (e) { $("plErr").textContent = e.message; $("plErr").classList.add("on"); }
     };
   }
-
-  /* ---------- v14.2 / 11: адрес точки (обратное геокодирование) ---------- */
-  // Nominatim (OpenStreetMap): не чаще 1 запроса в секунду, ответы кэшируются (~30 м), без координат в тексте для людей
-  const nearestDistrict = (lat, lng) => DISTRICTS.reduce((b, d) => { const k = N.dist({ lat, lng }, { lat: d[1], lng: d[2] }); return k < b.k ? { k, n: d[0] } : b; }, { k: 1e9, n: "" }).n;
-  const geoCache = new Map(); let geoLast = 0, geoCtl = null;
-  // ТЗ 05: после moveend, с паузой 350–500 мс (в выборе точки), старый запрос отменяется; не найдено — "Точка на карте · адрес не определен"
-  async function geoLabel(lat, lng) {
-    const key = lat.toFixed(4) + "," + lng.toFixed(4), district = nearestDistrict(lat, lng);
-    if (geoCache.has(key)) return geoCache.get(key);
-    const fallback = { addr: "Точка на карте", district, unknown: true };
-    if (api.mode === "local" || CFG.GEOCODE === false || !navigator.onLine) return fallback;
-    if (geoCtl) geoCtl.abort();
-    const ctl = (geoCtl = new AbortController());
-    const wait = geoLast + 1100 - Date.now(); if (wait > 0) await new Promise((r) => setTimeout(r, wait));
-    if (ctl.signal.aborted) return fallback;
-    geoLast = Date.now();
-    try {
-      const tm = setTimeout(() => ctl.abort(), 5000);
-      const r = await fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&zoom=18&accept-language=ru&lat=${lat.toFixed(5)}&lon=${lng.toFixed(5)}`, { signal: ctl.signal, referrerPolicy: "strict-origin" });
-      clearTimeout(tm); if (!r.ok) return fallback;
-      const j = await r.json(), a = j.address || {};
-      const street = a.road || a.pedestrian || a.footway || a.neighbourhood || a.quarter || "";
-      const name = j.name && j.name !== street ? j.name : "";
-      const addr = [name, street && (street + (a.house_number ? ", " + a.house_number : ""))].filter(Boolean).join(" · ");
-      const out = addr ? { addr, district: (a.city_district || "").replace(/ район$/i, "") || district } : fallback;
-      if (geoCache.size > 300) geoCache.clear(); geoCache.set(key, out); return out;
-    } catch (e) { return fallback; }
-  }
-  async function geoSearch(q) {
-    if (api.mode === "local" || CFG.GEOCODE === false || !q || q.length < 3) return [];
-    const r = await fetch(`https://nominatim.openstreetmap.org/search?format=jsonv2&limit=6&accept-language=ru&bounded=1&viewbox=76.70,43.40,77.15,43.10&q=${encodeURIComponent(q)}`, { referrerPolicy: "strict-origin" });
-    if (!r.ok) return [];
-    return (await r.json()).map((x) => ({ name: String(x.display_name || "").split(",").slice(0, 3).join(","), lat: +x.lat, lng: +x.lon }));
-  }

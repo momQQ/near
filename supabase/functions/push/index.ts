@@ -71,7 +71,7 @@ async function sendPush(sub: Sub, data: unknown, opt: { publicKey: string; priva
 // ---------- отправка ----------
 const sb = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!, { auth: { persistSession: false } });
 const V = { publicKey: Deno.env.get("VAPID_PUBLIC_KEY") ?? "", privateKey: Deno.env.get("VAPID_PRIVATE_KEY") ?? "", subject: Deno.env.get("VAPID_SUBJECT") ?? "mailto:admin@near.app" };
-const DEF = { msg: true, comment: true, like: true, friend: true, near: true, radius: 3, quiet: true, hide_text: true, sos_quiet: false }; // v14.8: текст и адрес скрыты на экране блокировки по умолчанию
+const DEF = { msg: true, comment: true, like: true, friend: true, near: true, radius: 3, quiet: true, hide_text: false, sos_quiet: false };
 type Row = Sub & { id: string; user_id: string; prefs: Record<string, unknown>; lat: number | null; lng: number | null };
 
 let secret: string | null = null;
@@ -88,7 +88,7 @@ function km(a: { lat: number; lng: number }, b: { lat: number; lng: number }) {
 }
 const hex = (id: string) => String(id).replace(/-/g, "").slice(0, 32);
 const short = (t: string, n = 120) => (t.length > n ? t.slice(0, n - 1) + "…" : t);
-async function nameOf(id: string | null) { if (!id) return "NEAR"; const { data } = await sb.from("profiles").select("nickname,name").eq("id", id).maybeSingle(); return data?.nickname ?? data?.name ?? "NEAR"; }
+async function nameOf(id: string | null) { if (!id) return "NEAR"; const { data } = await sb.from("profiles").select("name").eq("id", id).maybeSingle(); return data?.name ?? "NEAR"; }
 async function blocked(by: string, who: string) { const { data } = await sb.from("blocks").select("blocker_id").eq("blocker_id", by).eq("blocked_id", who).maybeSingle(); return !!data; }
 
 const stat = { sent: 0, failed: 0, removed: 0 };
@@ -129,11 +129,8 @@ Deno.serve(async (req) => {
     const subs = (await subsOf(n.user_id)).filter((s) => !pk || pref(s, pk));
     if (subs.length) {
       const who = n.actor_id ? await nameOf(n.actor_id) : "NEAR";
-      // v14.8: ссылка из уведомления (комната/встреча); приложение при открытии проверяет доступ
-      const url = typeof n.link === "string" && /^#(room|meet|post|user)=[0-9a-f-]{36}$/.test(n.link) ? n.link : n.post_id ? "#post=" + n.post_id : n.actor_id ? "#user=" + n.actor_id : "#notif";
-      const { data: pr } = await sb.from("profiles").select("notify_level").eq("id", n.user_id).maybeSingle();
-      if (pr?.notify_level === "off") return new Response("off");
-      sent = await deliver(subs, { title: who, body: short(n.text ?? ""), url, silent: pr?.notify_level === "silent", tag: "n" + hex(n.room_id ?? n.post_id ?? n.id).slice(0, 20) + n.type.slice(0, 8) },
+      const url = n.post_id ? "#post=" + n.post_id : n.actor_id ? "#user=" + n.actor_id : "#notif";
+      sent = await deliver(subs, { title: who, body: short(n.text ?? ""), url, tag: "n" + hex(n.post_id ?? n.id).slice(0, 20) + n.type.slice(0, 8) },
         { topic: "n" + hex(n.post_id ?? n.id).slice(0, 23) + n.type.slice(0, 8), secret: { title: "NEAR", body: "Новое уведомление" } });
     }
   }

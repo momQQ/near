@@ -30,27 +30,27 @@ insert into auth.users (id, email, raw_user_meta_data) values
  ('20000000-0000-0000-0000-000000000002', 'o2@x.kz', '{}'), ('20000000-0000-0000-0000-000000000003', 'o3@x.kz', '{}');
 -- v12: публиковать могут только подтвердившие email и заполнившие профиль
 update auth.users set email_confirmed_at = now();
-update public.profiles set gender = 'f', accepted_rules_at = now(), verified = false;
-update public.profiles set gender = null where id = 'aaaaaaaa-0000-0000-0000-00000000000a';
+-- v14: вместо пола — никнейм (для старых проверок задаем напрямую от имени сервера)
+update public.profiles set nickname = 'u' || replace(id::text, '-', ''), accepted_rules_at = now(), verified = false;
+update public.profiles set nickname_norm = public.nick_norm(nickname);
+-- регрессия v11/v12 проверяет старые правила: лимиты v14, возрастной допуск и запрет медиа без проверки — отдельно в rls_v14.sql
+update public.app_settings set age_gate = false, media_requires_check = false, mod_require_mfa = false,
+  day_limits = '{"post":[1000,1000],"comment":[1000,1000],"chat_request":[1000,1000],"meeting":[1000,1000]}'::jsonb;
 update public.profiles set is_moderator = true where id = 'dddddddd-0000-0000-0000-00000000000d';
 update public.profiles set is_admin = true where id = 'eeeeeeee-0000-0000-0000-00000000000e';
 update public.profiles set created_at = now() - interval '60 days' where id::text like '20000000%' or id::text like 'aaaa%' or id::text like 'bbbb%' or id::text like 'cccc%';
-update public.app_settings set limits = limits || '{"comment":[3,100,"1 hour"],"post":[10,40,"1 hour"],"chat":[100,400,"1 minute"]}'::jsonb;
--- v14.9: проверки v11/v12 идут в режиме без обязательной сессии и MFA; Shield проверяется отдельно в rls_v14.sql
-update public.app_settings set shield = shield || '{"enforce_sessions":false,"admin_mfa":false,"dm":true}'::jsonb;
-update public.profiles set nickname = 'u' || left(md5(id::text), 12);
+update public.app_settings set limits = limits || '{"comment":[3,100,"1 hour"]}'::jsonb;
 
 -- ===== SEC-01: профиль =====
 set role authenticated; select t.as_user('aaaaaaaa-0000-0000-0000-00000000000a');
 select t.fail('SEC-01 A не может создать профиль напрямую', $$insert into public.profiles (id, name) values ('aaaaaaaa-0000-0000-0000-00000000000a', 'x')$$, '42501');
 select t.fail('SEC-01 upsert профиля запрещен', $$insert into public.profiles (id, name, is_admin) values ('aaaaaaaa-0000-0000-0000-00000000000a', 'x', true) on conflict (id) do update set is_admin = true$$, '42501');
-update public.profiles set is_admin = true, is_moderator = true, verified = true, banned = false, name = 'Айгерим К.' where id = 'aaaaaaaa-0000-0000-0000-00000000000a';
-select t.ok('SEC-01 A не назначил себе роль и значок', (select not is_admin and not is_moderator and not verified and name = 'Айгерим К.' from public.profiles where id = 'aaaaaaaa-0000-0000-0000-00000000000a'));
-update public.profiles set name = 'Взлом' where id = 'bbbbbbbb-0000-0000-0000-00000000000b';
-select t.ok('SEC-01 A не меняет чужой профиль', (select name = 'Бекзат' from public.profiles where id = 'bbbbbbbb-0000-0000-0000-00000000000b'));
-update public.profiles set gender = 'f' where id = 'aaaaaaaa-0000-0000-0000-00000000000a';
-update public.profiles set gender = 'm' where id = 'aaaaaaaa-0000-0000-0000-00000000000a';
-select t.ok('SEC-01 пол задается один раз', (select gender = 'f' from public.profiles where id = 'aaaaaaaa-0000-0000-0000-00000000000a'));
+select t.fail('SEC-01 A не назначает себе роль и значок', $$update public.profiles set is_admin = true, is_moderator = true, verified = true, banned = false where id = 'aaaaaaaa-0000-0000-0000-00000000000a'$$, '42501');
+select t.ok('SEC-01 A не назначил себе роль и значок', (select not is_admin and not is_moderator and not verified from public.profiles where id = 'aaaaaaaa-0000-0000-0000-00000000000a'));
+update public.profiles set bio = 'Взлом' where id = 'bbbbbbbb-0000-0000-0000-00000000000b';
+select t.ok('SEC-01 A не меняет чужой профиль', (select bio is null from public.profiles where id = 'bbbbbbbb-0000-0000-0000-00000000000b'));
+select t.fail('SEC-01 v14: имя меняется только через никнейм', $$update public.profiles set name = 'Айгерим К.' where id = 'aaaaaaaa-0000-0000-0000-00000000000a'$$, '42501');
+select t.fail('SEC-01 v14: пол больше не принимается', $$update public.profiles set gender = 'm' where id = 'aaaaaaaa-0000-0000-0000-00000000000a'$$, '42501');
 reset role;
 delete from public.profiles where id = '10000000-0000-0000-0000-000000000003';
 set role authenticated; select t.as_user('10000000-0000-0000-0000-000000000003');
@@ -64,8 +64,8 @@ insert into public.posts (id, user_id, category, text, lat, lng, status, client_
 values ('a0000000-0000-0000-0000-000000000001', 'aaaaaaaa-0000-0000-0000-00000000000a', 'talk', 'Привет, район', 43.23871, 76.94562, 'draft', 'key-12345678');
 select t.ok('POST-01 место приблизительное по умолчанию', (select lat <> 43.23871 and abs(lat - 43.23871) < 0.0011 from public.posts where id = 'a0000000-0000-0000-0000-000000000001'));
 select t.fail('POST-01 повтор с тем же ключом не создает дубль', $$insert into public.posts (user_id, category, text, lat, lng, status, client_key) values ('aaaaaaaa-0000-0000-0000-00000000000a', 'talk', 'x', 43.2, 76.9, 'draft', 'key-12345678')$$, '23505');
-insert into public.post_media (post_id, user_id, url, path) select 'a0000000-0000-0000-0000-000000000001', 'aaaaaaaa-0000-0000-0000-00000000000a', 'u' || g, 'aaaaaaaa-0000-0000-0000-00000000000a/a/' || g || '.jpg' from generate_series(1, 5) g;
-select t.fail('POST-01 шестое вложение отклоняется', $$insert into public.post_media (post_id, user_id, url, path) values ('a0000000-0000-0000-0000-000000000001', 'aaaaaaaa-0000-0000-0000-00000000000a', 'u6', 'aaaaaaaa-0000-0000-0000-00000000000a/a/6.jpg')$$, 'NR422');
+insert into public.post_media (post_id, user_id, url, path) select 'a0000000-0000-0000-0000-000000000001', 'aaaaaaaa-0000-0000-0000-00000000000a', 'u' || g, 'aaaaaaaa-0000-0000-0000-00000000000a/a0000000-0000-0000-0000-000000000001/' || g || '.jpg' from generate_series(1, 5) g; -- v14.2: путь <автор>/<публикация>/...
+select t.fail('POST-01 шестое вложение отклоняется', $$insert into public.post_media (post_id, user_id, url, path) values ('a0000000-0000-0000-0000-000000000001', 'aaaaaaaa-0000-0000-0000-00000000000a', 'u6', 'aaaaaaaa-0000-0000-0000-00000000000a/a0000000-0000-0000-0000-000000000001/6.jpg')$$, 'NR422');
 select t.fail('POST-01 чужая папка файла отклоняется', $$insert into public.post_media (post_id, user_id, url, path) values ('a0000000-0000-0000-0000-000000000001', 'aaaaaaaa-0000-0000-0000-00000000000a', 'u7', 'bbbbbbbb-0000-0000-0000-00000000000b/7.jpg')$$);
 insert into public.posts (id, user_id, category, text, lat, lng, exact) values ('a0000000-0000-0000-0000-000000000002', 'aaaaaaaa-0000-0000-0000-00000000000a', 'event', 'Субботник', 43.23871, 76.94562, true);
 select t.ok('POST-01 точное место — осознанный выбор', (select lat = 43.23871 from public.posts where id = 'a0000000-0000-0000-0000-000000000002'));
@@ -86,8 +86,6 @@ select t.as_user('cccccccc-0000-0000-0000-00000000000c');
 insert into public.event_members (post_id, user_id) values ('a0000000-0000-0000-0000-000000000002', 'cccccccc-0000-0000-0000-00000000000c');
 select t.ok('POST-02 отмена участия освобождает место', (select count(*) = 1 from public.event_members where post_id = 'a0000000-0000-0000-0000-000000000002'));
 
--- v14.9: файлы проверяет сервер; для этих проверок считаем их одобренными
-reset role; select t.as_user(null); update public.post_media set state = 'approved' where post_id = 'a0000000-0000-0000-0000-000000000001'; set role authenticated;
 -- ===== SEC-02: скрытый модератором пост =====
 select t.as_user('aaaaaaaa-0000-0000-0000-00000000000a');
 update public.posts set status = 'active' where id = 'a0000000-0000-0000-0000-000000000001';
@@ -161,32 +159,14 @@ select t.ok('SOS признак не меняется автором', (select i
 update public.posts set status = 'closed' where id = 'b0000000-0000-0000-0000-00000000005a';
 select t.ok('SOS закрытие ставит resolved_at', (select resolved_at is not null from public.posts where id = 'b0000000-0000-0000-0000-00000000005a'));
 
--- ===== CHAT-01: запросы на общение =====
+-- ===== CHAT-01 (v14.8): личные сообщения отключены — контролируемый отказ =====
 select t.as_user('cccccccc-0000-0000-0000-00000000000c');
-select set_config('t.conv', public.get_or_create_conversation('aaaaaaaa-0000-0000-0000-00000000000a')::text, false);
-select t.ok('CHAT-01 незнакомцу — запрос', (select status = 'request' from public.conversations where id = current_setting('t.conv')::uuid));
-select t.fail('CHAT-01 ссылка до принятия запрещена', format($$insert into public.messages (conversation_id, sender_id, text) values (%L, 'cccccccc-0000-0000-0000-00000000000c', 'смотри https://spam.kz')$$, current_setting('t.conv')), 'NR422');
-insert into public.messages (conversation_id, sender_id, text) values (current_setting('t.conv')::uuid, 'cccccccc-0000-0000-0000-00000000000c', 'Здравствуйте, вы потеряли ключи?');
-select t.fail('CHAT-01 второе сообщение до принятия запрещено', format($$insert into public.messages (conversation_id, sender_id, text) values (%L, 'cccccccc-0000-0000-0000-00000000000c', 'Ау')$$, current_setting('t.conv')), 'NR403');
-select t.fail('CHAT-01 файл в переписку до принятия запрещен', format($$insert into storage.objects (bucket_id, name) values ('chat-media', 'cccccccc-0000-0000-0000-00000000000c/%s/1.jpg')$$, current_setting('t.conv')), '42501');
-select t.as_user('bbbbbbbb-0000-0000-0000-00000000000b');
-select t.ok('CHAT-01 B не читает переписку A и C', (select count(*) = 0 from public.messages where conversation_id = current_setting('t.conv')::uuid));
-select t.fail('CHAT-01 B не отвечает на чужой запрос', format($$select public.conversation_respond(%L, true)$$, current_setting('t.conv')), 'NR404');
-select t.as_user('aaaaaaaa-0000-0000-0000-00000000000a');
-select public.conversation_respond(current_setting('t.conv')::uuid, false);
-select t.as_user('cccccccc-0000-0000-0000-00000000000c');
-select t.fail('CHAT-01 после отказа контакт прекращен', format($$insert into public.messages (conversation_id, sender_id, text) values (%L, 'cccccccc-0000-0000-0000-00000000000c', 'Ну пожалуйста')$$, current_setting('t.conv')), 'NR403');
-select t.as_user('aaaaaaaa-0000-0000-0000-00000000000a');
-insert into public.messages (conversation_id, sender_id, text) values (current_setting('t.conv')::uuid, 'aaaaaaaa-0000-0000-0000-00000000000a', 'Да, мои! Спасибо');
-select t.ok('CHAT-01 ответ получателя принимает запрос', (select status = 'accepted' from public.conversations where id = current_setting('t.conv')::uuid));
-select t.as_user('cccccccc-0000-0000-0000-00000000000c');
-insert into public.messages (conversation_id, sender_id, text) values (current_setting('t.conv')::uuid, 'cccccccc-0000-0000-0000-00000000000c', 'Где встретимся? https://2gis.kz');
-select t.ok('CHAT-01 после принятия можно писать и ссылки', (select count(*) = 3 from public.messages where conversation_id = current_setting('t.conv')::uuid));
+select t.fail('LEGACY-DM новую переписку не открыть', $$select public.get_or_create_conversation('aaaaaaaa-0000-0000-0000-00000000000a')$$, 'NR410');
+select t.fail('LEGACY-DM ответ на запрос недоступен', $$select public.conversation_respond(gen_random_uuid(), true)$$, 'NR410');
+select t.fail('LEGACY-DM старые сообщения не читаются клиентом', $$select count(*) from public.messages$$, '42501');
+select t.fail('LEGACY-DM дружба недоступна', $$insert into public.friendships (requester_id, addressee_id) values ('cccccccc-0000-0000-0000-00000000000c', 'aaaaaaaa-0000-0000-0000-00000000000a')$$, '42501');
 select t.as_user('aaaaaaaa-0000-0000-0000-00000000000a');
 insert into public.blocks (blocker_id, blocked_id) values ('aaaaaaaa-0000-0000-0000-00000000000a', 'cccccccc-0000-0000-0000-00000000000c');
-select t.as_user('cccccccc-0000-0000-0000-00000000000c');
-select t.fail('CHAT-01 блокировка: сообщение через API не проходит', format($$insert into public.messages (conversation_id, sender_id, text) values (%L, 'cccccccc-0000-0000-0000-00000000000c', 'Ответь')$$, current_setting('t.conv')), 'NR403');
-select t.fail('CHAT-01 блокировка: новую переписку не открыть', $$select public.get_or_create_conversation('aaaaaaaa-0000-0000-0000-00000000000a')$$, 'NR403');
 
 -- ===== FEED-01: геовыборка и курсор =====
 reset role; select t.as_user(null);
@@ -262,13 +242,10 @@ select public.push_subscribe('https://fcm.googleapis.com/fcm/send/abc123', repea
 reset role;
 select t.ok('SEC-04 тот же браузер после смены аккаунта переходит владельцу', (select user_id = 'cccccccc-0000-0000-0000-00000000000c' and lat is null from public.push_subs where endpoint like '%abc123'));
 
--- ===== SEC-05: удаление аккаунта — сообщения у собеседника остаются =====
+-- ===== SEC-05: удаление аккаунта =====
 delete from auth.users where id = 'cccccccc-0000-0000-0000-00000000000c';
-select t.ok('SEC-05 сообщения удаленного остаются у собеседника', (select count(*) = 3 from public.messages where conversation_id = current_setting('t.conv')::uuid));
-select t.ok('SEC-05 автор показан как удаленный', (select count(*) = 2 from public.messages where conversation_id = current_setting('t.conv')::uuid and sender_id is null));
+select t.ok('SEC-05 профиль удаленного удален', (select count(*) = 0 from public.profiles where id = 'cccccccc-0000-0000-0000-00000000000c'));
 set role authenticated; select t.as_user('aaaaaaaa-0000-0000-0000-00000000000a');
-select t.ok('SEC-05 собеседник видит переписку', (select count(*) = 1 from public.conversations where id = current_setting('t.conv')::uuid));
-select t.fail('SEC-05 удаленному нельзя написать', format($$insert into public.messages (conversation_id, sender_id, text) values (%L, 'aaaaaaaa-0000-0000-0000-00000000000a', 'Ты тут?')$$, current_setting('t.conv')), 'NR403');
 
 -- ===== аналитика и журнал ошибок =====
 reset role; set role anon;
@@ -279,5 +256,7 @@ select t.ok('ANALYTICS лишние свойства не сохраняются
 select t.ok('LOGS email и токены скрыты, адрес без параметров', (select message !~ '@' and message !~ 'eyJ' and route = '/app.html' from public.client_errors limit 1));
 set role authenticated; select t.as_user('eeeeeeee-0000-0000-0000-00000000000e');
 select t.ok('KPI админ получает сводку', (select public.kpi_summary() ? 'dau'));
-select t.fail('MOD v14.9: бан без причины закрыт — только NEAR Shield', $$select public.mod_act('user', 'bbbbbbbb-0000-0000-0000-00000000000b', 'ban', 'тест')$$, 'NR403');
+select public.mod_act('user', 'bbbbbbbb-0000-0000-0000-00000000000b', 'ban', 'тест');
 reset role;
+select t.ok('MOD админ банит, действие в журнале', (select banned from public.profiles where id = 'bbbbbbbb-0000-0000-0000-00000000000b')
+  and (select count(*) >= 1 from public.mod_actions where action = 'ban'));

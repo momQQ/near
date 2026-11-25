@@ -1970,423 +1970,439 @@ revoke execute on function public.push_fire(), public.ai_fire(), public.media_ch
 
 -- Готово ✅ v12
 
--- =====================================================================
---  v14.9 NEAR Shield: единая серверная безопасность
---  (сессии, санкции, риск, репутация, NEAR Clean, встречи, общие чаты)
---  Блок идемпотентный: повторный запуск ничего не ломает.
--- =====================================================================
 
--- ---------- 0. Настройки Shield (пороги и веса — стартовые для пилота) ----------
-alter table public.app_settings add column if not exists shield jsonb not null default '{}'::jsonb;
-update public.app_settings set shield = '{
-  "enforce_sessions": true, "admin_mfa": true, "video": true, "dm": false,
-  "meetings_pilot_only": true, "captcha_enforced": false, "formula": "rep-1",
-  "risk": {"captcha": 25, "limit": 50, "hold": 75, "hold_hours": 24, "unconfirmed_days": 7},
-  "weights": {"evasion": 35, "mass_reg": 20, "violation": 20, "suspicious": 12},
-  "rep_penalty": {"warning": 5, "restricted": 15, "ban": 30}
-}'::jsonb || shield where id = 1;
--- лимиты по ТЗ: 10 сообщений в минуту, 3 публикации за 10 минут (меняются в app_settings.limits)
-update public.app_settings set limits = limits || '{
-  "post": [3, 12, "10 minutes"], "chat": [10, 40, "1 minute"], "review": [20, 60, "1 day"],
-  "nick": [10, 40, "1 hour"], "challenge": [5, 20, "1 hour"], "appeal": [5, 10, "1 day"]
-}'::jsonb where id = 1 and not (limits ? 'chat');
+-- =====================================================
+--  Миграция v14 (этап 1 из ТЗ v14.4). Для базы, где уже стоит v12 (schema.sql уже включает этот блок).
+--  Запуск: Supabase → SQL Editor → вставить файл целиком → Run. Скрипт идемпотентный.
+--
+--  Что внутри:
+--   02 — исправления v12: лента (SOS, "Рядом", снимок "Для вас"), карта (фильтры до лимита), 5 мест (блокировка),
+--        медиа только при включенной серверной проверке;
+--   04 — никнейм вместо имени, фамилии и пола; приватный возрастной допуск; личные чаты с незнакомыми — только при допуске;
+--   05 — NEAR Clean: маскирование мата (первая буква + звездочки), угрозы не публикуются;
+--   08 — дневные лимиты (атомарно, 429 + retry_after, ключ идемпотентности), дубликаты текста.
+--  Старые имя/фамилия/пол удаляются ОТДЕЛЬНО: 014b_purge_legacy.sql (после решения владельца).
+--
+--  Откат (данные не трогаются): вернуть клиент v12 и выполнить 012_v12.sql повторно — он вернет feed_sorted, map_posts2,
+--  places_guard, profile_guard. Новые таблицы (profile_private, nickname_history, rate_counters, rate_idem) можно оставить.
+--  Перед миграцией — резервная копия (SETUP.md, шаг 16).
+-- =====================================================
 
-create or replace function public.shield_cfg() returns jsonb
-language sql stable security definer set search_path = public as $$
-  select coalesce((select shield from public.app_settings where id = 1), '{}'::jsonb) $$;
+-- ---------- 05 / NEAR Clean v1: маскирование мата (тот же алгоритм, что js/clean.src.js) ----------
+-- Первая буква слова остается, каждая следующая графема → "*". Проверка до записи публичного текста.
+-- Оригинал не сохраняется. Словарь версионируется: app_settings.clean_version.
+create or replace function public.nc_is_w(k int) returns boolean language sql immutable as $$
+  select (k between 48 and 57) or (k between 65 and 90) or (k between 97 and 122) or (k between 192 and 591 and k not in (215, 247))
+      or (k between 1024 and 1279) or (k between 768 and 879) or (k between 8203 and 8205) or k in (8288, 65279, 173, 64, 36) $$;
+create or replace function public.nc_is_sep(k int) returns boolean language sql immutable as $$ select k in (46, 45, 95, 42, 39, 8217, 96) $$;
+create or replace function public.nc_is_zw(k int) returns boolean language sql immutable as $$ select (k between 8203 and 8205) or k in (8288, 65279, 173) $$;
+create or replace function public.nc_is_mark(k int) returns boolean language sql immutable as $$ select k between 768 and 879 $$;
 
--- серверный ключ для HMAC идентификаторов (IP, установка). Не читается никем, кроме функций.
-create table if not exists public.shield_secret (
-  id int primary key default 1 check (id = 1),
-  hmac_key text not null
-);
-alter table public.shield_secret enable row level security;
-do $$ begin
-  perform set_config('search_path', 'public, extensions', true);
-  insert into public.shield_secret (id, hmac_key) values (1, encode(gen_random_bytes(32), 'hex')) on conflict do nothing;
-end $$;
-
-create or replace function public.shield_hash(v text) returns text
-language sql stable security definer set search_path = public, extensions as $$
-  select case when v is null or v = '' then null
-    else encode(hmac(v, (select hmac_key from public.shield_secret where id = 1), 'sha256'), 'hex') end $$;
-
--- IP хранится только как HMAC с серверным ключом (раньше — md5 с постоянной солью)
-create or replace function public.req_ip_hash() returns text
-language plpgsql stable security definer set search_path = public as $$
-declare ip text;
+create or replace function public.nc_translit(s text) returns text language plpgsql immutable as $$
+declare out text := ''; i int := 1; n int := char_length(s); g text; c text; L int; hit text;
 begin
-  begin
-    ip := split_part(coalesce(current_setting('request.headers', true)::json->>'x-forwarded-for', ''), ',', 1);
-  exception when others then ip := '';
-  end;
-  if ip is null or trim(ip) = '' then return null; end if;
-  return public.shield_hash('ip:' || trim(ip));
+  while i <= n loop
+    hit := null;
+    foreach L in array array[4, 3, 2] loop
+      g := substr(s, i, L);
+      if char_length(g) = L then
+        hit := case g when 'shch' then 'щ' when 'sch' then 'щ' when 'sh' then 'ш' when 'ch' then 'ч' when 'zh' then 'ж' when 'kh' then 'х'
+          when 'ts' then 'ц' when 'ya' then 'я' when 'yu' then 'ю' when 'yo' then 'е' when 'ye' then 'е' when 'ja' then 'я' when 'ju' then 'ю' when 'jo' then 'е' end;
+        if hit is not null then out := out || hit; i := i + L; exit; end if;
+      end if;
+    end loop;
+    continue when hit is not null;
+    c := substr(s, i, 1);
+    if c = 'y' then out := out || case when out ~ '[аеиоуыэюя]$' then 'й' else 'ы' end;
+    elsif c = 'x' then out := out || 'кс';
+    else out := out || translate(c, 'abcdefghijklmnopqrstuvwz', 'абкдефгхийклмнопкрстуввз');
+    end if;
+    i := i + 1;
+  end loop;
+  return regexp_replace(out, '(.)\1+', '\1', 'g');
 end $$;
 
--- лимиты атомарные: параллельные запросы одного аккаунта/сети ждут друг друга
-create or replace function public.rate_check(p_kind text, p_user_max int, p_ip_max int, p_window interval) returns void
-language plpgsql security definer set search_path = public as $$
-declare uid uuid := auth.uid(); iph text := public.req_ip_hash(); n int; rs int; c jsonb := public.shield_cfg();
+create or replace function public.nc_bad_token(tok text) returns boolean language plpgsql immutable as $$
+declare s text := ''; c text; k int; en text; hg text; kk text;
+  pre constant text := '(вы|за|на|по|от|до|у|раз|рас|при|об|о|пере|под|недо|про|из|ис|без|бес|вз|съ|разъ|объ|подъ|отъ|изъ|въ|взъ)?';
+  ru_full text; ru_strict text;
+  en_re constant text := '^(mother|motha|mutha|holy)?(fuck.*|fuk.*|fck.*|phuck.*|shit.*|bitch.*|cunt.*|asshole.*|bullshit.*|dickhead.*|whore.*|slut.*)$';
+  exc constant text[] := array['shiitake','shitake','shiite','shiites','fukuoka','fukushima','hue','hues','huey','hui','ebay','ebola','ebony','ebook','ebooks','suki','sukiyaki','scunthorpe'];
 begin
-  if uid is null and iph is null then return; end if;
-  if uid is not null then
-    perform pg_advisory_xact_lock(hashtextextended('rate:' || p_kind || ':' || uid::text, 0));
-    -- повышенный риск (50–74 и выше) — лимиты аккаунта вдвое ниже
-    rs := public.risk_score(uid);
-    if rs >= coalesce((c->'risk'->>'limit')::int, 50) then p_user_max := greatest(1, p_user_max / 2); end if;
-    select count(*) into n from public.rate_events where kind = p_kind and user_id = uid and created_at > now() - p_window;
-    if n >= p_user_max then
-      raise exception using errcode = 'NR429', message = 'Слишком часто. Попробуйте немного позже', hint = p_kind;
-    end if;
+  ru_full := '^(' || pre || '(ху[йяеёию].*|пизд.*|еб[аулнышиоеё].*|бля[дт].*|бля|долбоеб.*|мудак.*|мудил.*|мудо[хз].*|мудач.*|гандон.*|пид[оа]р.*|шлюх.*|залуп.*)'
+    || '|сук(а|и|е|у|ой|ою|ам|ами|ах|ин.*)|суч(к|ар|ий|ья|ье).*|котак.*|қотақ.*|сиг(ей|ейин|ем|у|ип).*|шешеңди.*)$';
+  ru_strict := '^(' || pre || '(хуй.*|хуя.*|хуе[втлн].*|хую.*|пизд.*|еба[лнт].*|ебл.*|ебу.*|еби.*|ебн.*|ебош.*|бля[дт].*|бля|долбоеб.*|мудак.*|мудил.*|гандон.*|пид[оа]р.*|шлюх.*|залуп.*)'
+    || '|сук(а|и|е|у|ой|ам|ами|ах|ин.*))$';
+  kk := lower(translate(normalize(tok, NFKC), 'АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯӘҒҚҢӨҰҮҺІ', 'абвгдеёжзийклмнопрстуфхцчшщъыьэюяәғқңөұүһі'));
+  foreach c in array regexp_split_to_array(kk, '') loop
+    k := ascii(c);
+    if not (public.nc_is_zw(k) or public.nc_is_mark(k) or public.nc_is_sep(k)) then s := s || c; end if;
+  end loop;
+  if s = '' or s = any (exc) then return false; end if;
+  if s ~ '[Ѐ-ӿ]' then
+    hg := regexp_replace(translate(translate(s, 'aceopxykmthiunr0346@$', 'асеорхукмтниипгозчбас'), 'ёі', 'еи'), '(.)\1+', '\1', 'g');
+    return hg ~ ru_full;
   end if;
-  if iph is not null and p_ip_max is not null then
-    perform pg_advisory_xact_lock(hashtextextended('rate:' || p_kind || ':' || iph, 0));
-    select count(*) into n from public.rate_events where kind = p_kind and ip_hash = iph and created_at > now() - p_window;
-    if n >= p_ip_max then
-      raise exception using errcode = 'NR429', message = 'Слишком много действий из этой сети. Попробуйте позже', hint = p_kind;
-    end if;
-  end if;
-  insert into public.rate_events (kind, user_id, ip_hash) values (p_kind, uid, iph);
+  if s !~ '[a-zA-Z]' and s !~ '[À-ɏ]' then return false; end if;
+  en := regexp_replace(translate(s, '013457@$', 'oieastas'), '(.)\1+', '\1', 'g');
+  if en = any (exc) then return false; end if;
+  if en ~ en_re then return true; end if;
+  if public.nc_translit(en) ~ ru_strict then return true; end if;
+  hg := regexp_replace(translate(s, 'aceopxykmthiunr0346@$', 'асеорхукмтниипгозчбас'), '(.)\1+', '\1', 'g');
+  return hg !~ '[a-zA-ZÀ-ɏ]' and hg ~ ru_full;
 end $$;
 
--- ---------- 1. Аудит: только добавление, изменить или удалить нельзя ----------
-create table if not exists public.security_audit_log (
-  id           bigserial primary key,
-  actor_id     uuid,
-  action       text not null,
-  target_type  text,
-  target_id    uuid,
-  details      jsonb not null default '{}'::jsonb,
-  created_at   timestamptz not null default now()
-);
-create index if not exists security_audit_target_idx on public.security_audit_log (target_id, created_at desc);
-alter table public.security_audit_log enable row level security;
-create or replace function public.audit_immutable() returns trigger
+-- маскирование: возвращает текст и число найденных слов
+create or replace function public.near_clean_x(t text, out txt text, out hits int) language plpgsql immutable as $$
+declare ch text[]; o text[]; n int; i int; j int; k int; q int; a int; b int; ts int[] := '{}'; te int[] := '{}'; done boolean[]; w text; first boolean; m text; nt int;
+begin
+  hits := 0;
+  if t is null or t = '' then txt := t; return; end if;
+  ch := regexp_split_to_array(t, ''); o := ch; n := array_length(ch, 1);
+  -- слова: буквы/цифры, внутри допускаются разделители
+  i := 1;
+  while i <= n loop
+    if not public.nc_is_w(ascii(ch[i])) then i := i + 1; continue; end if;
+    j := i;
+    loop
+      while j <= n and public.nc_is_w(ascii(ch[j])) loop j := j + 1; end loop;
+      if j <= n and public.nc_is_sep(ascii(ch[j])) then
+        k := j; while k <= n and public.nc_is_sep(ascii(ch[k])) loop k := k + 1; end loop;
+        if k <= n and public.nc_is_w(ascii(ch[k])) then j := k; continue; end if;
+      end if;
+      exit;
+    end loop;
+    ts := ts || i; te := te || j; i := j;
+  end loop;
+  nt := coalesce(array_length(ts, 1), 0);
+  if nt = 0 then txt := t; return; end if;
+  done := array_fill(false, array[nt]);
+  -- "х у й": три и больше одиночных букв через один пробел
+  a := 1;
+  while a <= nt loop
+    b := a;
+    while b + 1 <= nt and te[b] - ts[b] = 1 and te[b + 1] - ts[b + 1] = 1 and ts[b + 1] = te[b] + 1 and ch[te[b]] = ' ' loop b := b + 1; end loop;
+    if b - a >= 2 and te[a] - ts[a] = 1 then
+      w := ''; for q in a..b loop w := w || ch[ts[q]]; end loop;
+      if public.nc_bad_token(w) then
+        for q in a + 1..b loop o[ts[q]] := '*'; end loop;
+        for q in a..b loop done[q] := true; end loop;
+        hits := hits + 1; a := b + 1; continue;
+      end if;
+    end if;
+    a := a + 1;
+  end loop;
+  for q in 1..nt loop
+    continue when done[q];
+    w := array_to_string(ch[ts[q]:te[q] - 1], '');
+    if public.nc_bad_token(w) then
+      hits := hits + 1; m := ch[ts[q]]; first := true;
+      for i in ts[q] + 1..te[q] - 1 loop
+        k := ascii(ch[i]);
+        if public.nc_is_mark(k) then if first then m := m || ch[i]; end if;
+        elsif public.nc_is_zw(k) then null;
+        else m := m || '*'; first := false;
+        end if;
+      end loop;
+      o[ts[q]] := m;
+      for i in ts[q] + 1..te[q] - 1 loop o[i] := ''; end loop;
+    end if;
+  end loop;
+  txt := array_to_string(o, '');
+end $$;
+
+create or replace function public.near_clean(t text) returns text language sql immutable as $$ select (public.near_clean_x(t)).txt $$;
+create or replace function public.near_has_bad(t text) returns boolean language sql immutable as $$ select coalesce((public.near_clean_x(t)).hits, 0) > 0 $$;
+-- старое имя: триггеры posts_mask, comments_mask, messages_mask вызывают mask_bad
+create or replace function public.mask_bad(t text) returns text language sql immutable as $$ select public.near_clean(t) $$;
+
+-- явные угрозы: не маскируются, а не публикуются
+create or replace function public.near_is_threat(t text) returns boolean language sql immutable as $$
+  select coalesce(replace(lower(translate(t, 'АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ', 'абвгдеёжзийклмнопрстуфхцчшщъыьэюя')), 'ё', 'е')
+    ~ '(^|[^а-яa-z])(убью (тебя|вас|его|ее|тебе)|зарежу|пристрелю|задушу (тебя|вас)|урою|тебе конец|найду тебя и|сожгу (тебя|вас|твой|твою|ваш)|i will kill you|i''ll kill you|kill you|өлтіремін)([^а-яa-z]|$)', false) $$;
+
+create or replace function public.mask_text_trigger() returns trigger
 language plpgsql as $$
 begin
-  if current_setting('near.audit_purge', true) = '1' then return old; end if;  -- только плановая очистка по сроку хранения
-  raise exception using errcode = 'NR403', message = 'Журнал аудита нельзя изменять';
+  if tg_op = 'INSERT' or new.text is distinct from old.text then
+    if public.near_is_threat(new.text) then
+      raise exception using errcode = 'NR422', message = 'Угрозы запрещены правилами NEAR. Текст не опубликован', hint = 'threat';
+    end if;
+    new.text := public.near_clean(new.text);
+  end if;
+  return new;
 end $$;
-drop trigger if exists security_audit_immutable on public.security_audit_log;
-create trigger security_audit_immutable before update or delete on public.security_audit_log for each row execute function public.audit_immutable();
-
-create or replace function public.audit(p_action text, p_type text, p_id uuid, p_details jsonb default '{}'::jsonb) returns void
-language sql security definer set search_path = public as $$
-  insert into public.security_audit_log (actor_id, action, target_type, target_id, details)
-  values (auth.uid(), p_action, p_type, p_id, coalesce(p_details, '{}'::jsonb)) $$;
-
--- ---------- 2. Роли и MFA: модератор, старший администратор, аудитор ----------
-alter table public.profiles add column if not exists is_auditor boolean not null default false;
-alter table public.profiles add column if not exists meetings_pilot boolean not null default false;
-
-create or replace function public.jwt_claim(k text) returns text
-language plpgsql stable as $$
+-- описание профиля тоже проходит NEAR Clean
+create or replace function public.mask_bio_trigger() returns trigger
+language plpgsql as $$
 begin
-  return nullif(auth.jwt()->>k, '');
-exception when others then return null;
+  if new.bio is distinct from old.bio and new.bio is not null then
+    if public.near_is_threat(new.bio) then raise exception using errcode = 'NR422', message = 'Угрозы запрещены правилами NEAR'; end if;
+    new.bio := public.near_clean(new.bio);
+  end if;
+  return new;
+end $$;
+drop trigger if exists profiles_bio_mask on public.profiles;
+create trigger profiles_bio_mask before update of bio on public.profiles for each row execute function public.mask_bio_trigger();
+
+-- =====================================================
+--  02 / Исправления v12
+-- =====================================================
+
+-- ---------- лента: закрытый SOS без подъема; "Рядом" — порядок и курсор по одним полям;
+--            "Для вас" — снимок на момент первой страницы (p_snapshot) и курсор (score, id) вместо OFFSET ----------
+drop function if exists public.feed_sorted(double precision, double precision, int, text[], text, text, boolean, timestamptz, double precision, uuid, int, int);
+create or replace function public.feed_sorted(p_lat double precision, p_lng double precision, p_radius int,
+  p_cats text[] default null, p_sort text default 'new', p_period text default null, p_friends boolean default false,
+  p_after_ts timestamptz default null, p_after_dist double precision default null, p_after_id uuid default null,
+  p_offset int default 0, p_limit int default 12, p_after_score double precision default null, p_snapshot timestamptz default null)
+returns table (post_id uuid, sort_ts timestamptz, sort_dist double precision, sort_score double precision, snapshot timestamptz)
+language sql stable set search_path = public, extensions as $$
+  with prm as (select least(coalesce(p_snapshot, now()), now()) t0),
+  me as (select extensions.st_setsrid(extensions.st_makepoint(p_lng, p_lat), 4326)::extensions.geography g),
+  base as (
+    select p.id, p.created_at, p.category, p.is_sos, p.status,
+           extensions.st_distance(p.geog, me.g) dist,
+           -- счетчики на момент снимка: новые лайки не двигают уже показанные страницы
+           (select count(*) from public.comments c where c.post_id = p.id and c.created_at <= prm.t0) nc,
+           (select count(*) from public.likes l where l.post_id = p.id and l.created_at <= prm.t0) nl
+      from public.posts p, me, prm
+     where p.status in ('active','closed')
+       and (p.expires_at is null or p.expires_at > now())
+       and (coalesce(p_sort, 'new') <> 'top' or p.created_at <= prm.t0)
+       and extensions.st_dwithin(p.geog, me.g, least(greatest(coalesce(p_radius, 1000), 100), 50000))
+       and (p_cats is null or p.category = any (p_cats))
+       and (p_period is null or (p_period = 'today' and p.created_at > date_trunc('day', now() at time zone 'Asia/Almaty') at time zone 'Asia/Almaty')
+                             or (p_period = 'week' and p.created_at > now() - interval '7 days'))
+       and (not coalesce(p_friends, false) or public.are_friends(auth.uid(), p.user_id))
+       and not public.is_blocked(auth.uid(), p.user_id)
+  ), scored as (
+    select b.*,
+      -- подъем только у действующего SOS и свежего происшествия; закрытые не поднимаются
+      (case when b.status = 'active' and (b.is_sos or (b.category = 'incident' and b.created_at > prm.t0 - interval '3 hours')) then 1000 else 0 end)
+      + 100 * exp(-greatest(extract(epoch from prm.t0 - b.created_at), 0) / 86400.0)
+      + 40 * exp(-b.dist / 1500.0)
+      + 8 * ln(1 + b.nc) + 3 * ln(1 + b.nl) score
+    from base b, prm
+  )
+  select s.id, s.created_at, s.dist, s.score, (select t0 from prm) from scored s
+   where case coalesce(p_sort, 'new')
+           when 'near' then p_after_dist is null or (s.dist, s.id) > (p_after_dist, coalesce(p_after_id, '00000000-0000-0000-0000-000000000000'::uuid))
+           when 'top' then p_after_score is null or (s.score, s.id) < (p_after_score, coalesce(p_after_id, 'ffffffff-ffff-ffff-ffff-ffffffffffff'::uuid))
+           else p_after_ts is null or (s.created_at, s.id) < (p_after_ts, coalesce(p_after_id, 'ffffffff-ffff-ffff-ffff-ffffffffffff'::uuid)) end
+   order by case when p_sort = 'near' then s.dist end asc,
+            case when p_sort = 'near' then s.id end asc,
+            case when p_sort = 'top' then s.score end desc,
+            case when p_sort = 'top' then s.id end desc,
+            s.created_at desc, s.id desc
+   limit least(greatest(coalesce(p_limit, 12), 1), 12) $$;
+
+-- ---------- карта: период и "друзья" фильтруются ДО лимита (раньше — после 500 строк, редкая категория пропадала) ----------
+create or replace function public.map_posts2(p_w double precision, p_s double precision, p_e double precision, p_n double precision,
+  p_cats text[] default null, p_lat double precision default null, p_lng double precision default null, p_radius int default null,
+  p_period text default null, p_friends boolean default false, p_limit int default 300)
+returns setof public.posts language sql stable set search_path = public, extensions as $$
+  select p.* from public.posts p
+   where p.status in ('active','closed')
+     and (p.expires_at is null or p.expires_at > now())
+     and case when p_radius is not null and p_lat is not null
+           then extensions.st_dwithin(p.geog, extensions.st_setsrid(extensions.st_makepoint(p_lng, p_lat), 4326)::extensions.geography,
+                                      least(greatest(p_radius, 100), 50000))
+           else p.geog operator(extensions.&&) extensions.st_makeenvelope(p_w, p_s, p_e, p_n, 4326)::extensions.geography end
+     and (p_cats is null or p.category = any (p_cats))
+     and (p_period is null or (p_period = 'today' and p.created_at > date_trunc('day', now() at time zone 'Asia/Almaty') at time zone 'Asia/Almaty')
+                           or (p_period = 'week' and p.created_at > now() - interval '7 days'))
+     and (not coalesce(p_friends, false) or public.are_friends(auth.uid(), p.user_id))
+     and not public.is_blocked(auth.uid(), p.user_id)
+   order by p.created_at desc, p.id desc
+   limit least(greatest(coalesce(p_limit, 300), 1), 500) $$;
+
+-- ---------- избранные места: блокировка по автору, 5 мест даже при параллельных вставках ----------
+create or replace function public.places_guard() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  if tg_op = 'INSERT' then
+    perform pg_advisory_xact_lock(hashtextextended('near-places:' || new.user_id::text, 0));
+    if (select count(*) from public.saved_places where user_id = new.user_id) >= 5 then
+      raise exception using errcode = 'NR422', message = 'Не больше 5 избранных мест';
+    end if;
+  end if;
+  new.lat := round(new.lat::numeric, 3); new.lng := round(new.lng::numeric, 3);
+  return new;
 end $$;
 
-create or replace function public.aal_ok() returns boolean
-language sql stable security definer set search_path = public as $$
-  select coalesce((public.shield_cfg()->>'admin_mfa')::boolean, true) = false or public.jwt_claim('aal') = 'aal2' $$;
+-- ---------- медиа: без серверной проверки публикация файлов закрыта ----------
+-- Решение ТЗ v14.4: "Включить серверную проверку; без нее публикация медиа недоступна".
+-- media_requires_check = true (по умолчанию): файл принимается, только если включена ИИ-проверка (ai_moderation).
+alter table public.app_settings add column if not exists media_requires_check boolean not null default true;
+create or replace function public.media_gate() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  if auth.uid() is not null and not public.is_mod()
+     and (select media_requires_check and not ai_moderation from public.app_settings where id = 1) then
+    raise exception using errcode = 'NR503', message = 'Фото и видео временно недоступны: на сервере не включена проверка файлов. Опубликуйте текст без файлов', hint = 'media_check_off';
+  end if;
+  return new;
+end $$;
+drop trigger if exists post_media_gate on public.post_media;
+create trigger post_media_gate before insert on public.post_media for each row execute function public.media_gate();
 
-create or replace function public.is_admin() returns boolean
-language sql stable security definer set search_path = public as $$
-  select coalesce((select is_admin from public.profiles where id = auth.uid()), false) and public.aal_ok() $$;
-create or replace function public.is_mod() returns boolean
-language sql stable security definer set search_path = public as $$
-  select coalesce((select is_admin or is_moderator from public.profiles where id = auth.uid()), false) and public.aal_ok() $$;
-create or replace function public.is_auditor() returns boolean
-language sql stable security definer set search_path = public as $$
-  select coalesce((select is_admin or is_auditor from public.profiles where id = auth.uid()), false) and public.aal_ok() $$;
--- роль есть, но второй фактор не пройден — приложение просит включить 2FA
-create or replace function public.staff_role() returns jsonb
-language sql stable security definer set search_path = public as $$
-  select jsonb_build_object(
-    'admin', coalesce(p.is_admin, false), 'moderator', coalesce(p.is_moderator, false), 'auditor', coalesce(p.is_auditor, false),
-    'mfa_required', coalesce((public.shield_cfg()->>'admin_mfa')::boolean, true), 'aal', coalesce(public.jwt_claim('aal'), 'aal1'))
-  from public.profiles p where p.id = auth.uid() $$;
-
-drop policy if exists "audit read" on public.security_audit_log;
-create policy "audit read" on public.security_audit_log for select using (public.is_auditor());
-
--- ---------- 3. Никнейм вместо имени и пола ----------
+-- =====================================================
+--  04 / Никнейм вместо имени, фамилии и пола; возрастной допуск — приватно
+-- =====================================================
 alter table public.profiles add column if not exists nickname text;
-create unique index if not exists profiles_nickname_uq on public.profiles (lower(nickname)) where nickname is not null;
+alter table public.profiles add column if not exists nickname_norm text;
+alter table public.profiles add column if not exists nickname_changed_at timestamptz;
+create unique index if not exists profiles_nickname_norm_uidx on public.profiles (nickname_norm) where nickname_norm is not null;
+-- пол больше не обязателен и не принимается (колонка удаляется в 014b после перехода всех клиентов)
+alter table public.profiles drop constraint if exists profiles_gender_chk;
 
-create or replace function public.nick_norm(t text) returns text
-language sql immutable as $$ select lower(normalize(btrim(ltrim(btrim(coalesce(t, '')), '@')), NFKC)) $$;
+-- приватные данные аккаунта: видит только сам пользователь (через my_account) и администратор
+create table if not exists public.profile_private (
+  user_id           uuid primary key references public.profiles(id) on delete cascade,
+  age_status        text not null default 'unknown' check (age_status in ('unknown','adult','minor')),
+  age_checked_at    timestamptz,
+  age_checked_by    uuid references public.profiles(id) on delete set null,
+  phone_verified_at timestamptz,
+  updated_at        timestamptz not null default now()
+);
+alter table public.profile_private enable row level security;
+drop policy if exists "private admin" on public.profile_private;
+create policy "private admin" on public.profile_private for select using (public.is_admin());
 
--- ---------- 4. NEAR Clean: мат, скам, ссылки, интим, угрозы (RU/KZ/EN и транслит) ----------
--- Скелеты слова: похожие латинские буквы → кириллица; транслит → кириллица; латиница для английского.
-create or replace function public.clean_fold(s text) returns text
-language sql immutable as $$
-  select regexp_replace(regexp_replace(translate(s, 'ёъь', 'е'), '[^[:alpha:]]', '', 'g'), '(.)\1+', '\1', 'g') $$;
+-- история никнеймов: только модераторы
+create table if not exists public.nickname_history (
+  id          bigserial primary key,
+  user_id     uuid not null references public.profiles(id) on delete cascade,
+  old_nick    text,
+  new_nick    text not null,
+  changed_at  timestamptz not null default now()
+);
+create index if not exists nickname_history_user_idx on public.nickname_history (user_id, changed_at desc);
+alter table public.nickname_history enable row level security;
+drop policy if exists "nick history mod" on public.nickname_history;
+create policy "nick history mod" on public.nickname_history for select using (public.is_mod());
 
-create or replace function public.clean_skels(w text) returns text[]
-language plpgsql immutable as $$
-declare s text := lower(normalize(w, NFKC)); a text; b text; c text;
+alter table public.app_settings add column if not exists age_gate boolean not null default true;
+alter table public.app_settings add column if not exists clean_version text not null default 'clean-1';
+update public.app_settings set clean_version = 'clean-1' where id = 1;
+
+-- нормализация для уникальности: регистр, NFKC, похожие кириллические и латинские буквы — одна форма
+create or replace function public.nick_norm(t text) returns text language sql immutable as $$
+  select translate(lower(translate(normalize(t, NFKC), 'АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯӘҒҚҢӨҰҮҺІ', 'абвгдеёжзийклмнопрстуфхцчшщъыьэюяәғқңөұүһі')),
+                   'аеёорсухкмтнві', 'aeeopcyxkmthbi') $$;
+
+-- проверка никнейма: пустая строка — можно, иначе текст ошибки
+create or replace function public.nick_problem(t text) returns text language plpgsql immutable as $$
+declare n text := coalesce(t, ''); l text := lower(translate(coalesce(t, ''), 'АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ', 'абвгдеёжзийклмнопрстуфхцчшщъыьэюя'));
 begin
-  -- 1) похожие буквы и цифры (xyй, 6ля, n1zда)
-  a := translate(s, 'aceopxykmtbh013469@$', 'асеорхукмтвноизчбба' || 'с');
-  -- 2) транслит (blyad, pizda, khuy, suka)
-  b := replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(s,
-        'sch', 'щ'), 'sh', 'ш'), 'ch', 'ч'), 'zh', 'ж'), 'kh', 'х'), 'ya', 'я'), 'yo', 'е'), 'yu', 'ю'), 'ts', 'ц'), 'ye', 'е');
-  b := translate(b, 'abvgdezijklmnoprstufhcyxw01346@$', 'абвгдезийклмнопрстуфхцыхвоизчбас');
-  b := replace(replace(b, 'ый', 'уй'), 'ыя', 'уя');   -- khyi → хуй
-  -- 3) латиница для английского (f*ck, sh1t)
-  c := translate(s, '013457@$', 'oieastas');
-  return array[public.clean_fold(a), public.clean_fold(b), public.clean_fold(c), public.clean_fold(s)];
+  if char_length(n) < 3 or char_length(n) > 20 then return 'Никнейм: от 3 до 20 символов'; end if;
+  if n !~ '^[A-Za-z0-9_А-Яа-яЁёӘәҒғҚқҢңӨөҰұҮүҺһІі]+$' then return 'Никнейм: только буквы, цифры и _ (без пробелов и ссылок)'; end if;
+  if n !~ '[A-Za-zА-Яа-яЁёӘәҒғҚқҢңӨөҰұҮүҺһІі]' then return 'В никнейме нужна хотя бы одна буква'; end if;
+  if n ~ '[A-Za-z]' and n ~ '[А-Яа-яЁёӘәҒғҚқҢңӨөҰұҮүҺһІі]' then return 'Никнейм: используйте одну раскладку — только латиницу или только кириллицу'; end if;
+  if public.near_has_bad(n) or public.near_has_bad(regexp_replace(n, '[_0-9]+', ' ', 'g')) then return 'Никнейм содержит недопустимые слова. Выберите другой'; end if;
+  if l ~ '(near|admin|moder|support|official|offical|akimat|police|mvd|админ|модер|поддержк|официал|акимат|полици|мвд)' or l ~ '^(112|101|102|103|104)'
+     or public.nick_norm(n) ~ '(near|admin|moder|support|official|akimat|police)' then
+    return 'Такой никнейм похож на официальный аккаунт. Выберите другой';
+  end if;
+  return '';
 end $$;
 
-create or replace function public.clean_word_kind(w text) returns text
-language plpgsql immutable as $$
-declare k text[] := public.clean_skels(w); x text;
+create or replace function public.protect_profile() returns trigger
+language plpgsql security definer set search_path = public as $$
 begin
-  foreach x in array k loop
-    if x ~ '^(на|по|за|от|вы|при|у|до|пере|рас|раз|из|под|о|об|недо|ни|до|е)?(ху[йеяюи]|пизд|пезд|еб[аеилнуоы]|еб$|бля|мудак|мудил|мудозв|пид[оа]р|педик|гандон|шлюх|залуп|манд[ауеы]$|сука$|суки$|суку$|сукой$|сукин|сучк|сучар)'
-       or x ~ '^(motherf|fuck|fuk|fck|shit|bitch|cunt|asshole|dickhead|whore|slut)'
-       or x ~ '^(қотақ|котак|сігейін|сигейин|сігем|сігіп|сігер|амыңды|аныңды)' then
-      return 'mat';
-    end if;
-  end loop;
-  foreach x in array k loop
-    if x ~ '^(дебил|идиот|урод|твар[ьи]|мраз|чмо$|лох$|лохи$|даун$|кретин|ублюд|сволоч|ақымақ|акымак|idiot|moron|retard)' then return 'insult'; end if;
-  end loop;
-  return null;
+  -- auth.uid() пустой у сервера (регистрация, SQL Editor, сервисные функции)
+  if auth.uid() is null or public.is_admin() or coalesce(current_setting('near.system', true), '') = '1' then return new; end if;
+  if tg_op = 'INSERT' then
+    new.is_admin := false; new.is_moderator := false; new.banned := false; new.verified := false;
+    new.nickname := null; new.nickname_norm := null; new.name := 'Новый пользователь';
+    return new;
+  end if;
+  new.is_admin := old.is_admin;
+  new.is_moderator := old.is_moderator;
+  new.banned := old.banned;
+  new.verified := old.verified;
+  new.id := old.id;
+  new.created_at := old.created_at;
+  -- имя на экране = никнейм; меняется только через set_nickname (проверки и лимит 30 дней)
+  new.name := old.name; new.nickname := old.nickname; new.nickname_norm := old.nickname_norm; new.nickname_changed_at := old.nickname_changed_at;
+  if new.show_seen = false then new.last_seen_at := null; end if;
+  return new;
 end $$;
 
--- маска: первая буква, остальные звездочки; знаки препинания вокруг слова сохраняются
-create or replace function public.clean_mask(tok text) returns text
-language plpgsql immutable as $$
-declare m text[];
+-- установка и смена никнейма
+create or replace function public.set_nickname(p_nick text) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare me uuid := auth.uid(); p record; prob text; nn text; nick text := btrim(coalesce(p_nick, '')); wait int;
 begin
-  m := regexp_match(tok, '^([^[:alnum:]@$]*)(.*?)([^[:alnum:]@$]*)$');
-  if m is null or m[2] = '' then return tok; end if;
-  return m[1] || left(m[2], 1) || repeat('*', greatest(char_length(m[2]) - 1, 3)) || m[3];
+  if me is null then raise exception using errcode = 'NR403', message = 'Войдите, чтобы выбрать никнейм'; end if;
+  prob := public.nick_problem(nick);
+  if prob <> '' then raise exception using errcode = 'NR422', message = prob, hint = 'nickname'; end if;
+  nn := public.nick_norm(nick);
+  select * into p from public.profiles where id = me for update;
+  if p.id is null then raise exception using errcode = 'NR404', message = 'Профиль не найден'; end if;
+  if p.nickname is not null and p.nickname_norm <> nn and p.nickname_changed_at > now() - interval '30 days' and not public.is_admin() then
+    wait := ceil(extract(epoch from p.nickname_changed_at + interval '30 days' - now()) / 86400);
+    raise exception using errcode = 'NR429', message = format('Никнейм можно менять раз в 30 дней. Следующая смена через %s дн.', wait), hint = 'retry_after=' || (wait * 86400);
+  end if;
+  if exists (select 1 from public.profiles where nickname_norm = nn and id <> me) then
+    raise exception using errcode = 'NR409', message = 'Этот никнейм уже занят. Попробуйте другой', hint = 'nickname_taken';
+  end if;
+  perform set_config('near.system', '1', true);
+  -- вместе с никнеймом стираются старые имя/фамилия и пол
+  update public.profiles set nickname = nick, nickname_norm = nn, name = nick,
+         nickname_changed_at = case when p.nickname_norm is distinct from nn then now() else p.nickname_changed_at end, updated_at = now()
+   where id = me;
+  begin execute 'update public.profiles set gender = null where id = $1' using me; exception when undefined_column then null; end;
+  perform set_config('near.system', '', true);
+  if p.nickname is distinct from nick then insert into public.nickname_history (user_id, old_nick, new_nick) values (me, p.nickname, nick); end if;
+  return jsonb_build_object('nickname', nick);
+exception when unique_violation then
+  raise exception using errcode = 'NR409', message = 'Этот никнейм уже занят. Попробуйте другой', hint = 'nickname_taken';
 end $$;
 
-create or replace function public.clean_text(p text, p_ctx text default 'text') returns jsonb
+-- свободен ли никнейм (для подсказки в форме; окончательно проверяет set_nickname)
+create or replace function public.nickname_check(p_nick text) returns jsonb
 language plpgsql stable security definer set search_path = public as $$
-declare
-  src text := coalesce(p, ''); n text; outp text := ''; tok text; run text; joined text;
-  reasons text[] := '{}'; verdict text := 'allow'; masked boolean := false; kind text; u text; host text;
-  warn boolean;
+declare prob text := public.nick_problem(btrim(coalesce(p_nick, '')));
 begin
-  if src = '' then return jsonb_build_object('text', src, 'verdict', 'allow', 'reasons', '[]'::jsonb, 'masked', false); end if;
-  n := lower(normalize(src, NFKC));
-  -- добросовестное предупреждение о мошенниках не блокируем ("никому не сообщайте код из SMS")
-  warn := n ~ '(не\s+(сообщ|говор|перед|дава|отправл|скидыв)|никому\s+не|осторожн|мошенник|развод|аферист|алаяқ|абайла|scam|do not share|never share)';
-
-  -- 1) мат, разбитый пробелами или точками: "б л я", "п.и.з.д.а"
-  for run in select m[1] from regexp_matches(src, '((?:(?<![[:alnum:]@$])[[:alnum:]@$][ ._*-]+){2,}[[:alnum:]@$](?![[:alnum:]@$]))', 'g') as m loop
-    joined := regexp_replace(run, '[ ._*-]', '', 'g');
-    if public.clean_word_kind(joined) = 'mat' then
-      src := replace(src, run, left(run, 1) || repeat('*', greatest(char_length(joined) - 1, 3)));
-      masked := true;
-    end if;
-  end loop;
-
-  -- 2) слова по одному, пробелы и переносы сохраняются
-  for tok in select m[1] from regexp_matches(src, '(\s+|\S+)', 'g') as m loop
-    if tok ~ '^\s+$' then outp := outp || tok; continue; end if;
-    kind := public.clean_word_kind(tok);
-    if kind = 'mat' then
-      outp := outp || public.clean_mask(tok); masked := true;
-    else
-      if kind = 'insult' and not ('insult' = any (reasons)) then reasons := array_append(reasons, 'insult'); end if;
-      outp := outp || tok;
-    end if;
-  end loop;
-
-  -- 3) интим и поиск сексуального партнера
-  if n ~ '((ищу|познаком|нужн[аы]?|кто\s+хочет).{0,40}(секс|интим|на\s+ночь|без\s+обязательств|вирт|эскорт|для\s+встреч\s+18)|интим[- ]?услуг|эскорт|проститут|nudes|hookup|sex\s*partner|onlyfans|жыныстық\s+қатынас)' then
-    reasons := array_append(reasons, 'sex');
+  if prob <> '' then return jsonb_build_object('ok', false, 'error', prob); end if;
+  if exists (select 1 from public.profiles where nickname_norm = public.nick_norm(btrim(p_nick)) and id is distinct from auth.uid()) then
+    return jsonb_build_object('ok', false, 'error', 'Этот никнейм уже занят');
   end if;
-  -- 4) эксплуатация несовершеннолетних — закрытая приоритетная очередь
-  if n ~ '(детск\w*\s+порн|child\s*porn|\mцп\M|школьниц\w*\s+(фото|интим|18))' then reasons := array_append(reasons, 'minors'); end if;
-  -- 5) угрозы — немедленная проверка
-  if n ~ '(\mубью\M|убить\s+тебя|зарежу|прибью|взорву|сожгу\s+(тебя|дом|машин)|найду\s+тебя\s+и|тебе\s+конец|өлтіремін|i\s+will\s+kill|i''ll\s+kill)' then reasons := array_append(reasons, 'threat'); end if;
-  -- 6) запрос данных карт, кодов из SMS, паролей
-  if not warn and n ~ '((номер|данные|реквизит|цифр|фото)\w*\s.{0,20}(карт|card)|\mcvv2?\M|\mcvc\M|срок\s+действия\s+карт|(код|пароль)\w*.{0,20}(смс|sms|сообщени)|(смс|sms)\W{0,3}код|(скаж|продикт|пришл|отправ|скин|назов)\w*.{0,15}(код|пароль)|картаның\s+нөмір|card\s*number|sms\s*code|one.?time\s*code)' then
-    reasons := array_append(reasons, 'scam_request');
-  end if;
-  -- 7) ссылки: без запросов к адресам, только разбор строки
-  for u in select m[1] from regexp_matches(n, '((?:https?://)?(?:[a-z0-9-]+\.)+[a-z][a-z0-9-]{1,24}(?:/[^\s]*)?)', 'g') as m loop
-    host := split_part(regexp_replace(u, '^https?://', ''), '/', 1);
-    if host ~ '^[0-9.]+$' or host like '%@%' or host ~ '(^|\.)xn--'
-       or host ~ '^(bit\.ly|tinyurl\.com|cutt\.ly|clck\.ru|t\.ly|goo\.su|is\.gd|rb\.gy|shorturl\.at|tiny\.cc|u\.to|vk\.cc)$'
-       or host ~ '\.(xyz|top|click|zip|mov|icu|cfd|sbs|rest|gq|tk|ml|cf|buzz|cam)$'
-       or (host ~ 'kaspi' and host !~ '(^|\.)kaspi\.kz$') or (host ~ 'halyk' and host !~ '(^|\.)halykbank\.kz$')
-       or (host ~ 'egov' and host !~ '(^|\.)egov\.kz$') or (host ~ '(olx|kolesa|krisha)' and host !~ '(^|\.)(olx|kolesa|krisha)\.kz$') then
-      if not ('bad_link' = any (reasons)) then reasons := array_append(reasons, 'bad_link'); end if;
-    end if;
-  end loop;
-  if n ~ '(t\.me|telegram|whatsapp|wa\.me).{0,60}(выигр|приз|розыгрыш|бесплатн|заработ|инвест)' and not warn then reasons := array_append(reasons, 'bad_link'); end if;
-
-  verdict := case
-    when 'minors' = any (reasons) or 'threat' = any (reasons) then 'hold'
-    when 'sex' = any (reasons) or 'scam_request' = any (reasons) or 'bad_link' = any (reasons) then 'block'
-    when 'insult' = any (reasons) then 'review'
-    else 'allow' end;
-  -- никнейм: мат и оскорбления не допускаются совсем
-  if p_ctx = 'nickname' and (masked or 'insult' = any (reasons)) then verdict := 'block'; reasons := array_append(reasons, 'nick_bad'); end if;
-  return jsonb_build_object('text', outp, 'verdict', verdict, 'reasons', to_jsonb(reasons), 'masked', masked);
+  return jsonb_build_object('ok', true);
 end $$;
 
-create or replace function public.clean_block_message(r jsonb) returns text
-language sql immutable as $$
-  select case
-    when r->'reasons' ? 'nick_bad' then 'Такой никнейм нельзя использовать'
-    when r->'reasons' ? 'sex' then 'Поиск интимных знакомств и интимный контент в NEAR запрещены'
-    when r->'reasons' ? 'scam_request' then 'Нельзя просить данные карт, коды из SMS и пароли'
-    when r->'reasons' ? 'bad_link' then 'Ссылка выглядит небезопасной. Уберите ее или дайте официальный адрес'
-    when r->'reasons' ? 'duplicate' then 'Такое же сообщение уже отправлено. Подождите минуту'
-    else 'Текст не прошел проверку NEAR Clean' end $$;
-
--- очередь модерации: то, что требует решения человека
-create table if not exists public.moderation_queue (
-  id            uuid primary key default gen_random_uuid(),
-  content_type  text not null,
-  content_id    uuid,
-  user_id       uuid references public.profiles(id) on delete cascade,
-  reason        text not null,
-  priority      int not null default 3 check (priority between 1 and 5),
-  restricted    boolean not null default false,   -- закрытая очередь: только старший администратор
-  status        text not null default 'open' check (status in ('open','decided')),
-  decision      text,
-  decided_by    uuid references public.profiles(id) on delete set null,
-  decided_at    timestamptz,
-  created_at    timestamptz not null default now(),
-  unique (content_type, content_id, reason)
-);
-create index if not exists moderation_queue_open_idx on public.moderation_queue (status, priority, created_at);
-alter table public.moderation_queue enable row level security;
-drop policy if exists "queue read" on public.moderation_queue;
-create policy "queue read" on public.moderation_queue for select using (public.is_admin() or (public.is_mod() and not restricted));
-
-create or replace function public.queue_add(p_type text, p_id uuid, p_user uuid, p_reason text) returns void
-language sql security definer set search_path = public as $$
-  insert into public.moderation_queue (content_type, content_id, user_id, reason, priority, restricted)
-  values (p_type, p_id, p_user, p_reason,
-          case when p_reason in ('minors','threat','intimate') then 1 when p_reason in ('evasion','risk_hold') then 2 else 3 end,
-          p_reason in ('minors','intimate'))
-  on conflict (content_type, content_id, reason) do update set status = 'open', created_at = now() $$;
-
--- повтор одного и того же текста в течение 60 секунд — отказ
-create table if not exists public.clean_recent (
-  user_id uuid not null, h text not null, created_at timestamptz not null default now(), primary key (user_id, h)
-);
-alter table public.clean_recent enable row level security;
-
--- общий триггер: текст проверяется и маскируется ДО записи
-create or replace function public.clean_guard() returns trigger
-language plpgsql security definer set search_path = public as $$
-declare col text := tg_argv[0]; ctx text := coalesce(tg_argv[1], tg_table_name); val text; r jsonb; hh text; uid uuid := auth.uid();
-begin
-  val := to_jsonb(new)->>col;
-  if val is null or val = '' then return new; end if;
-  if tg_op = 'UPDATE' and val is not distinct from (to_jsonb(old)->>col) then return new; end if;
-  if current_setting('near.system', true) = '1' and uid is null then return new; end if;
-  r := public.clean_text(val, ctx);
-  if r->>'verdict' = 'block' then
-    raise exception using errcode = 'NR422', message = public.clean_block_message(r), hint = 'clean';
-  end if;
-  -- дубль за 60 секунд (кроме никнейма и описания профиля)
-  if uid is not null and ctx not in ('nickname','profile') and tg_op = 'INSERT' then
-    hh := md5(regexp_replace(lower(val), '\s+', ' ', 'g'));
-    if exists (select 1 from public.clean_recent c where c.user_id = uid and c.h = hh and c.created_at > now() - interval '60 seconds') then
-      raise exception using errcode = 'NR429', message = 'Такое же сообщение уже отправлено. Подождите минуту', hint = 'duplicate';
-    end if;
-    insert into public.clean_recent (user_id, h) values (uid, hh) on conflict (user_id, h) do update set created_at = now();
-  end if;
-  new := jsonb_populate_record(new, jsonb_build_object(col, r->>'text'));
-  if r->>'verdict' = 'hold' then
-    -- угрозы и эксплуатация: сразу скрыть и отправить в приоритетную очередь
-    if tg_table_name = 'posts' then new := jsonb_populate_record(new, '{"status":"draft"}');   -- видна только автору до решения
-    elsif tg_table_name = 'chat_messages' then new := jsonb_populate_record(new, '{"mod_status":"pending"}');
-    elsif tg_table_name = 'comments' then new := jsonb_populate_record(new, '{"held":true}');
-    elsif tg_table_name = 'user_reviews' then new := jsonb_populate_record(new, '{"status":"pending"}');
-    end if;
-    perform public.queue_add(tg_table_name, (to_jsonb(new)->>'id')::uuid, uid,
-      case when r->'reasons' ? 'minors' then 'minors' else 'threat' end);
-  elsif r->>'verdict' = 'review' and tg_table_name <> 'profiles' then
-    perform public.queue_add(tg_table_name, (to_jsonb(new)->>'id')::uuid, uid, 'insult');
-  end if;
-  return new;
-end $$;
-
-alter table public.comments add column if not exists held boolean not null default false;
-drop policy if exists "comments read" on public.comments;
-create policy "comments read" on public.comments for select using (
-  public.can_see_post(post_id) and (not held or user_id = auth.uid() or public.is_mod()) and not public.is_blocked(auth.uid(), user_id));
-
-do $$ declare r record; begin
-  for r in select * from (values ('posts','text','post'), ('comments','text','comment'), ('profiles','name','profile'), ('profiles','bio','profile')) v(t, c, x) loop
-    execute format('drop trigger if exists %I on public.%I', r.t || '_clean_' || r.c, r.t);
-    execute format('create trigger %I before insert or update of %I on public.%I for each row execute function public.clean_guard(%L, %L)',
-                   r.t || '_clean_' || r.c, r.c, r.t, r.c, r.x);
-  end loop;
-end $$;
-
--- никнейм: нормализация, формат, запрет мата, уникальность (без учета регистра)
-create or replace function public.nick_guard() returns trigger
-language plpgsql security definer set search_path = public as $$
-declare v text; r jsonb;
-begin
-  if new.nickname is null then return new; end if;
-  if tg_op = 'UPDATE' and new.nickname is not distinct from old.nickname then return new; end if;
-  v := public.nick_norm(new.nickname);
-  if v !~ '^[a-z0-9_.]{3,20}$' or v ~ '^[._]|[._]$|\.\.' then
-    raise exception using errcode = 'NR422', message = 'Никнейм: 3–20 символов, латинские буквы, цифры, точка и _', hint = 'nick_format';
-  end if;
-  if v ~ '^(admin|administrator|near|nearapp|support|moderator|modera|root|system|official|help|security)' then
-    raise exception using errcode = 'NR422', message = 'Этот никнейм зарезервирован', hint = 'nick_reserved';
-  end if;
-  r := public.clean_text(v, 'nickname');
-  if r->>'verdict' = 'block' then raise exception using errcode = 'NR422', message = 'Такой никнейм нельзя использовать', hint = 'nick_bad'; end if;
-  if exists (select 1 from public.profiles where lower(nickname) = v and id <> new.id) then
-    raise exception using errcode = 'NR409', message = 'Никнейм уже занят', hint = 'nick_taken';
-  end if;
-  if tg_op = 'UPDATE' and auth.uid() is not null then perform public.rate('nick'); end if;
-  new.nickname := v;
-  return new;
-end $$;
-drop trigger if exists profiles_nick on public.profiles;
-create trigger profiles_nick before insert or update of nickname on public.profiles for each row execute function public.nick_guard();
-
-create or replace function public.nickname_available(p text) returns jsonb
-language plpgsql security definer set search_path = public as $$
-declare v text := public.nick_norm(p);
-begin
-  perform public.rate('nick');
-  if v !~ '^[a-z0-9_.]{3,20}$' or v ~ '^[._]|[._]$|\.\.' then return jsonb_build_object('ok', false, 'reason', 'Никнейм: 3–20 символов, латинские буквы, цифры, точка и _'); end if;
-  if v ~ '^(admin|administrator|near|nearapp|support|moderator|modera|root|system|official|help|security)' then return jsonb_build_object('ok', false, 'reason', 'Этот никнейм зарезервирован'); end if;
-  if public.clean_text(v, 'nickname')->>'verdict' = 'block' then return jsonb_build_object('ok', false, 'reason', 'Такой никнейм нельзя использовать'); end if;
-  if exists (select 1 from public.profiles where lower(nickname) = v) then return jsonb_build_object('ok', false, 'reason', 'Никнейм уже занят'); end if;
-  return jsonb_build_object('ok', true, 'nickname', v);
-end $$;
-
--- регистрация: никнейм, почта, пароль, согласие. Имя и пол не обязательны.
+-- регистрация: имя, фамилия и пол из метаданных (в том числе Google) больше не переносятся
 create or replace function public.handle_new_user()
 returns trigger language plpgsql security definer set search_path = public as $$
-declare nick text := nullif(public.nick_norm(new.raw_user_meta_data->>'nickname'), '');
+declare nick text := btrim(coalesce(new.raw_user_meta_data->>'nickname', ''));
 begin
-  insert into public.profiles (id, district, name, nickname)
-  values (new.id, nullif(new.raw_user_meta_data->>'district', ''),
-          left(coalesce(nullif(new.raw_user_meta_data->>'name', ''), nullif(new.raw_user_meta_data->>'full_name', ''), nick, split_part(new.email, '@', 1)), 60),
-          nick)
+  insert into public.profiles (id, district, name)
+  values (new.id, nullif(new.raw_user_meta_data->>'district', ''), 'Новый пользователь')
   on conflict (id) do nothing;
-  update public.profiles set
-    gender = case when new.raw_user_meta_data->>'gender' in ('m','f') then new.raw_user_meta_data->>'gender' end,
-    verified = (new.email_confirmed_at is not null or coalesce(new.raw_app_meta_data->>'provider', '') = 'google'),
-    accepted_rules_at = case when new.raw_user_meta_data->>'accepted_rules' = 'true' then now() end
-  where id = new.id;
+  begin
+    update public.profiles set verified = (new.email_confirmed_at is not null or coalesce(new.raw_app_meta_data->>'provider', '') = 'google') where id = new.id;
+    if new.raw_user_meta_data->>'accepted_rules' = 'true' then update public.profiles set accepted_rules_at = now() where id = new.id; end if;
+    -- никнейм из формы регистрации: если подходит и свободен; иначе приложение попросит выбрать после входа
+    if nick <> '' and public.nick_problem(nick) = '' and not exists (select 1 from public.profiles where nickname_norm = public.nick_norm(nick)) then
+      update public.profiles set nickname = nick, nickname_norm = public.nick_norm(nick), name = nick, nickname_changed_at = now() where id = new.id;
+    end if;
+  exception when undefined_column or unique_violation then null;
+  end;
+  insert into public.profile_private (user_id) values (new.id) on conflict do nothing;
   return new;
 end $$;
 
--- для публикаций и чатов нужен никнейм и согласие с правилами (пол больше не требуется)
+create or replace function public.ensure_profile() returns void
+language plpgsql security definer set search_path = public as $$
+begin
+  if auth.uid() is null then return; end if;
+  insert into public.profiles (id, name) select u.id, 'Новый пользователь' from auth.users u where u.id = auth.uid() on conflict (id) do nothing;
+  insert into public.profile_private (user_id) select auth.uid() where exists (select 1 from public.profiles where id = auth.uid()) on conflict do nothing;
+end $$;
+
+-- публиковать и писать можно с никнеймом и согласием с правилами (пол больше не нужен)
 create or replace function public.profile_guard() returns trigger
 language plpgsql security definer set search_path = public as $$
 begin
@@ -2396,1822 +2412,2413 @@ begin
   return new;
 end $$;
 
--- ---------- 5. Устройства и сессии: одна активная сессия на аккаунт ----------
-create table if not exists public.user_devices (
-  user_id            uuid not null references public.profiles(id) on delete cascade,
-  installation_hash  text not null,
-  label              text,
-  first_seen         timestamptz not null default now(),
-  last_seen          timestamptz not null default now(),
-  status             text not null default 'ok' check (status in ('ok','restricted')),
-  primary key (user_id, installation_hash)
-);
-create index if not exists user_devices_hash_idx on public.user_devices (installation_hash);
-
-create table if not exists public.user_sessions (
-  session_id         uuid primary key,                       -- claim session_id из проверенного JWT, не от приложения
-  user_id            uuid not null references public.profiles(id) on delete cascade,
-  installation_hash  text,
-  device_label       text,
-  ip_hash            text,
-  status             text not null default 'pending' check (status in ('pending','active','revoked')),
-  created_at         timestamptz not null default now(),
-  activated_at       timestamptz,
-  last_seen          timestamptz not null default now(),
-  revoked_at         timestamptz,
-  revoke_reason      text,
-  reauth_at          timestamptz
-);
--- ровно одна активная сессия, даже при параллельных запросах
-create unique index if not exists user_sessions_one_active on public.user_sessions (user_id) where status = 'active';
-create index if not exists user_sessions_user_idx on public.user_sessions (user_id, created_at desc);
-
-create table if not exists public.session_challenges (
-  id               uuid primary key default gen_random_uuid(),
-  user_id          uuid not null references public.profiles(id) on delete cascade,
-  session_id       uuid not null,
-  old_session_id   uuid,
-  code_hash        text not null,
-  attempts         int not null default 0,
-  sends            int not null default 1,
-  created_at       timestamptz not null default now(),
-  expires_at       timestamptz not null default now() + interval '10 minutes',
-  resend_at        timestamptz not null default now() + interval '60 seconds',
-  consumed_at      timestamptz,
-  cancelled_at     timestamptz
-);
-create index if not exists session_challenges_user_idx on public.session_challenges (user_id, created_at desc);
-
-create table if not exists public.device_restrictions (
-  installation_hash  text primary key,
-  reason             text not null,
-  expires_at         timestamptz,
-  review_status      text not null default 'pending' check (review_status in ('pending','confirmed','rejected')),
-  created_by         uuid references public.profiles(id) on delete set null,
-  created_at         timestamptz not null default now()
-);
-
-alter table public.user_devices enable row level security;
-alter table public.user_sessions enable row level security;
-alter table public.session_challenges enable row level security;
-alter table public.device_restrictions enable row level security;
-drop policy if exists "devices own" on public.user_devices;
-drop policy if exists "sessions own" on public.user_sessions;
-create policy "devices own" on public.user_devices for select using (auth.uid() = user_id or public.is_mod());
-create policy "sessions own" on public.user_sessions for select using (auth.uid() = user_id or public.is_mod());
-
-create or replace function public.jwt_sid() returns uuid
-language plpgsql stable as $$
-begin
-  return nullif(public.jwt_claim('session_id'), '')::uuid;
-exception when others then return null;
-end $$;
-
--- актуальная сессия: токен не просто действителен, а принадлежит единственной активной сессии
-create or replace function public.session_ok() returns boolean
+-- возрастной допуск: по умолчанию неизвестен; рискованные функции (личные чаты с незнакомыми, встречи) — только "adult"
+create or replace function public.age_ok(u uuid) returns boolean
 language sql stable security definer set search_path = public as $$
-  select auth.uid() is not null and (
-    coalesce((public.shield_cfg()->>'enforce_sessions')::boolean, true) = false
-    or exists (select 1 from public.user_sessions s where s.session_id = public.jwt_sid() and s.user_id = auth.uid() and s.status = 'active')) $$;
+  select not coalesce((select age_gate from public.app_settings where id = 1), true)
+      or exists (select 1 from public.profile_private where user_id = u and age_status = 'adult') $$;
 
--- ---------- 6. Санкции (баны), состояние аккаунта ----------
-create sequence if not exists public.ban_decision_seq start 241;
-create table if not exists public.user_bans (
-  id             uuid primary key default gen_random_uuid(),
-  decision_no    text not null unique default 'NS-' || lpad(nextval('public.ban_decision_seq')::text, 5, '0'),
-  user_id        uuid not null references public.profiles(id) on delete cascade,
-  kind           text not null check (kind in ('warning','restricted','ban')),
-  scope          text not null default 'global' check (scope in ('global','chat','meeting')),
-  scope_id       uuid,
-  rule           text not null,
-  reason         text not null check (char_length(reason) between 5 and 500),
-  evidence       text check (evidence is null or char_length(evidence) <= 2000),
-  starts_at      timestamptz not null default now(),
-  expires_at     timestamptz,                                   -- null у бана = бессрочно
-  status         text not null default 'active' check (status in ('active','revoked')),
-  moderator_id   uuid references public.profiles(id) on delete set null,
-  approved_by    uuid references public.profiles(id) on delete set null,
-  source_key     text unique,                                   -- повтор того же решения не создает второй бан
-  linked_from    uuid references public.user_bans(id) on delete set null,
-  created_at     timestamptz not null default now(),
-  revoked_at     timestamptz,
-  revoked_by     uuid references public.profiles(id) on delete set null,
-  revoke_reason  text,
-  check (kind <> 'warning' or expires_at is null),
-  check (expires_at is null or expires_at > starts_at)
-);
-create index if not exists user_bans_user_idx on public.user_bans (user_id, status, expires_at);
-alter table public.user_bans enable row level security;
-drop policy if exists "bans read" on public.user_bans;
-create policy "bans read" on public.user_bans for select using (auth.uid() = user_id or public.is_mod());
-
--- матрица пилота: правило → сроки (в часах; null = бессрочно; 0 = предупреждение)
-create or replace function public.ban_rules() returns jsonb
-language sql immutable as $$ select '{
-  "minor":      {"title": "Незначительное нарушение", "first": 0,    "repeat": 24},
-  "spam":       {"title": "Спам",                    "first": 24,   "repeat": 168, "repeat_max": 720},
-  "ads":        {"title": "Массовая реклама",        "first": 24,   "repeat": 720},
-  "insult":     {"title": "Оскорбления",             "first": 0,    "repeat": 168, "repeat_max": 720},
-  "harassment": {"title": "Домогательства",          "first": 720,  "repeat": null},
-  "intimate":   {"title": "Интимный контент",        "first": 720,  "repeat": null},
-  "threat":     {"title": "Угрозы",                  "first": 720,  "repeat": null},
-  "scam":       {"title": "Подтвержденный скам",     "first": null, "repeat": null},
-  "evasion":    {"title": "Подтвержденный обход бана","first": 720, "repeat": null},
-  "boosting":   {"title": "Накрутка рейтинга",       "first": 24,   "repeat": 720}
-}'::jsonb $$;
-
--- самая строгая действующая санкция; срок проверяется при каждом запросе (без cron)
-create or replace function public.account_state(p_user uuid default null) returns jsonb
-language plpgsql stable security definer set search_path = public as $$
-declare uid uuid := coalesce(p_user, auth.uid()); b record; ap record;
-begin
-  if uid is null then return jsonb_build_object('state', 'guest', 'server_now', now()); end if;
-  if p_user is not null and p_user <> auth.uid() and not public.is_mod() and auth.uid() is not null then
-    raise exception using errcode = 'NR403', message = 'Нет доступа';
-  end if;
-  select * into b from public.user_bans
-   where user_id = uid and status = 'active' and scope = 'global' and kind in ('restricted','ban')
-     and starts_at <= now() and (expires_at is null or expires_at > now())
-   order by (kind = 'ban') desc, (expires_at is null) desc, expires_at desc limit 1;
-  if b.id is null then return jsonb_build_object('state', 'active', 'server_now', now()); end if;
-  select status, created_at into ap from public.ban_appeals where ban_id = b.id order by created_at desc limit 1;
-  return jsonb_build_object(
-    'state', case when b.kind = 'restricted' then 'restricted' when b.expires_at is null then 'banned_permanent' else 'banned_until' end,
-    'ban_id', b.id, 'decision_no', b.decision_no, 'rule', b.rule, 'rule_title', public.ban_rules()->b.rule->>'title',
-    'reason', b.reason, 'starts_at', b.starts_at, 'expires_at', b.expires_at, 'server_now', now(),
-    'appeal', ap.status);
-end $$;
-
--- 0 — можно все, 1 — ограничение (только чтение), 2 — бан
-create or replace function public.ban_level(p_user uuid default null) returns int
+create or replace function public.my_account() returns jsonb
 language sql stable security definer set search_path = public as $$
-  select coalesce(max(case kind when 'ban' then 2 else 1 end), 0) from public.user_bans
-   where user_id = coalesce(p_user, auth.uid()) and status = 'active' and scope = 'global' and kind in ('restricted','ban')
-     and starts_at <= now() and (expires_at is null or expires_at > now()) $$;
+  select case when auth.uid() is null then null else jsonb_build_object(
+    'age_status', coalesce(pp.age_status, 'unknown'),
+    'age_ok', public.age_ok(auth.uid()),
+    'phone_verified', pp.phone_verified_at is not null,
+    'nickname_next_change', case when p.nickname_changed_at > now() - interval '30 days' then p.nickname_changed_at + interval '30 days' end,
+    'clean_version', (select clean_version from public.app_settings where id = 1),
+    'media_ok', (select not media_requires_check or ai_moderation from public.app_settings where id = 1))
+  end
+  from public.profiles p left join public.profile_private pp on pp.user_id = p.id where p.id = auth.uid() $$;
 
--- Главный guard: используется всеми правилами записи (RLS, RPC, Storage).
--- true = писать нельзя: нет актуальной сессии, ограничение или бан.
-create or replace function public.is_banned() returns boolean
-language sql stable security definer set search_path = public as $$
-  select auth.uid() is not null and (not public.session_ok() or public.ban_level() > 0) $$;
--- чтение закрытых данных: актуальная сессия и нет бана
-create or replace function public.shield_ok() returns boolean
-language sql stable security definer set search_path = public as $$
-  select public.session_ok() and public.ban_level() < 2 $$;
-
-create or replace function public.shield_require(p_action text default 'write') returns void
-language plpgsql security definer set search_path = public as $$
-declare lvl int;
-begin
-  if auth.uid() is null then raise exception using errcode = 'NR401', message = 'Войдите в NEAR', hint = 'auth'; end if;
-  if not public.session_ok() then
-    raise exception using errcode = 'NR401', message = 'Вы вышли из аккаунта: выполнен вход на другом устройстве', hint = 'session_revoked';
-  end if;
-  lvl := public.ban_level();
-  if lvl = 2 then raise exception using errcode = 'NR403', message = 'Аккаунт заблокирован', hint = 'banned'; end if;
-  if lvl = 1 and p_action <> 'read' then raise exception using errcode = 'NR403', message = 'Действие ограничено решением модератора', hint = 'restricted'; end if;
-  if p_action in ('risky','meeting') and public.risk_hold_active() then
-    raise exception using errcode = 'NR403', message = 'Действие временно ограничено: аккаунт на проверке', hint = 'risk_hold';
-  end if;
-end $$;
-
--- старое поле profiles.banned остается для отчетов и совместимости, источник правды — user_bans
-create or replace function public.ban_sync(p_user uuid) returns void
+-- администратор отмечает проверку возраста или телефона (документы NEAR не хранит)
+create or replace function public.admin_set_private(p_user uuid, p_age text default null, p_phone boolean default null) returns void
 language plpgsql security definer set search_path = public as $$
 begin
-  perform set_config('near.ban_sync', '1', true);
-  update public.profiles set banned = (public.ban_level(p_user) = 2) where id = p_user;
-  perform set_config('near.ban_sync', '', true);
+  if not public.is_admin() then raise exception using errcode = 'NR403', message = 'Только для администратора'; end if;
+  if p_age is not null and p_age not in ('unknown','adult','minor') then raise exception using errcode = 'NR422', message = 'Неверный статус возраста'; end if;
+  insert into public.profile_private (user_id) values (p_user) on conflict do nothing;
+  update public.profile_private set
+    age_status = coalesce(p_age, age_status),
+    age_checked_at = case when p_age is not null then now() else age_checked_at end,
+    age_checked_by = case when p_age is not null then auth.uid() else age_checked_by end,
+    phone_verified_at = case when p_phone is null then phone_verified_at when p_phone then coalesce(phone_verified_at, now()) else null end,
+    updated_at = now()
+   where user_id = p_user;
+  insert into public.mod_actions (moderator_id, target_type, target_id, action, note)
+  values (auth.uid(), 'user', p_user, 'set_private', concat_ws(' ', 'age=' || p_age, 'phone=' || p_phone::text));
 end $$;
--- старый путь бана (mod_act 'ban' без причины) закрыт: решение выносится только через NEAR Shield
-create or replace function public.legacy_ban_guard() returns trigger
-language plpgsql as $$
+insert into public.profile_private (user_id) select id from public.profiles on conflict do nothing;
+
+-- личная переписка с незнакомым — только при возрастном допуске обеих сторон; новые запросы — в дневном лимите
+create or replace function public.get_or_create_conversation(other uuid) returns uuid
+language plpgsql security definer set search_path = public as $$
+declare me uuid := auth.uid(); a uuid; b uuid; cid uuid; fr boolean;
 begin
-  if new.banned is distinct from old.banned and coalesce(current_setting('near.ban_sync', true), '') <> '1' and auth.uid() is not null then
-    raise exception using errcode = 'NR403', message = 'Блокировка выносится в NEAR Shield: с причиной, сроком и номером решения', hint = 'use_shield';
-  end if;
-  return new;
-end $$;
-drop trigger if exists profiles_legacy_ban on public.profiles;
-create trigger profiles_legacy_ban before update of banned on public.profiles for each row execute function public.legacy_ban_guard();
-
--- перенос старых банов v11/v12 в user_bans (бессрочно, с пометкой о переносе)
-insert into public.user_bans (user_id, kind, rule, reason, source_key)
-select id, 'ban', 'minor', 'Перенесено из прежней системы блокировок (v12)', 'legacy:' || id
-  from public.profiles where banned on conflict (source_key) do nothing;
-
--- ---------- 7. Вход: начало сессии, подтверждение нового устройства ----------
-create or replace function public.session_begin(p_installation text, p_label text default null) returns jsonb
-language plpgsql security definer set search_path = public, extensions as $$
-declare
-  uid uuid := auth.uid(); sid uuid := public.jwt_sid(); inst text; cur record; act record; ch record;
-  code text; st jsonb; first_login boolean;
-begin
-  if uid is null or sid is null then raise exception using errcode = 'NR401', message = 'Войдите в NEAR', hint = 'auth'; end if;
-  inst := public.shield_hash('inst:' || coalesce(nullif(p_installation, ''), sid::text));
-  p_label := left(coalesce(nullif(p_label, ''), 'Устройство'), 60);
-  -- блокировка строки пользователя: параллельные входы выстраиваются в очередь
-  perform 1 from public.profiles where id = uid for update;
-  first_login := not exists (select 1 from public.user_sessions where user_id = uid);
-
-  st := public.account_state(uid);
-  if st->>'state' in ('banned_until','banned_permanent') then
-    -- бан при входе с любого устройства не снимается; доступен только экран решения
-    return jsonb_build_object('state', 'banned', 'account', st);
-  end if;
-
-  select * into cur from public.user_sessions where session_id = sid;
-  if cur.status = 'active' then
-    update public.user_sessions set last_seen = now() where session_id = sid and last_seen < now() - interval '1 minute';
-    return jsonb_build_object('state', 'active', 'account', st);
-  end if;
-  if cur.status = 'revoked' then
-    return jsonb_build_object('state', 'revoked', 'reason', cur.revoke_reason);
-  end if;
-
-  insert into public.user_devices (user_id, installation_hash, label) values (uid, inst, p_label)
-  on conflict (user_id, installation_hash) do update set last_seen = now(), label = excluded.label;
-  if first_login then perform public.risk_on_register(uid, inst); end if;
-
-  select * into act from public.user_sessions where user_id = uid and status = 'active';
-  -- нет активной сессии или вход с того же устройства — активируем сразу
-  if act.session_id is null or act.installation_hash = inst then
-    if act.session_id is not null then
-      update public.user_sessions set status = 'revoked', revoked_at = now(), revoke_reason = 'same_device' where session_id = act.session_id;
+  if me is null then raise exception using errcode = 'NR403', message = 'Войдите, чтобы написать'; end if;
+  if other is null or other = me then raise exception using errcode = 'NR422', message = 'Нельзя написать самому себе'; end if;
+  if not exists (select 1 from public.profiles where id = other) then raise exception using errcode = 'NR404', message = 'Пользователь не найден'; end if;
+  if public.is_blocked(me, other) then raise exception using errcode = 'NR403', message = 'Пользователь недоступен'; end if;
+  if public.is_banned() then raise exception using errcode = 'NR403', message = 'Аккаунт заблокирован модератором'; end if;
+  a := least(me, other); b := greatest(me, other);
+  select id into cid from public.conversations where user_a = a and user_b = b;
+  if cid is null then
+    fr := public.are_friends(me, other);
+    if not fr and not (public.age_ok(me) and public.age_ok(other)) then
+      raise exception using errcode = 'NR403', message = 'Личные сообщения незнакомым пока недоступны. Добавьте человека в друзья — после принятия заявки можно писать', hint = 'age_gate';
     end if;
-    insert into public.user_sessions (session_id, user_id, installation_hash, device_label, ip_hash, status, activated_at)
-    values (sid, uid, inst, p_label, public.req_ip_hash(), 'active', now())
-    on conflict (session_id) do update set status = 'active', activated_at = now();
-    perform public.audit('session_activate', 'user', uid, jsonb_build_object('device', p_label, 'first', first_login));
-    return jsonb_build_object('state', 'active', 'account', st);
+    if not fr then perform public.rate_take('chat_request', null); end if;
+    insert into public.conversations (user_a, user_b, status, initiator)
+    values (a, b, case when fr then 'accepted' else 'request' end, me)
+    returning id into cid;
   end if;
-
-  -- новое устройство: нужна проверка по почте. Пока ее нет — закрытые данные недоступны.
-  insert into public.user_sessions (session_id, user_id, installation_hash, device_label, ip_hash, status)
-  values (sid, uid, inst, p_label, public.req_ip_hash(), 'pending') on conflict (session_id) do nothing;
-  select * into ch from public.session_challenges
-   where user_id = uid and consumed_at is null and cancelled_at is null and expires_at > now() order by created_at desc limit 1;
-  if ch.id is not null and ch.session_id <> sid then
-    raise exception using errcode = 'NR409', message = 'Вход уже подтверждается на другом устройстве. Попробуйте через 10 минут', hint = 'challenge_busy';
-  end if;
-  if ch.id is null then
-    perform public.rate('challenge');
-    code := lpad((('x' || encode(gen_random_bytes(4), 'hex'))::bit(32)::bigint % 1000000)::text, 6, '0');
-    insert into public.session_challenges (user_id, session_id, old_session_id, code_hash)
-    values (uid, sid, act.session_id, public.shield_hash('code:' || code)) returning * into ch;
-    perform public.call_fn('shield-mail', jsonb_build_object('kind', 'login_code', 'user_id', uid, 'code', code, 'device', p_label));
-    -- демо и тесты без почтового сервиса: код виден только серверу; в демо-режиме приложение работает локально
-  end if;
-  return jsonb_build_object('state', 'challenge', 'challenge_id', ch.id, 'expires_at', ch.expires_at, 'resend_at', ch.resend_at,
-    'attempts_left', 5 - ch.attempts, 'old_device', act.device_label, 'old_last_seen', act.last_seen, 'server_now', now());
+  return cid;
 end $$;
 
-create or replace function public.session_confirm(p_challenge uuid, p_code text) returns jsonb
-language plpgsql security definer set search_path = public, extensions as $$
-declare uid uuid := auth.uid(); sid uuid := public.jwt_sid(); ch record; act record; st jsonb; old_label text;
+-- =====================================================
+--  08 / Anti-Spam: дневные лимиты (атомарные счетчики), 429 + retry_after, повторы без двойного списания, дубликаты
+-- =====================================================
+-- лимиты на сутки (по времени Алматы): [новый аккаунт, телефон подтвержден]; часовые лимиты v11 (rate) остаются как burst
+alter table public.app_settings add column if not exists day_limits jsonb not null default '{
+  "post":         [3, 15],
+  "comment":      [20, 100],
+  "chat_request": [3, 10],
+  "meeting":      [0, 3]
+}'::jsonb;
+
+create table if not exists public.rate_counters (
+  user_id  uuid not null,
+  action   text not null,
+  day      date not null,
+  n        int  not null default 0,
+  primary key (user_id, action, day)
+);
+alter table public.rate_counters enable row level security;
+create table if not exists public.rate_idem (
+  user_id    uuid not null,
+  action     text not null,
+  key        text not null check (char_length(key) between 8 and 64),
+  created_at timestamptz not null default now(),
+  primary key (user_id, action, key)
+);
+alter table public.rate_idem enable row level security;
+
+create or replace function public.ru_plural(n int, a text, b text, c text) returns text language sql immutable as $$
+  select n || ' ' || case when n % 10 = 1 and n % 100 <> 11 then a when n % 10 between 2 and 4 and (n % 100 < 10 or n % 100 >= 20) then b else c end $$;
+
+-- списать одно действие из дневного лимита. Ключ идемпотентности: повтор того же запроса не списывает дважды.
+-- Атомарно: insert ... on conflict do update ... where n < лимит — параллельные запросы не проходят сверх лимита.
+create or replace function public.rate_take(p_action text, p_key text default null) returns void
+language plpgsql security definer set search_path = public as $$
+declare uid uuid := auth.uid(); l jsonb; lim int; d date := (now() at time zone 'Asia/Almaty')::date; got int; secs int; ok boolean;
 begin
-  if uid is null or sid is null then raise exception using errcode = 'NR401', message = 'Войдите в NEAR', hint = 'auth'; end if;
-  perform 1 from public.profiles where id = uid for update;
-  select * into ch from public.session_challenges where id = p_challenge and user_id = uid and session_id = sid for update;
-  if ch.id is null or ch.consumed_at is not null or ch.cancelled_at is not null then
-    return jsonb_build_object('ok', false, 'error', 'Код больше не действует. Войдите заново', 'final', true);
+  if uid is null or public.is_mod() then return; end if;
+  select day_limits->p_action into l from public.app_settings where id = 1;
+  if l is null then return; end if;
+  lim := (l->>(case when exists (select 1 from public.profile_private where user_id = uid and phone_verified_at is not null) then 1 else 0 end))::int;
+  if p_key is not null then
+    insert into public.rate_idem (user_id, action, key) values (uid, p_action, left(p_key, 64)) on conflict do nothing returning true into ok;
+    if ok is null then return; end if; -- уже списано этим ключом
   end if;
-  if ch.expires_at <= now() then
-    return jsonb_build_object('ok', false, 'error', 'Срок кода истек. Запросите новый код', 'expired', true);
+  insert into public.rate_counters as rc (user_id, action, day, n) values (uid, p_action, d, 1)
+  on conflict (user_id, action, day) do update set n = rc.n + 1 where rc.n < lim
+  returning n into got;
+  if got is null or got > lim then
+    secs := greatest(60, ceil(extract(epoch from ((d + 1)::timestamp at time zone 'Asia/Almaty') - now())));
+    raise exception using errcode = 'NR429',
+      message = format('Лимит на сегодня исчерпан: %s. Снова можно через %s',
+        case p_action when 'post' then public.ru_plural(lim, 'публикация', 'публикации', 'публикаций')
+          when 'comment' then public.ru_plural(lim, 'комментарий', 'комментария', 'комментариев')
+          when 'chat_request' then public.ru_plural(lim, 'новый запрос в чат', 'новых запроса в чат', 'новых запросов в чат')
+          when 'meeting' then public.ru_plural(lim, 'встреча', 'встречи', 'встреч') else public.ru_plural(lim, 'действие', 'действия', 'действий') end,
+        case when secs >= 3600 then (secs / 3600) || ' ч ' || ((secs % 3600) / 60) || ' мин' else ceil(secs / 60.0) || ' мин' end),
+      hint = 'retry_after=' || secs || ';action=' || p_action;
   end if;
-  if ch.attempts >= 5 then
-    update public.session_challenges set cancelled_at = now() where id = ch.id;
-    return jsonb_build_object('ok', false, 'error', 'Слишком много попыток. Войдите заново', 'final', true);
-  end if;
-  -- бан мог появиться во время подтверждения
-  st := public.account_state(uid);
-  if st->>'state' in ('banned_until','banned_permanent') then
-    update public.session_challenges set cancelled_at = now() where id = ch.id;
-    return jsonb_build_object('ok', false, 'state', 'banned', 'account', st, 'final', true);
-  end if;
-  if public.shield_hash('code:' || coalesce(btrim(p_code), '')) is distinct from ch.code_hash then
-    update public.session_challenges set attempts = attempts + 1 where id = ch.id;   -- попытка сохраняется (функция не падает)
-    return jsonb_build_object('ok', false, 'error', 'Неверный код', 'attempts_left', 4 - ch.attempts, 'final', ch.attempts + 1 >= 5);
-  end if;
-  -- гонка: за время подтверждения активной стала другая сессия — этот challenge отклоняем
-  select * into act from public.user_sessions where user_id = uid and status = 'active';
-  if act.session_id is distinct from ch.old_session_id then
-    update public.session_challenges set cancelled_at = now() where id = ch.id;
-    return jsonb_build_object('ok', false, 'error', 'Вход уже выполнен на другом устройстве. Войдите заново', 'final', true);
-  end if;
-  -- одна транзакция: погасить код, отозвать старую сессию, активировать новую
-  update public.session_challenges set consumed_at = now() where id = ch.id;
-  old_label := act.device_label;
-  if act.session_id is not null then
-    update public.user_sessions set status = 'revoked', revoked_at = now(), revoke_reason = 'new_device' where session_id = act.session_id;
-    perform public.revoke_auth_session(act.session_id);
-  end if;
-  update public.user_sessions set status = 'active', activated_at = now(), last_seen = now() where session_id = sid;
-  delete from public.push_subs where user_id = uid;   -- push старого устройства больше не приходят
-  perform public.audit('session_new_device', 'user', uid, jsonb_build_object('old', old_label));
-  perform public.call_fn('shield-mail', jsonb_build_object('kind', 'new_login', 'user_id', uid,
-    'device', (select device_label from public.user_sessions where session_id = sid)));
-  return jsonb_build_object('ok', true, 'state', 'active');
 end $$;
 
-create or replace function public.session_resend(p_challenge uuid) returns jsonb
-language plpgsql security definer set search_path = public, extensions as $$
-declare uid uuid := auth.uid(); ch record; code text;
-begin
-  select * into ch from public.session_challenges where id = p_challenge and user_id = uid and session_id = public.jwt_sid()
-     and consumed_at is null and cancelled_at is null for update;
-  if ch.id is null then return jsonb_build_object('ok', false, 'error', 'Войдите заново'); end if;
-  if ch.resend_at > now() then return jsonb_build_object('ok', false, 'error', 'Повторно — через минуту', 'resend_at', ch.resend_at); end if;
-  if ch.sends >= 3 then return jsonb_build_object('ok', false, 'error', 'Лимит писем исчерпан. Войдите заново позже'); end if;
-  code := lpad((('x' || encode(gen_random_bytes(4), 'hex'))::bit(32)::bigint % 1000000)::text, 6, '0');
-  update public.session_challenges set code_hash = public.shield_hash('code:' || code), sends = sends + 1,
-         resend_at = now() + interval '60 seconds', expires_at = now() + interval '10 minutes' where id = ch.id;
-  perform public.call_fn('shield-mail', jsonb_build_object('kind', 'login_code', 'user_id', uid, 'code', code));
-  return jsonb_build_object('ok', true, 'resend_at', now() + interval '60 seconds');
-end $$;
+-- ключ текста для поиска дублей: регистр, пробелы и знаки не важны
+create or replace function public.text_key(t text) returns text language sql immutable as $$
+  select md5(regexp_replace(lower(translate(coalesce(t, ''), 'АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ', 'абвгдеежзийклмнопрстуфхцчшщъыьэюя')), '[^a-zа-яәғқңөұүһі0-9]+', '', 'g')) $$;
 
--- отмена: новое устройство не входит, старое продолжает работать
-create or replace function public.session_cancel() returns void
+alter table public.comments add column if not exists client_key text;
+create unique index if not exists comments_client_key_uidx on public.comments (user_id, client_key) where client_key is not null;
+
+create or replace function public.rate_trigger() returns trigger
 language plpgsql security definer set search_path = public as $$
 begin
-  update public.session_challenges set cancelled_at = now() where user_id = auth.uid() and session_id = public.jwt_sid() and consumed_at is null;
-  update public.user_sessions set status = 'revoked', revoked_at = now(), revoke_reason = 'cancelled' where session_id = public.jwt_sid() and status = 'pending';
-end $$;
-
-create or replace function public.session_end() returns void
-language plpgsql security definer set search_path = public as $$
-begin
-  update public.user_sessions set status = 'revoked', revoked_at = now(), revoke_reason = 'logout'
-   where session_id = public.jwt_sid() and user_id = auth.uid() and status <> 'revoked';
-  delete from public.push_subs where user_id = auth.uid();
-end $$;
-
-create or replace function public.session_state() returns jsonb
-language plpgsql security definer set search_path = public as $$
-declare s record; rs int;
-begin
-  if auth.uid() is null then return jsonb_build_object('state', 'guest', 'server_now', now()); end if;
-  select * into s from public.user_sessions where session_id = public.jwt_sid() and user_id = auth.uid();
-  if s.status = 'active' then
-    update public.user_sessions set last_seen = now() where session_id = s.session_id and last_seen < now() - interval '1 minute';
-  end if;
-  rs := public.risk_score(auth.uid());
-  return jsonb_build_object(
-    'state', case when coalesce((public.shield_cfg()->>'enforce_sessions')::boolean, true) = false then 'active' else coalesce(s.status, 'none') end,
-    'reason', s.revoke_reason, 'account', public.account_state(), 'server_now', now(),
-    'captcha', rs >= coalesce((public.shield_cfg()->'risk'->>'captcha')::int, 25) and coalesce((public.shield_cfg()->>'captcha_enforced')::boolean, false),
-    'hold', public.risk_hold_active());
-end $$;
-
--- история входов: только свои данные, без IP
-create or replace function public.session_list() returns table (device_label text, status text, created_at timestamptz, last_seen timestamptz, revoked_at timestamptz, revoke_reason text, current boolean)
-language sql stable security definer set search_path = public as $$
-  select s.device_label, s.status, s.created_at, s.last_seen, s.revoked_at, s.revoke_reason, s.session_id = public.jwt_sid()
-    from public.user_sessions s where s.user_id = auth.uid() order by s.created_at desc limit 30 $$;
-
--- отзыв токенов в самой системе входа (если доступна): старый refresh-токен перестает работать
-create or replace function public.revoke_auth_session(p_sid uuid) returns void
-language plpgsql security definer set search_path = public as $$
-begin
-  begin execute 'delete from auth.sessions where id = $1' using p_sid; exception when others then null; end;
-end $$;
-
--- смена пароля (в том числе восстановление) отзывает все прежние сессии
-create or replace function public.on_password_change() returns trigger
-language plpgsql security definer set search_path = public as $$
-begin
-  if new.encrypted_password is distinct from old.encrypted_password then
-    update public.user_sessions set status = 'revoked', revoked_at = now(), revoke_reason = 'password_changed'
-     where user_id = new.id and status <> 'revoked';
-    insert into public.security_audit_log (actor_id, action, target_type, target_id) values (new.id, 'password_changed', 'user', new.id);
+  if tg_table_name = 'posts' then
+    perform public.rate('post'); perform public.rate('post_day');
+    if new.is_sos then perform public.rate('sos');
+    else
+      -- одинаковый текст от одного автора за сутки — повтор, а не новая публикация
+      if auth.uid() is not null and char_length(coalesce(new.text, '')) >= 10 and exists (
+           select 1 from public.posts where user_id = new.user_id and created_at > now() - interval '24 hours'
+              and status in ('draft','active','closed','hidden') and client_key is distinct from new.client_key
+              and public.text_key(text) = public.text_key(new.text)) then
+        raise exception using errcode = 'NR409', message = 'Вы уже публиковали такой же текст сегодня', hint = 'duplicate';
+      end if;
+      perform public.rate_take('post', new.client_key);
+    end if;
+  elsif tg_table_name = 'comments' then
+    perform public.rate('comment');
+    if auth.uid() is not null and char_length(coalesce(new.text, '')) >= 10 and exists (
+         select 1 from public.comments where user_id = new.user_id and created_at > now() - interval '10 minutes' and public.text_key(text) = public.text_key(new.text)) then
+      raise exception using errcode = 'NR409', message = 'Такой же комментарий вы уже отправляли. Напишите по-другому', hint = 'duplicate';
+    end if;
+    perform public.rate_take('comment', new.client_key);
+  elsif tg_table_name = 'messages' then perform public.rate('message');
+  elsif tg_table_name = 'reports' then perform public.rate('report');
+  elsif tg_table_name = 'friendships' then perform public.rate('friend');
+  elsif tg_table_name = 'likes' then perform public.rate('like');
   end if;
   return new;
 end $$;
-do $$ begin
-  if exists (select 1 from information_schema.columns where table_schema = 'auth' and table_name = 'users' and column_name = 'encrypted_password') then
-    execute 'drop trigger if exists on_auth_password_change on auth.users';
-    execute 'create trigger on_auth_password_change after update of encrypted_password on auth.users for each row execute function public.on_password_change()';
-  end if;
-end $$;
 
--- повторное подтверждение личности (пароль проверяет функция shield-login) — 5 минут на смену почты или удаление
-create or replace function public.session_reauth_mark(p_user uuid, p_sid uuid) returns void
-language sql security definer set search_path = public as $$
-  update public.user_sessions set reauth_at = now() where session_id = p_sid and user_id = p_user and status = 'active' $$;
-create or replace function public.reauth_fresh() returns boolean
-language sql stable security definer set search_path = public as $$
-  select exists (select 1 from public.user_sessions where session_id = public.jwt_sid() and user_id = auth.uid()
-                  and status = 'active' and reauth_at > now() - interval '5 minutes') $$;
-
--- ---------- 7a. Вход по никнейму или почте (функция shield-login, только сервер) ----------
--- Лимиты атомарные: по источнику и по паре "аккаунт + источник". Чужие попытки из другой сети
--- не блокируют владельца — по аккаунту только включается CAPTCHA.
-create table if not exists public.login_attempts (
-  id          bigserial primary key,
-  src_hash    text,
-  acct_hash   text,
-  ok          boolean not null,
-  created_at  timestamptz not null default now()
-);
-create index if not exists login_attempts_src_idx on public.login_attempts (src_hash, created_at desc);
-create index if not exists login_attempts_acct_idx on public.login_attempts (acct_hash, created_at desc);
-alter table public.login_attempts enable row level security;
-
-create or replace function public.login_gate(p_src text, p_login text) returns jsonb
+-- медиа в переписке: те же условия, что в публикациях (фото и видео — только при включенной проверке)
+create or replace function public.message_media_gate() returns trigger
 language plpgsql security definer set search_path = public as $$
-declare s text := public.shield_hash('ip:' || coalesce(p_src, '')); a text := public.shield_hash('acct:' || public.nick_norm(p_login)); n_src int; n_pair int; n_acct int;
 begin
-  perform pg_advisory_xact_lock(hashtextextended('login:' || coalesce(s, '') || ':' || a, 0));
-  select count(*) into n_src from public.login_attempts where src_hash = s and not ok and created_at > now() - interval '10 minutes';
-  select count(*) into n_pair from public.login_attempts where src_hash = s and acct_hash = a and not ok and created_at > now() - interval '15 minutes';
-  select count(*) into n_acct from public.login_attempts where acct_hash = a and not ok and created_at > now() - interval '15 minutes';
-  return jsonb_build_object('allowed', n_src < 20 and n_pair < 5, 'captcha', n_acct >= 5 or n_src >= 5);
+  if new.kind in ('image','video') and auth.uid() is not null and not public.is_mod()
+     and (select media_requires_check and not ai_moderation from public.app_settings where id = 1) then
+    raise exception using errcode = 'NR503', message = 'Фото и видео временно недоступны: на сервере не включена проверка файлов', hint = 'media_check_off';
+  end if;
+  return new;
+end $$;
+drop trigger if exists messages_media_gate on public.messages;
+create trigger messages_media_gate before insert on public.messages for each row execute function public.message_media_gate();
+
+-- уборка: старые счетчики и ключи
+create or replace function public.near_cleanup() returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare a int; b int; c int; d int;
+begin
+  delete from public.rate_events where created_at < now() - interval '2 days';
+  delete from public.rate_counters where day < (now() at time zone 'Asia/Almaty')::date - 2;
+  delete from public.rate_idem where created_at < now() - interval '3 days';
+  delete from public.client_errors where created_at < now() - interval '30 days'; get diagnostics a = row_count;
+  delete from public.analytics_events where created_at < now() - interval '180 days'; get diagnostics b = row_count;
+  delete from public.push_log where created_at < now() - interval '90 days';
+  select count(*) into c from public.posts where status = 'draft' and created_at < now() - interval '24 hours';
+  select count(*) into d from public.conversations where orphaned_at < now() - interval '30 days';
+  perform public.call_fn('moderate', jsonb_build_object('kind', 'cleanup'));
+  return jsonb_build_object('errors_removed', a, 'events_removed', b, 'stale_drafts', c, 'orphaned_conversations', d);
 end $$;
 
-create or replace function public.login_record(p_src text, p_login text, p_ok boolean) returns void
-language sql security definer set search_path = public as $$
-  insert into public.login_attempts (src_hash, acct_hash, ok)
-  values (public.shield_hash('ip:' || coalesce(p_src, '')), public.shield_hash('acct:' || public.nick_norm(p_login)), p_ok) $$;
+-- =====================================================
+--  Права v14: новые функции и таблицы (общий revoke v12 остается в силе)
+-- =====================================================
+revoke all on public.profile_private, public.nickname_history, public.rate_counters, public.rate_idem from anon, authenticated;
+grant select on public.nickname_history to authenticated; -- RLS: только модераторы
+-- профиль: пользователь меняет только эти поля; имя/никнейм — через set_nickname, роли и пол — никогда
+revoke update on public.profiles from authenticated;
+grant update (avatar_url, district, instagram, bio, show_seen, accepted_rules_at, updated_at) on public.profiles to authenticated;
+revoke execute on function public.feed_sorted(double precision, double precision, int, text[], text, text, boolean, timestamptz, double precision, uuid, int, int, double precision, timestamptz) from public;
+grant execute on function public.feed_sorted(double precision, double precision, int, text[], text, text, boolean, timestamptz, double precision, uuid, int, int, double precision, timestamptz),
+  public.nickname_check(text), public.age_ok(uuid)
+  to anon, authenticated;
+grant execute on function public.set_nickname(text), public.my_account(), public.admin_set_private(uuid, text, boolean) to authenticated;
+-- чистые функции NEAR Clean: можно вызывать для предпросмотра
+grant execute on function public.near_clean(text), public.near_has_bad(text), public.near_is_threat(text), public.near_clean_x(text),
+  public.nc_bad_token(text), public.nc_translit(text), public.nc_is_w(int), public.nc_is_sep(int), public.nc_is_zw(int), public.nc_is_mark(int),
+  public.nick_norm(text), public.nick_problem(text), public.text_key(text), public.ru_plural(int, text, text, text)
+  to anon, authenticated;
+-- служебные — только сервер
+revoke execute on function public.rate_take(text, text), public.media_gate(), public.message_media_gate(), public.mask_bio_trigger(),
+  public.handle_new_user(), public.protect_profile(), public.profile_guard()
+  from public, anon, authenticated;
 
-create or replace function public.login_email(p_login text) returns text
+-- Готово ✅ v14 (этап 1)
+
+
+-- =====================================================
+--  Миграция v14.2 (ТЗ v14.6, этап 1.2 / Stability). Для базы, где уже стоит 014_v14.sql.
+--  Запуск: Supabase → SQL Editor → вставить файл целиком → Run. Идемпотентный.
+--  Что внутри:
+--   38/59 — аккаунт: состояния, разрешенные действия, лимиты в my_account; Instagram скрыт по умолчанию; интересы;
+--   45/60/09 — дружба не снимает возрастной запрет; угрозы, интим, скам, сокращенные ссылки блокируются;
+--              санкции по функциям и сроку; MFA (aal2) для модераторов и администратора;
+--   06/58/60 — новые файлы публикаций только в приватный бакет post-private, выдача одобренных — по подписанным ссылкам;
+--              прямая загрузка в публичный post-media закрыта; аватары — отдельный бакет avatars;
+--   40/51/52 — поля форм (meta), категория "Помощь", сроки актуальности, проверка ссылок;
+--   55 — NEAR City: официальные карточки редактора с источником и журналом версий;
+--   57 — лента одним запросом (feed_v14), счетчики лайков/комментариев в таблице, легкая карта (map_v14).
+--  Откат: вернуть клиент v14 (этап 1) и выполнить 014_v14.sql повторно; новые колонки и таблицы можно оставить.
+--  Перед миграцией — резервная копия (SETUP.md, шаг 16).
+-- =====================================================
+
+-- ---------- 39/45: MFA для модераторов и администратора ----------
+alter table public.app_settings add column if not exists mod_require_mfa boolean not null default true;
+-- уровень входа из токена Supabase Auth: aal2 = вход с вторым фактором (TOTP)
+create or replace function public.mfa_ok() returns boolean
 language sql stable security definer set search_path = public as $$
-  select u.email from auth.users u join public.profiles p on p.id = u.id where lower(p.nickname) = public.nick_norm(p_login) limit 1 $$;
-revoke all on public.login_attempts from public, anon, authenticated;
-revoke execute on function public.login_gate(text, text), public.login_record(text, text, boolean), public.login_email(text) from public, anon, authenticated;
+  select not coalesce((select mod_require_mfa from public.app_settings where id = 1), true)
+      or coalesce(auth.jwt()->>'aal', '') = 'aal2' $$;
+-- роль без второго фактора не дает прав: интерфейс попросит включить защиту
+create or replace function public.is_mod() returns boolean
+language sql stable security definer set search_path = public as $$
+  select coalesce((select is_admin or is_moderator from public.profiles where id = auth.uid()), false) and public.mfa_ok() $$;
+create or replace function public.is_admin() returns boolean
+language sql stable security definer set search_path = public as $$
+  select coalesce((select is_admin from public.profiles where id = auth.uid()), false) and public.mfa_ok() $$;
+-- роль по профилю без проверки второго фактора — только чтобы интерфейс знал, что нужно включить MFA
+create or replace function public.has_mod_role() returns boolean
+language sql stable security definer set search_path = public as $$
+  select coalesce((select is_admin or is_moderator from public.profiles where id = auth.uid()), false) $$;
 
--- ---------- 8. Risk Score (виден только уполномоченным) ----------
-create table if not exists public.risk_events (
+-- ---------- 38: профиль — интересы, Instagram скрыт по умолчанию ----------
+alter table public.profiles add column if not exists instagram_public boolean not null default false;
+alter table public.profiles add column if not exists interests text[] not null default '{}';
+alter table public.profiles drop constraint if exists profiles_interests_chk;
+alter table public.profiles add constraint profiles_interests_chk check (cardinality(interests) <= 5
+  and interests <@ array['games','cinema','board','sport','cafe','walks','mountains','study','other','pets','music','kids','volunteer']);
+
+-- Instagram виден другим только если владелец включил; через API — только эта функция
+create or replace function public.profile_instagram(p_user uuid) returns text
+language sql stable security definer set search_path = public as $$
+  select case when p.id = auth.uid() or p.instagram_public or public.is_mod() then p.instagram end
+    from public.profiles p where p.id = p_user and not public.is_blocked(auth.uid(), p_user) $$;
+
+-- ---------- 45/60: санкции — ограничение функции или аккаунта на срок ----------
+create table if not exists public.user_sanctions (
   id          uuid primary key default gen_random_uuid(),
   user_id     uuid not null references public.profiles(id) on delete cascade,
-  event_type  text not null check (event_type in ('evasion','mass_reg','violation','suspicious')),
-  weight      int not null check (weight between 0 and 100),
-  source_key  text not null,                    -- один источник не начисляется дважды
-  confirmed   boolean not null default false,
-  status      text not null default 'active' check (status in ('active','dismissed')),
-  details     jsonb not null default '{}'::jsonb,
+  scope       text not null check (scope in ('all','post','comment','chat','meet')),
+  until       timestamptz,                         -- null = бессрочно (только администратор)
+  reason      text not null check (char_length(reason) between 3 and 500),
+  created_by  uuid references public.profiles(id) on delete set null,
   created_at  timestamptz not null default now(),
-  expires_at  timestamptz,
-  reviewed_by uuid references public.profiles(id) on delete set null,
-  unique (user_id, event_type, source_key)
+  revoked_at  timestamptz,
+  revoked_by  uuid references public.profiles(id) on delete set null
 );
-alter table public.risk_events enable row level security;
-drop policy if exists "risk read" on public.risk_events;
-create policy "risk read" on public.risk_events for select using (public.is_mod());
+create index if not exists user_sanctions_user_idx on public.user_sanctions (user_id) where revoked_at is null;
+alter table public.user_sanctions enable row level security;
+drop policy if exists "sanctions own or mod" on public.user_sanctions;
+-- пользователь видит свои решения (без данных заявителя), модератор — все
+create policy "sanctions own or mod" on public.user_sanctions for select using (auth.uid() = user_id or public.is_mod());
 
-create table if not exists public.risk_holds (
-  id          uuid primary key default gen_random_uuid(),
-  user_id     uuid not null references public.profiles(id) on delete cascade,
-  started_at  timestamptz not null default now(),
-  until       timestamptz not null,
-  reason      text not null,
-  decided_by  uuid references public.profiles(id) on delete set null,
-  decided_at  timestamptz
-);
-create index if not exists risk_holds_user_idx on public.risk_holds (user_id, until desc);
-alter table public.risk_holds enable row level security;
-drop policy if exists "holds read" on public.risk_holds;
-create policy "holds read" on public.risk_holds for select using (public.is_mod());
-
-create or replace function public.risk_score(p_user uuid) returns int
-language plpgsql stable security definer set search_path = public as $$
-declare s int; w jsonb := public.shield_cfg()->'weights'; l jsonb; k text; n int; susp boolean := false;
-begin
-  if p_user is null then return 0; end if;
-  select coalesce(sum(weight), 0) into s from public.risk_events
-   where user_id = p_user and status = 'active' and (expires_at is null or expires_at > now());
-  -- подозрительная активность считается по факту: лимит исчерпан хотя бы по одному действию за сутки
-  select limits into l from public.app_settings where id = 1;
-  for k in select jsonb_object_keys(l) loop
-    exit when susp;
-    if k in ('log','push_sub','nick') then continue; end if;
-    select count(*) into n from public.rate_events where kind = k and user_id = p_user and created_at > now() - ((l->k->>2)::interval);
-    if n >= (l->k->>0)::int then susp := true; end if;
-  end loop;
-  if susp and not exists (select 1 from public.risk_events where user_id = p_user and event_type = 'suspicious' and status = 'active' and (expires_at is null or expires_at > now())) then
-    s := s + coalesce((w->>'suspicious')::int, 12);
-  end if;
-  return least(100, s);
-end $$;
-
-create or replace function public.risk_hold_active(p_user uuid default null) returns boolean
+create or replace function public.active_sanction(u uuid, p_scope text) returns public.user_sanctions
 language sql stable security definer set search_path = public as $$
-  select exists (select 1 from public.risk_holds where user_id = coalesce(p_user, auth.uid()) and until > now() and decided_at is null) $$;
+  select * from public.user_sanctions
+   where user_id = u and revoked_at is null and (until is null or until > now()) and scope in (p_scope, 'all')
+   order by until desc nulls first limit 1 $$;
 
--- новое событие риска; при 75+ — ограничение рискованных действий максимум на 24 ч до ручного решения
-create or replace function public.risk_add(p_user uuid, p_type text, p_key text, p_confirmed boolean default false, p_details jsonb default '{}'::jsonb) returns void
+create or replace function public.sanction_guard() returns trigger
 language plpgsql security definer set search_path = public as $$
-declare c jsonb := public.shield_cfg(); w int; ins boolean;
-begin
-  w := coalesce((c->'weights'->>p_type)::int, 10);
-  insert into public.risk_events (user_id, event_type, weight, source_key, confirmed, details, expires_at)
-  values (p_user, p_type, w, p_key, p_confirmed, p_details,
-          case when p_confirmed then now() + interval '180 days' else now() + make_interval(days => coalesce((c->'risk'->>'unconfirmed_days')::int, 7)) end)
-  on conflict (user_id, event_type, source_key) do nothing;
-  get diagnostics ins = row_count;
-  if ins and public.risk_score(p_user) >= coalesce((c->'risk'->>'hold')::int, 75) and not public.risk_hold_active(p_user) then
-    insert into public.risk_holds (user_id, until, reason)
-    values (p_user, now() + make_interval(hours => coalesce((c->'risk'->>'hold_hours')::int, 24)), 'risk_score');
-    perform public.queue_add('user', p_user, p_user, 'risk_hold');
-  end if;
-end $$;
-
--- сигналы при первой регистрации: совпадение установки с действующим баном, массовые регистрации из одной сети.
--- Общий IP сам по себе никого не блокирует: только вес 20 и проверка.
-create table if not exists public.account_links (
-  id             uuid primary key default gen_random_uuid(),
-  account_id     uuid not null references public.profiles(id) on delete cascade,
-  candidate_id   uuid not null references public.profiles(id) on delete cascade,
-  evidence       jsonb not null default '{}'::jsonb,
-  review_status  text not null default 'pending' check (review_status in ('pending','confirmed','rejected')),
-  reviewed_by    uuid references public.profiles(id) on delete set null,
-  reviewed_at    timestamptz,
-  note           text,
-  created_at     timestamptz not null default now(),
-  unique (account_id, candidate_id)
-);
-alter table public.account_links enable row level security;
-drop policy if exists "links read" on public.account_links;
-create policy "links read" on public.account_links for select using (public.is_mod());
-
-create or replace function public.risk_on_register(p_user uuid, p_inst text) returns void
-language plpgsql security definer set search_path = public as $$
-declare cand record; iph text := public.req_ip_hash(); n int;
-begin
-  for cand in
-    select distinct d.user_id from public.user_devices d
-     where d.installation_hash = p_inst and d.user_id <> p_user and public.ban_level(d.user_id) = 2
-  loop
-    insert into public.account_links (account_id, candidate_id, evidence)
-    values (p_user, cand.user_id, jsonb_build_object('match', 'installation')) on conflict do nothing;
-    perform public.risk_add(p_user, 'evasion', 'inst:' || cand.user_id, false, jsonb_build_object('candidate', cand.user_id));
-  end loop;
-  if exists (select 1 from public.device_restrictions where installation_hash = p_inst and (expires_at is null or expires_at > now()) and review_status <> 'rejected') then
-    perform public.risk_add(p_user, 'evasion', 'device_restriction', false, '{}'::jsonb);
-  end if;
-  -- ограниченная регистрация при совпадении с баном: рискованные действия на проверке до решения модератора (не больше 24 ч)
-  if exists (select 1 from public.account_links where account_id = p_user and review_status = 'pending') and not public.risk_hold_active(p_user) then
-    insert into public.risk_holds (user_id, until, reason) values (p_user, now() + interval '24 hours', 'evasion_suspect');
-    perform public.queue_add('user', p_user, p_user, 'evasion');
-  end if;
-  if iph is not null then
-    select count(distinct user_id) into n from public.user_sessions
-     where ip_hash = iph and created_at > now() - interval '1 hour' and user_id <> p_user
-       and user_id in (select id from public.profiles where created_at > now() - interval '1 hour');
-    if n >= 3 then perform public.risk_add(p_user, 'mass_reg', 'ip:' || to_char(now(), 'YYYYMMDDHH24'), false, jsonb_build_object('accounts', n + 1)); end if;
-  end if;
-end $$;
-
--- ---------- 9. Решения модераторов: санкции, отмена, апелляции ----------
-create table if not exists public.ban_appeals (
-  id             uuid primary key default gen_random_uuid(),
-  ban_id         uuid not null references public.user_bans(id) on delete cascade,
-  user_id        uuid not null references public.profiles(id) on delete cascade,
-  message        text not null check (char_length(message) between 10 and 1000),
-  status         text not null default 'pending' check (status in ('pending','in_review','upheld','overturned')),
-  reviewer_id    uuid references public.profiles(id) on delete set null,
-  decision_note  text,
-  created_at     timestamptz not null default now(),
-  due_at         timestamptz not null default now() + interval '72 hours',
-  taken_at       timestamptz,
-  decided_at     timestamptz,
-  unique (ban_id)
-);
-alter table public.ban_appeals enable row level security;
-drop policy if exists "ban appeals read" on public.ban_appeals;
-create policy "ban appeals read" on public.ban_appeals for select using (auth.uid() = user_id or public.is_mod());
-
--- репутационные события: уникальный ключ защищает от повторного начисления
-create table if not exists public.reputation_events (
-  id          uuid primary key default gen_random_uuid(),
-  user_id     uuid not null references public.profiles(id) on delete cascade,
-  source_key  text not null unique,
-  kind        text not null check (kind in ('penalty','reversal','bonus')),
-  points      int not null,
-  reason      text,
-  created_at  timestamptz not null default now()
-);
-create index if not exists reputation_events_user_idx on public.reputation_events (user_id);
-alter table public.reputation_events enable row level security;
-drop policy if exists "rep events own" on public.reputation_events;
-create policy "rep events own" on public.reputation_events for select using (auth.uid() = user_id or public.is_mod());
-
-create or replace function public.shield_sanction(p_user uuid, p_rule text, p_kind text, p_hours int, p_reason text,
-  p_evidence text default null, p_key text default null, p_scope text default 'global', p_scope_id uuid default null) returns jsonb
-language plpgsql security definer set search_path = public as $$
-declare me uuid := auth.uid(); b record; pen int; prior int; m record;
-begin
-  if p_scope <> 'global' then raise exception using errcode = 'NR422', message = 'Для чата и встречи — отдельные действия организатора'; end if;
-  if not public.is_mod() then raise exception using errcode = 'NR403', message = 'Только для модераторов' , hint = 'role'; end if;
-  if p_user = me then raise exception using errcode = 'NR403', message = 'Нельзя выносить решение о себе'; end if;
-  if public.ban_rules()->p_rule is null then raise exception using errcode = 'NR422', message = 'Выберите правило из матрицы'; end if;
-  if p_kind not in ('warning','restricted','ban') then raise exception using errcode = 'NR422', message = 'Неизвестный вид санкции'; end if;
-  if coalesce(char_length(btrim(p_reason)), 0) < 5 then raise exception using errcode = 'NR422', message = 'Укажите причину решения', hint = 'reason'; end if;
-  if p_kind = 'ban' and p_hours is null and not public.is_admin() then
-    raise exception using errcode = 'NR403', message = 'Бессрочный бан подтверждает старший администратор', hint = 'senior';
-  end if;
-  if p_hours is not null and p_hours > 720 and not public.is_admin() then
-    raise exception using errcode = 'NR403', message = 'Модератор может назначить срок до 30 дней', hint = 'senior';
-  end if;
-  if p_kind = 'warning' then p_hours := null; end if;
-  insert into public.user_bans (user_id, kind, rule, reason, evidence, expires_at, moderator_id, approved_by, source_key)
-  values (p_user, p_kind, p_rule, btrim(p_reason), p_evidence,
-          case when p_kind = 'warning' or p_hours is null then null else now() + make_interval(hours => p_hours) end,
-          me, case when p_kind = 'ban' and p_hours is null then me end, p_key)
-  on conflict (source_key) do nothing returning * into b;
-  if b.id is null then select * into b from public.user_bans where source_key = p_key; return jsonb_build_object('id', b.id, 'decision_no', b.decision_no, 'repeat', true); end if;
-
-  pen := coalesce((public.shield_cfg()->'rep_penalty'->>p_kind)::int, 0);
-  insert into public.reputation_events (user_id, source_key, kind, points, reason) values (p_user, 'ban:' || b.id, 'penalty', -pen, p_rule)
-  on conflict (source_key) do nothing;
-  perform public.risk_add(p_user, 'violation', 'ban:' || b.id, true, jsonb_build_object('rule', p_rule));
-  if p_kind in ('restricted','ban') then
-    perform public.ban_sync(p_user);
-    if p_kind = 'ban' then
-      -- глобальный бан: рабочие сессии отзываются, push не приходят
-      update public.user_sessions set status = 'revoked', revoked_at = now(), revoke_reason = 'banned' where user_id = p_user and status <> 'revoked';
-      delete from public.push_subs where user_id = p_user;
-      -- встречи организатора: передать допущенному co-host или отменить и уведомить участников
-      for m in select e.post_id, e.cohost_id from public.events e join public.posts p on p.id = e.post_id
-                where e.host_id = p_user and e.status = 'scheduled' and e.starts_at > now() loop
-        if m.cohost_id is not null and public.ban_level(m.cohost_id) = 0 then
-          update public.events set host_id = m.cohost_id, cohost_id = null where post_id = m.post_id;
-          insert into public.notifications (user_id, type, post_id, text) values (m.cohost_id, 'meeting', m.post_id, 'Вы стали организатором встречи');
-        else
-          perform public.meeting_cancel_internal(m.post_id, 'Встреча отменена: организатор не может ее провести');
-        end if;
-      end loop;
-    end if;
-  end if;
-  insert into public.notifications (user_id, type, text)
-  values (p_user, 'sanction', case p_kind when 'warning' then 'Предупреждение от модератора' when 'restricted' then 'Действия в NEAR ограничены' else 'Аккаунт заблокирован' end
-          || ' · решение ' || b.decision_no);
-  perform public.audit('sanction', 'user', p_user, jsonb_build_object('ban', b.id, 'no', b.decision_no, 'rule', p_rule, 'kind', p_kind, 'hours', p_hours, 'reason', p_reason));
-  update public.reports set status = 'resolved', resolved_at = now(), resolved_by = me, resolution = p_kind || ': ' || left(p_reason, 200)
-   where status = 'open' and target_type = 'user' and target_id = p_user;
-  return jsonb_build_object('id', b.id, 'decision_no', b.decision_no, 'expires_at', b.expires_at);
-end $$;
-
--- снятие решения: права восстанавливаются, штраф сторнируется; другие активные санкции остаются
-create or replace function public.shield_revoke_internal(p_ban uuid, p_reason text) returns void
-language plpgsql security definer set search_path = public as $$
-declare b record;
-begin
-  update public.user_bans set status = 'revoked', revoked_at = now(), revoked_by = auth.uid(), revoke_reason = p_reason
-   where id = p_ban and status = 'active' returning * into b;
-  if b.id is null then return; end if;
-  insert into public.reputation_events (user_id, source_key, kind, points, reason)
-  select b.user_id, 'rev:' || b.id, 'reversal', -points, 'Решение отменено' from public.reputation_events where source_key = 'ban:' || b.id
-  on conflict (source_key) do nothing;
-  update public.risk_events set status = 'dismissed', reviewed_by = auth.uid() where user_id = b.user_id and source_key = 'ban:' || b.id;
-  perform public.ban_sync(b.user_id);
-  perform public.rep_recalc(b.user_id);
-  insert into public.notifications (user_id, type, text) values (b.user_id, 'sanction', 'Решение ' || b.decision_no || ' отменено');
-  perform public.audit('sanction_revoke', 'user', b.user_id, jsonb_build_object('ban', b.id, 'reason', p_reason));
-end $$;
-
-create or replace function public.shield_revoke(p_ban uuid, p_reason text) returns void
-language plpgsql security definer set search_path = public as $$
-declare b record;
-begin
-  select * into b from public.user_bans where id = p_ban;
-  if b.id is null then raise exception using errcode = 'NR404', message = 'Решение не найдено'; end if;
-  if not public.is_mod() then raise exception using errcode = 'NR403', message = 'Только для модераторов'; end if;
-  if b.expires_at is null and b.kind = 'ban' and not public.is_admin() then
-    raise exception using errcode = 'NR403', message = 'Бессрочное решение пересматривает старший администратор', hint = 'senior';
-  end if;
-  if coalesce(char_length(btrim(p_reason)), 0) < 5 then raise exception using errcode = 'NR422', message = 'Укажите причину'; end if;
-  perform public.shield_revoke_internal(p_ban, p_reason);
-end $$;
-
--- продление (за доказанный обход — не больше 30 дней от нового решения, с мотивировкой)
-create or replace function public.shield_extend(p_ban uuid, p_days int, p_reason text) returns void
-language plpgsql security definer set search_path = public as $$
-declare b record;
-begin
-  if not public.is_mod() then raise exception using errcode = 'NR403', message = 'Только для модераторов'; end if;
-  if p_days not between 1 and 30 then raise exception using errcode = 'NR422', message = 'Продление — от 1 до 30 дней'; end if;
-  if coalesce(char_length(btrim(p_reason)), 0) < 10 then raise exception using errcode = 'NR422', message = 'Опишите доказательства обхода'; end if;
-  select * into b from public.user_bans where id = p_ban and status = 'active' and kind = 'ban' and expires_at is not null for update;
-  if b.id is null then raise exception using errcode = 'NR404', message = 'Действующий срочный бан не найден'; end if;
-  update public.user_bans set expires_at = greatest(b.expires_at, now() + make_interval(days => p_days)) where id = p_ban;
-  perform public.audit('sanction_extend', 'user', b.user_id, jsonb_build_object('ban', b.id, 'days', p_days, 'reason', p_reason));
-end $$;
-
--- связь аккаунтов: при подтверждении — оставшийся срок исходного бана; продление только отдельно, с мотивировкой
-create or replace function public.shield_link_decide(p_link uuid, p_confirm boolean, p_note text) returns jsonb
-language plpgsql security definer set search_path = public as $$
-declare l record; src record; nb record;
-begin
-  if not public.is_mod() then raise exception using errcode = 'NR403', message = 'Только для модераторов'; end if;
-  if coalesce(char_length(btrim(p_note)), 0) < 5 then raise exception using errcode = 'NR422', message = 'Укажите обоснование'; end if;
-  update public.account_links set review_status = case when p_confirm then 'confirmed' else 'rejected' end,
-         reviewed_by = auth.uid(), reviewed_at = now(), note = p_note
-   where id = p_link and review_status = 'pending' returning * into l;
-  if l.id is null then raise exception using errcode = 'NR404', message = 'Связь уже рассмотрена'; end if;
-  if not p_confirm then
-    update public.risk_events set status = 'dismissed', reviewed_by = auth.uid() where user_id = l.account_id and event_type = 'evasion';
-    update public.risk_holds set decided_at = now(), decided_by = auth.uid() where user_id = l.account_id and decided_at is null;
-    perform public.audit('link_rejected', 'user', l.account_id, jsonb_build_object('candidate', l.candidate_id));
-    return jsonb_build_object('ok', true);
-  end if;
-  select * into src from public.user_bans where user_id = l.candidate_id and status = 'active' and kind = 'ban' and scope = 'global'
-     and (expires_at is null or expires_at > now()) order by (expires_at is null) desc, expires_at desc limit 1;
-  if src.id is not null then
-    if src.expires_at is null and not public.is_admin() then
-      raise exception using errcode = 'NR403', message = 'Связь с бессрочным баном подтверждает старший администратор', hint = 'senior';
-    end if;
-    insert into public.user_bans (user_id, kind, rule, reason, expires_at, moderator_id, approved_by, source_key, linked_from)
-    values (l.account_id, 'ban', 'evasion', 'Подтвержденный обход блокировки: оставшийся срок решения ' || src.decision_no,
-            src.expires_at, auth.uid(), case when src.expires_at is null then auth.uid() end, 'link:' || l.id, src.id)
-    on conflict (source_key) do nothing returning * into nb;
-    update public.risk_events set confirmed = true, reviewed_by = auth.uid() where user_id = l.account_id and event_type = 'evasion';
-    update public.user_sessions set status = 'revoked', revoked_at = now(), revoke_reason = 'banned' where user_id = l.account_id and status <> 'revoked';
-    insert into public.device_restrictions (installation_hash, reason, expires_at, review_status, created_by)
-    select installation_hash, 'Подтвержденный обход ' || src.decision_no, src.expires_at, 'confirmed', auth.uid()
-      from public.user_devices where user_id = l.account_id
-    on conflict (installation_hash) do update set expires_at = excluded.expires_at, review_status = 'confirmed';
-    perform public.ban_sync(l.account_id);
-  end if;
-  update public.risk_holds set decided_at = now(), decided_by = auth.uid() where user_id = l.account_id and decided_at is null;
-  perform public.audit('link_confirmed', 'user', l.account_id, jsonb_build_object('candidate', l.candidate_id, 'ban', nb.id));
-  return jsonb_build_object('ok', true, 'ban_id', nb.id, 'decision_no', nb.decision_no);
-end $$;
-
--- ручное решение по риску: снять ограничение или оставить (не дольше, чем решит модератор)
-create or replace function public.risk_decide(p_user uuid, p_clear boolean, p_note text) returns void
-language plpgsql security definer set search_path = public as $$
-begin
-  if not public.is_mod() then raise exception using errcode = 'NR403', message = 'Только для модераторов'; end if;
-  update public.risk_holds set decided_at = now(), decided_by = auth.uid(), until = case when p_clear then now() else until end
-   where user_id = p_user and decided_at is null;
-  if p_clear then update public.risk_events set status = 'dismissed', reviewed_by = auth.uid() where user_id = p_user and not confirmed; end if;
-  update public.moderation_queue set status = 'decided', decision = case when p_clear then 'cleared' else 'kept' end, decided_by = auth.uid(), decided_at = now()
-   where content_type = 'user' and content_id = p_user and status = 'open' and reason in ('risk_hold','evasion');
-  perform public.audit('risk_decide', 'user', p_user, jsonb_build_object('clear', p_clear, 'note', p_note));
-end $$;
-
--- апелляция: доступна заблокированному пользователю (нужен только вход, без активной сессии)
-create or replace function public.appeal_submit(p_ban uuid, p_message text) returns jsonb
-language plpgsql security definer set search_path = public as $$
-declare b record; a record;
-begin
-  select * into b from public.user_bans where id = p_ban and user_id = auth.uid() and status = 'active';
-  if b.id is null then raise exception using errcode = 'NR404', message = 'Решение не найдено'; end if;
-  perform public.rate('appeal');
-  insert into public.ban_appeals (ban_id, user_id, message) values (b.id, auth.uid(), left(btrim(p_message), 1000))
-  on conflict (ban_id) do nothing returning * into a;
-  if a.id is null then select * into a from public.ban_appeals where ban_id = b.id; end if;
-  perform public.queue_add('appeal', a.id, auth.uid(), 'appeal');
-  return jsonb_build_object('id', a.id, 'status', a.status, 'due_at', a.due_at);
-end $$;
-
-create or replace function public.appeal_take(p_appeal uuid) returns void
-language plpgsql security definer set search_path = public as $$
-declare a record; b record;
-begin
-  if not public.is_mod() then raise exception using errcode = 'NR403', message = 'Только для модераторов'; end if;
-  select * into a from public.ban_appeals where id = p_appeal for update;
-  select * into b from public.user_bans where id = a.ban_id;
-  if auth.uid() in (b.moderator_id, b.approved_by) then
-    raise exception using errcode = 'NR403', message = 'Апелляцию рассматривает другой модератор', hint = 'independent';
-  end if;
-  update public.ban_appeals set status = 'in_review', reviewer_id = auth.uid(), taken_at = now() where id = p_appeal and status = 'pending';
-  perform public.audit('appeal_take', 'user', a.user_id, jsonb_build_object('appeal', a.id));
-end $$;
-
-create or replace function public.appeal_decide(p_appeal uuid, p_overturn boolean, p_note text) returns void
-language plpgsql security definer set search_path = public as $$
-declare a record; b record;
-begin
-  if not public.is_mod() then raise exception using errcode = 'NR403', message = 'Только для модераторов'; end if;
-  if coalesce(char_length(btrim(p_note)), 0) < 5 then raise exception using errcode = 'NR422', message = 'Опишите решение'; end if;
-  select * into a from public.ban_appeals where id = p_appeal for update;
-  if a.id is null or a.status in ('upheld','overturned') then raise exception using errcode = 'NR404', message = 'Апелляция уже рассмотрена'; end if;
-  select * into b from public.user_bans where id = a.ban_id;
-  if auth.uid() in (b.moderator_id, b.approved_by) then
-    raise exception using errcode = 'NR403', message = 'Апелляцию рассматривает другой модератор', hint = 'independent';
-  end if;
-  if p_overturn and b.expires_at is null and b.kind = 'ban' and not public.is_admin() then
-    raise exception using errcode = 'NR403', message = 'Бессрочное решение пересматривает старший администратор', hint = 'senior';
-  end if;
-  update public.ban_appeals set status = case when p_overturn then 'overturned' else 'upheld' end, reviewer_id = auth.uid(),
-         decision_note = p_note, decided_at = now(), taken_at = coalesce(taken_at, now()) where id = a.id;
-  if p_overturn then perform public.shield_revoke_internal(b.id, 'Апелляция: ' || p_note);
-  else insert into public.notifications (user_id, type, text) values (a.user_id, 'appeal', 'Апелляция по решению ' || b.decision_no || ' рассмотрена: решение оставлено в силе');
-  end if;
-  update public.moderation_queue set status = 'decided', decision = case when p_overturn then 'overturned' else 'upheld' end, decided_by = auth.uid(), decided_at = now()
-   where content_type = 'appeal' and content_id = a.id;
-  perform public.audit('appeal_decide', 'user', a.user_id, jsonb_build_object('appeal', a.id, 'overturn', p_overturn, 'note', p_note));
-end $$;
-
--- собственные решения и апелляции — для экрана "Мои нарушения"
-create or replace function public.my_decisions() returns table (id uuid, decision_no text, kind text, rule text, rule_title text, reason text,
-  starts_at timestamptz, expires_at timestamptz, status text, appeal_status text, appeal_note text)
-language sql stable security definer set search_path = public as $$
-  select b.id, b.decision_no, b.kind, b.rule, public.ban_rules()->b.rule->>'title', b.reason, b.starts_at, b.expires_at,
-         case when b.status = 'revoked' then 'revoked' when b.expires_at is not null and b.expires_at <= now() then 'expired' else 'active' end,
-         a.status, a.decision_note
-    from public.user_bans b left join public.ban_appeals a on a.ban_id = b.id
-   where b.user_id = auth.uid() and b.scope = 'global' order by b.created_at desc limit 50 $$;
-
--- ---------- 10. Встречи: Host, co-host, 9 категорий, посещаемость ----------
-alter table public.events add column if not exists meet_cat text;
-alter table public.events add column if not exists ends_at timestamptz;
-alter table public.events add column if not exists host_id uuid references public.profiles(id) on delete set null;
-alter table public.events add column if not exists cohost_id uuid references public.profiles(id) on delete set null;
-alter table public.events add column if not exists status text not null default 'scheduled';
-alter table public.events add column if not exists cancel_reason text;
-alter table public.events add column if not exists chat_id uuid;
-do $$ begin
-  alter table public.events add constraint events_meet_cat_chk check (meet_cat is null or meet_cat in ('sport','games','walk','food','study','creative','volunteer','family','other'));
-exception when duplicate_object then null; end $$;
-do $$ begin
-  alter table public.events add constraint events_status_chk check (status in ('scheduled','cancelled'));
-exception when duplicate_object then null; end $$;
-update public.events e set host_id = p.user_id from public.posts p where p.id = e.post_id and e.host_id is null;
-
-alter table public.event_members add column if not exists status text not null default 'going';
-alter table public.event_members add column if not exists withdrawn_at timestamptz;
-alter table public.event_members add column if not exists host_mark boolean;
-alter table public.event_members add column if not exists self_mark boolean;
-do $$ begin
-  alter table public.event_members add constraint event_members_status_chk check (status in ('going','withdrawn','excluded'));
-exception when duplicate_object then null; end $$;
-
-create or replace function public.meeting_end(e public.events) returns timestamptz
-language sql immutable as $$ select coalesce(e.ends_at, e.starts_at + interval '3 hours') $$;
-
--- посещаемость: Host не подтверждает спорную в одиночку — при расхождении статус disputed
-create or replace function public.attendance(host_mark boolean, self_mark boolean) returns text
-language sql immutable as $$
-  select case
-    when host_mark is null and self_mark is null then 'unknown'
-    when host_mark is not null and self_mark is not null and host_mark <> self_mark then 'disputed'
-    when coalesce(host_mark, self_mark) then 'attended' else 'missed' end $$;
-
-create or replace function public.is_meeting(p_post uuid) returns boolean
-language sql stable security definer set search_path = public as $$
-  select exists (select 1 from public.posts where id = p_post and category = 'meetup') $$;
-
--- встречи пилота доступны только допущенным участникам (до возрастной проверки)
-create or replace function public.meeting_access() returns boolean
-language sql stable security definer set search_path = public as $$
-  select coalesce((public.shield_cfg()->>'meetings_pilot_only')::boolean, true) = false
-      or coalesce((select meetings_pilot or is_admin from public.profiles where id = auth.uid()), false) $$;
-
-create or replace function public.meeting_guard() returns trigger
-language plpgsql security definer set search_path = public as $$
+declare s public.user_sanctions; sc text := case tg_table_name when 'posts' then 'post' when 'comments' then 'comment' when 'messages' then 'chat' else 'all' end;
 begin
   if auth.uid() is null then return new; end if;
-  if tg_table_name = 'posts' then
-    if new.category <> 'meetup' or tg_op <> 'INSERT' then return new; end if;
-  elsif not public.is_meeting(new.post_id) then return new;
-  end if;
-  perform public.shield_require('meeting');
-  if not public.meeting_access() then
-    raise exception using errcode = 'NR403', message = 'Встречи пока доступны только участникам закрытого пилота', hint = 'pilot';
+  s := public.active_sanction(auth.uid(), sc);
+  if s.id is not null then
+    raise exception using errcode = 'NR403', hint = 'restricted',
+      message = 'Действие ограничено модератором' || case when s.until is null then '' else ' до ' || to_char(s.until at time zone 'Asia/Almaty', 'DD.MM HH24:MI') end || '. Причина: ' || s.reason;
   end if;
   return new;
 end $$;
-drop trigger if exists posts_meeting_guard on public.posts;
-create trigger posts_meeting_guard before insert on public.posts for each row execute function public.meeting_guard();
-drop trigger if exists members_meeting_guard on public.event_members;
-create trigger members_meeting_guard before insert on public.event_members for each row execute function public.meeting_guard();
+do $$ declare t text; begin
+  foreach t in array array['posts','comments','messages'] loop
+    execute format('drop trigger if exists %I on public.%I', t || '_sanction', t);
+    execute format('create trigger %I before insert on public.%I for each row execute function public.sanction_guard()', t || '_sanction', t);
+  end loop;
+end $$;
 
--- при создании встречи: Host = автор, свой чат встречи
-create or replace function public.meeting_setup() returns trigger
+-- модератор ограничивает функцию на 1–30 дней; бессрочно — только администратор. Исключение из встречи не strike.
+create or replace function public.mod_restrict(p_user uuid, p_scope text, p_days int, p_reason text) returns uuid
 language plpgsql security definer set search_path = public as $$
-declare cid uuid; t text;
+declare sid uuid;
 begin
-  if new.host_id is null then select user_id into new.host_id from public.posts where id = new.post_id; end if;
-  if public.is_meeting(new.post_id) and new.chat_id is null then
-    select left(text, 60) into t from public.posts where id = new.post_id;
-    insert into public.group_chats (kind, title, post_id) values ('meeting', t, new.post_id)
-    on conflict (post_id) do update set title = excluded.title returning id into cid;
-    new.chat_id := cid;
-    insert into public.chat_members (chat_id, user_id, role) values (cid, new.host_id, 'host') on conflict do nothing;
+  if not public.is_mod() then raise exception using errcode = 'NR403', message = 'Только для модераторов'; end if;
+  if p_user = auth.uid() then raise exception using errcode = 'NR422', message = 'Нельзя ограничить себя'; end if;
+  if p_scope not in ('all','post','comment','chat','meet') then raise exception using errcode = 'NR422', message = 'Неизвестная функция'; end if;
+  if p_days is null and not public.is_admin() then raise exception using errcode = 'NR403', message = 'Бессрочное ограничение — только администратор'; end if;
+  if p_days is not null and (p_days < 1 or p_days > 30) then raise exception using errcode = 'NR422', message = 'Срок от 1 до 30 дней'; end if;
+  if char_length(coalesce(trim(p_reason), '')) < 3 then raise exception using errcode = 'NR422', message = 'Укажите причину'; end if;
+  insert into public.user_sanctions (user_id, scope, until, reason, created_by)
+  values (p_user, p_scope, case when p_days is null then null else now() + make_interval(days => p_days) end, left(trim(p_reason), 500), auth.uid())
+  returning id into sid;
+  insert into public.mod_actions (moderator_id, target_type, target_id, action, note) values (auth.uid(), 'user', p_user, 'restrict_' || p_scope, coalesce(p_days::text || ' дн.', 'бессрочно') || ': ' || left(p_reason, 400));
+  insert into public.notifications (user_id, type, text)
+  values (p_user, 'sanction', 'Ограничение: ' || case p_scope when 'all' then 'все действия' when 'post' then 'публикации' when 'comment' then 'комментарии' when 'chat' then 'сообщения' else 'встречи' end
+          || coalesce(' на ' || p_days || ' дн.', ' бессрочно') || '. Причина: ' || left(p_reason, 200) || '. Обжаловать можно 14 дней');
+  return sid;
+end $$;
+create or replace function public.mod_unrestrict(p_id uuid, p_note text default null) returns void
+language plpgsql security definer set search_path = public as $$
+declare s record;
+begin
+  if not public.is_mod() then raise exception using errcode = 'NR403', message = 'Только для модераторов'; end if;
+  update public.user_sanctions set revoked_at = now(), revoked_by = auth.uid() where id = p_id and revoked_at is null returning * into s;
+  if s.id is null then raise exception using errcode = 'NR404', message = 'Ограничение не найдено'; end if;
+  insert into public.mod_actions (moderator_id, target_type, target_id, action, note) values (auth.uid(), 'user', s.user_id, 'unrestrict', left(p_note, 400));
+  insert into public.notifications (user_id, type, text) values (s.user_id, 'sanction', 'Ограничение снято' || coalesce(': ' || left(p_note, 200), ''));
+end $$;
+
+-- ---------- 45/59: дружба не снимает возрастной запрет на личные чаты ----------
+create or replace function public.get_or_create_conversation(other uuid) returns uuid
+language plpgsql security definer set search_path = public as $$
+declare me uuid := auth.uid(); a uuid; b uuid; cid uuid; fr boolean;
+begin
+  if me is null then raise exception using errcode = 'NR403', message = 'Войдите, чтобы написать'; end if;
+  if other is null or other = me then raise exception using errcode = 'NR422', message = 'Нельзя написать самому себе'; end if;
+  if not exists (select 1 from public.profiles where id = other) then raise exception using errcode = 'NR404', message = 'Пользователь не найден'; end if;
+  if public.is_blocked(me, other) then raise exception using errcode = 'NR403', message = 'Пользователь недоступен'; end if;
+  if public.is_banned() then raise exception using errcode = 'NR403', message = 'Аккаунт заблокирован модератором'; end if;
+  if not (public.age_ok(me) and public.age_ok(other)) then
+    raise exception using errcode = 'NR403', message = 'Личные сообщения пока недоступны: возраст не проверен. Общаться можно в комментариях', hint = 'age_gate';
+  end if;
+  a := least(me, other); b := greatest(me, other);
+  select id into cid from public.conversations where user_a = a and user_b = b;
+  if cid is null then
+    fr := public.are_friends(me, other);
+    if not fr then perform public.rate_take('chat_request', null); end if;
+    insert into public.conversations (user_a, user_b, status, initiator)
+    values (a, b, case when fr then 'accepted' else 'request' end, me)
+    returning id into cid;
+  end if;
+  return cid;
+end $$;
+-- каждое сообщение: возрастной допуск обеих сторон (в том числе в старых переписках и между друзьями)
+create or replace function public.message_age_guard() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare c record;
+begin
+  if auth.uid() is null then return new; end if;
+  select user_a, user_b into c from public.conversations where id = new.conversation_id;
+  if c.user_a is not null and c.user_b is not null and not (public.age_ok(c.user_a) and public.age_ok(c.user_b)) then
+    raise exception using errcode = 'NR403', message = 'Личные сообщения пока недоступны: возраст не проверен', hint = 'age_gate';
   end if;
   return new;
 end $$;
-drop trigger if exists events_meeting_setup on public.events;
-create trigger events_meeting_setup before insert on public.events for each row execute function public.meeting_setup();
+drop trigger if exists messages_age on public.messages;
+create trigger messages_age before insert on public.messages for each row execute function public.message_age_guard();
 
--- изменить встречу (время, отмену, co-host) может только Host; глобально заблокировать — никто из организаторов
-drop policy if exists "events write" on public.events;
-create policy "events write" on public.events for all
-  using (exists (select 1 from public.posts p where p.id = post_id and p.user_id = auth.uid()) and not public.is_banned())
-  with check (exists (select 1 from public.posts p where p.id = post_id and p.user_id = auth.uid()) and not public.is_banned());
-
-create or replace function public.meeting_role(p_post uuid) returns text
+-- ---------- 38: состояние аккаунта, разрешенные действия и лимиты — с сервера ----------
+create or replace function public.limit_status(p_action text) returns jsonb
 language sql stable security definer set search_path = public as $$
-  select case when e.host_id = auth.uid() then 'host' when e.cohost_id = auth.uid() then 'cohost'
-              when exists (select 1 from public.event_members m where m.post_id = p_post and m.user_id = auth.uid() and m.status = 'going') then 'member'
-              else null end from public.events e where e.post_id = p_post $$;
+  with l as (select (day_limits->p_action->>(case when exists (select 1 from public.profile_private where user_id = auth.uid() and phone_verified_at is not null) then 1 else 0 end))::int lim
+               from public.app_settings where id = 1),
+       d as (select (now() at time zone 'Asia/Almaty')::date d),
+       u as (select coalesce((select n from public.rate_counters, d where user_id = auth.uid() and action = p_action and day = d.d), 0) used)
+  select jsonb_build_object('used', u.used, 'limit', l.lim,
+    'retry_after', case when public.is_mod() or l.lim is null or u.used < l.lim then null
+                        else greatest(60, ceil(extract(epoch from ((d.d + 1)::timestamp at time zone 'Asia/Almaty') - now())))::int end)
+    from l, d, u $$;
 
-create or replace function public.meeting_join(p_post uuid) returns jsonb
-language plpgsql security definer set search_path = public as $$
-declare e record;
+create or replace function public.my_account() returns jsonb
+language plpgsql stable security definer set search_path = public as $$
+declare p record; pp record; st text; sa public.user_sanctions; can jsonb;
 begin
-  perform public.shield_require('meeting');
-  select * into e from public.events where post_id = p_post for update;
-  if e.post_id is null or not public.can_see_post(p_post) then raise exception using errcode = 'NR404', message = 'Встреча не найдена'; end if;
-  if e.status = 'cancelled' then raise exception using errcode = 'NR409', message = 'Встреча отменена'; end if;
-  if e.starts_at < now() then raise exception using errcode = 'NR409', message = 'Встреча уже началась'; end if;
-  if exists (select 1 from public.event_members where post_id = p_post and user_id = auth.uid() and status = 'excluded') then
-    raise exception using errcode = 'NR403', message = 'Организатор исключил вас из этой встречи', hint = 'excluded';
+  if auth.uid() is null then return null; end if;
+  select * into p from public.profiles where id = auth.uid();
+  if p.id is null then return jsonb_build_object('state', 'deleted'); end if;
+  select * into pp from public.profile_private where user_id = auth.uid();
+  sa := public.active_sanction(auth.uid(), 'all');
+  st := case when p.banned then 'suspended'
+             when not public.is_verified() then 'pending_email'
+             when p.nickname is null or p.accepted_rules_at is null then 'profile_incomplete'
+             when sa.id is not null or exists (select 1 from public.user_sanctions where user_id = auth.uid() and revoked_at is null and (until is null or until > now())) then 'restricted'
+             else 'active' end;
+  can := jsonb_build_object(
+    'post', st in ('active','restricted') and public.active_sanction(auth.uid(), 'post') is null,
+    'comment', st in ('active','restricted') and public.active_sanction(auth.uid(), 'comment') is null,
+    'chat', st in ('active','restricted') and public.active_sanction(auth.uid(), 'chat') is null and public.age_ok(auth.uid()),
+    'meet', st = 'active' and public.age_ok(auth.uid()),
+    'report', st <> 'suspended');
+  return jsonb_build_object(
+    'state', st, 'can', can,
+    'age_status', coalesce(pp.age_status, 'unknown'), 'age_ok', public.age_ok(auth.uid()),
+    'phone_verified', pp.phone_verified_at is not null,
+    'nickname_next_change', case when p.nickname_changed_at > now() - interval '30 days' then p.nickname_changed_at + interval '30 days' end,
+    'instagram', p.instagram, 'instagram_public', p.instagram_public, 'accepted_rules', p.accepted_rules_at is not null,
+    'mod_role', p.is_admin or p.is_moderator, 'mfa_ok', public.mfa_ok(),
+    'sanction', case when sa.id is not null then jsonb_build_object('until', sa.until, 'reason', sa.reason) end,
+    'limits', jsonb_build_object('post', public.limit_status('post'), 'comment', public.limit_status('comment'), 'chat_request', public.limit_status('chat_request')),
+    'clean_version', (select clean_version from public.app_settings where id = 1),
+    'media_ok', true);
+end $$;
+
+-- ---------- 45/60/07: опасное содержание блокируется независимо от маскирования мата ----------
+-- Тот же набор правил, что в src/lib/clean.js (nearBlockReason / nearFlagReason); совпадение проверяет clean_parity.mjs.
+create or replace function public.near_norm_text(t text) returns text language sql immutable as $$
+  select replace(lower(translate(coalesce(t, ''), 'АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ', 'абвгдеёжзийклмнопрстуфхцчшщъыьэюя')), 'ё', 'е') $$;
+create or replace function public.near_block_reason(t text) returns text language plpgsql immutable as $$
+declare s text := public.near_norm_text(t);
+begin
+  if s = '' then return null; end if;
+  if public.near_is_threat(t) then return 'threat'; end if;
+  if s ~ '(интим[ -]?(услуг|за деньг|встреч)|эскорт|секс за деньг|секс[ -]?услуг|досуг для (мужчин|джентльмен)|нюдс|nudes|onlyfans|скинь (фото|нюдс) без одежды|sex for money)' then return 'sexual'; end if;
+  if s ~ '(?<!не )(скинь|пришли|назови|сообщи|продиктуй|отправь)(те)? (мне |нам )?(код из смс|код|смс|cvv|cvc|пин-?код|номер карты|данные карты)([^а-яa-z]|$)' then return 'scam'; end if;
+  if s ~ '(bit\.ly|clck\.ru|tinyurl\.com|cutt\.ly|goo\.su|t\.ly|is\.gd|rb\.gy|shorturl\.at|ow\.ly|u\.to|vk\.cc)/' then return 'shortlink'; end if;
+  return null;
+end $$;
+-- сомнительное (предоплата, перевод на карту): публикуется, но попадает в очередь модератора
+create or replace function public.near_flag_reason(t text) returns text language sql immutable as $$
+  select case when public.near_norm_text(t) ~ '((?<!без )предоплат|переведи(те)? (на |деньги)|перевод(ом)? на (карту|каспи|kaspi))' then 'prepay' end $$;
+
+create or replace function public.near_block_message(r text) returns text language sql immutable as $$
+  select case r when 'threat' then 'Угрозы запрещены правилами NEAR. Текст не опубликован'
+    when 'sexual' then 'Интимные услуги и откровенные предложения запрещены. NEAR — не сервис знакомств'
+    when 'scam' then 'Нельзя просить коды из SMS и данные карт. NEAR никогда не просит SMS-коды'
+    when 'shortlink' then 'Сокращенные ссылки запрещены: укажите полный адрес сайта'
+    else 'Текст нарушает правила NEAR' end $$;
+
+create or replace function public.mask_text_trigger() returns trigger
+language plpgsql as $$
+declare r text;
+begin
+  if tg_op = 'INSERT' or new.text is distinct from old.text then
+    r := public.near_block_reason(new.text);
+    if r is not null then raise exception using errcode = 'NR422', message = public.near_block_message(r), hint = r; end if;
+    new.text := public.near_clean(new.text);
   end if;
-  insert into public.event_members (post_id, user_id, status) values (p_post, auth.uid(), 'going')
-  on conflict (post_id, user_id) do update set status = 'going', withdrawn_at = null where public.event_members.status = 'withdrawn';
-  if e.chat_id is not null then
-    insert into public.chat_members (chat_id, user_id) values (e.chat_id, auth.uid()) on conflict do nothing;
+  return new;
+end $$;
+create or replace function public.mask_bio_trigger() returns trigger
+language plpgsql as $$
+declare r text;
+begin
+  if new.bio is distinct from old.bio and new.bio is not null then
+    r := public.near_block_reason(new.bio);
+    if r is not null then raise exception using errcode = 'NR422', message = public.near_block_message(r), hint = r; end if;
+    new.bio := public.near_clean(new.bio);
   end if;
-  return jsonb_build_object('ok', true, 'chat_id', e.chat_id);
+  return new;
 end $$;
 
--- своевременный отказ (за 2 часа и раньше) не портит посещаемость
-create or replace function public.meeting_leave(p_post uuid) returns void
+alter table public.reports drop constraint if exists reports_source_check;
+alter table public.reports add constraint reports_source_check check (source in ('user','ai','system','rules'));
+create or replace function public.flag_after_insert() returns trigger
 language plpgsql security definer set search_path = public as $$
-declare e record;
+declare r text := public.near_flag_reason(new.text);
 begin
-  select * into e from public.events where post_id = p_post;
-  update public.event_members set status = 'withdrawn', withdrawn_at = now()
-   where post_id = p_post and user_id = auth.uid() and status = 'going';
-  if e.starts_at - now() < interval '2 hours' then
-    update public.event_members set withdrawn_at = withdrawn_at where false; -- поздний отказ: учитывается как обязательство в пересчете
-  end if;
-  delete from public.chat_members where chat_id = e.chat_id and user_id = auth.uid() and role = 'member';
+  if r is null then return new; end if;
+  insert into public.reports (reporter_id, source, target_type, target_id, target_user, reason, details)
+  values (null, 'rules', case when tg_table_name = 'posts' then 'post' else 'comment' end, new.id, new.user_id, 'scam', 'Правило: ' || r)
+  on conflict do nothing;
+  return new;
 end $$;
+drop trigger if exists posts_flag on public.posts;
+create trigger posts_flag after insert on public.posts for each row execute function public.flag_after_insert();
+drop trigger if exists comments_flag on public.comments;
+create trigger comments_flag after insert on public.comments for each row execute function public.flag_after_insert();
 
--- организатор: исключить участника из СВОЕЙ встречи (не глобальный бан)
-create or replace function public.meeting_exclude(p_post uuid, p_user uuid, p_reason text) returns void
-language plpgsql security definer set search_path = public as $$
-declare e record;
-begin
-  perform public.shield_require('write');
-  select * into e from public.events where post_id = p_post;
-  if auth.uid() not in (e.host_id, e.cohost_id) then raise exception using errcode = 'NR403', message = 'Только организатор встречи'; end if;
-  if p_user in (e.host_id, e.cohost_id) then raise exception using errcode = 'NR403', message = 'Нельзя исключить организатора'; end if;
-  update public.event_members set status = 'excluded' where post_id = p_post and user_id = p_user;
-  delete from public.chat_members where chat_id = e.chat_id and user_id = p_user;
-  insert into public.user_bans (user_id, kind, scope, scope_id, rule, reason, moderator_id, source_key)
-  values (p_user, 'restricted', 'meeting', p_post, 'minor', coalesce(nullif(btrim(p_reason), ''), 'Исключен организатором встречи'), auth.uid(), 'meet:' || p_post || ':' || p_user)
-  on conflict (source_key) do nothing;
-  perform public.audit('meeting_exclude', 'user', p_user, jsonb_build_object('meeting', p_post, 'reason', p_reason));
-end $$;
+-- ---------- 40/52: поля форм по типам, категория "Помощь", сроки ----------
+alter table public.posts drop constraint if exists posts_category_check;
+alter table public.posts add constraint posts_category_check check (category in ('incident','event','deal','lost','found','help','meetup','ad','talk'));
+alter table public.posts add column if not exists meta jsonb not null default '{}'::jsonb;
 
-create or replace function public.meeting_set_cohost(p_post uuid, p_user uuid) returns void
-language plpgsql security definer set search_path = public as $$
-declare e record;
-begin
-  perform public.shield_require('write');
-  select * into e from public.events where post_id = p_post;
-  if e.host_id <> auth.uid() then raise exception using errcode = 'NR403', message = 'Только организатор встречи'; end if;
-  if p_user is not null and not exists (select 1 from public.event_members where post_id = p_post and user_id = p_user and status = 'going') then
-    raise exception using errcode = 'NR422', message = 'Co-host выбирается из участников';
-  end if;
-  update public.events set cohost_id = p_user where post_id = p_post;
-  if p_user is not null then update public.chat_members set role = 'cohost' where chat_id = e.chat_id and user_id = p_user; end if;
-end $$;
-
-create or replace function public.meeting_cancel_internal(p_post uuid, p_reason text) returns void
-language plpgsql security definer set search_path = public as $$
-begin
-  update public.events set status = 'cancelled', cancel_reason = p_reason where post_id = p_post and status = 'scheduled';
-  insert into public.notifications (user_id, type, post_id, text)
-  select m.user_id, 'meeting', p_post, left(p_reason, 200) from public.event_members m where m.post_id = p_post and m.status = 'going';
-end $$;
-create or replace function public.meeting_cancel(p_post uuid, p_reason text) returns void
-language plpgsql security definer set search_path = public as $$
-begin
-  if (select host_id from public.events where post_id = p_post) is distinct from auth.uid() and not public.is_mod() then
-    raise exception using errcode = 'NR403', message = 'Только организатор встречи';
-  end if;
-  perform public.meeting_cancel_internal(p_post, coalesce(nullif(btrim(p_reason), ''), 'Организатор отменил встречу'));
-end $$;
-
--- отметки посещаемости: организатор отмечает участников, участник — себя (после начала встречи)
-create or replace function public.meeting_mark(p_post uuid, p_user uuid, p_attended boolean) returns text
-language plpgsql security definer set search_path = public as $$
-declare e record; r record;
-begin
-  perform public.shield_require('write');
-  select * into e from public.events where post_id = p_post;
-  if e.starts_at > now() then raise exception using errcode = 'NR409', message = 'Отмечать можно после начала встречи'; end if;
-  if coalesce(e.ends_at, e.starts_at + interval '3 hours') + interval '7 days' < now() then raise exception using errcode = 'NR409', message = 'Срок отметок истек'; end if;
-  if p_user = auth.uid() then
-    update public.event_members set self_mark = p_attended where post_id = p_post and user_id = p_user and status = 'going' returning * into r;
-  elsif auth.uid() in (e.host_id, e.cohost_id) then
-    update public.event_members set host_mark = p_attended where post_id = p_post and user_id = p_user and status = 'going' returning * into r;
-  else
-    raise exception using errcode = 'NR403', message = 'Отмечать других может только организатор';
-  end if;
-  if r.post_id is null then raise exception using errcode = 'NR404', message = 'Участник не найден'; end if;
-  if public.attendance(r.host_mark, r.self_mark) = 'disputed' then perform public.queue_add('attendance', p_post, p_user, 'disputed'); end if;
-  perform public.rep_recalc(p_user);
-  return public.attendance(r.host_mark, r.self_mark);
-end $$;
-
--- ---------- 11. Отзывы после встречи ----------
-create table if not exists public.user_reviews (
-  id           uuid primary key default gen_random_uuid(),
-  meeting_id   uuid not null references public.posts(id) on delete cascade,
-  reviewer_id  uuid not null references public.profiles(id) on delete cascade,
-  target_id    uuid not null references public.profiles(id) on delete cascade,
-  target_role  text not null check (target_role in ('host','participant')),
-  rating       int not null check (rating between 1 and 5),
-  tags         text[] not null default '{}',
-  comment      text check (comment is null or char_length(comment) <= 500),
-  status       text not null default 'visible' check (status in ('visible','pending','hidden')),
-  created_at   timestamptz not null default now(),
-  unique (meeting_id, reviewer_id, target_id),
-  check (reviewer_id <> target_id)
-);
-create index if not exists user_reviews_target_idx on public.user_reviews (target_id, status);
-alter table public.user_reviews enable row level security;
-drop policy if exists "reviews read" on public.user_reviews;
-create policy "reviews read" on public.user_reviews for select using (
-  (status = 'visible' and not public.is_blocked(auth.uid(), reviewer_id)) or reviewer_id = auth.uid() or public.is_mod());
-drop trigger if exists user_reviews_clean_comment on public.user_reviews;
-create trigger user_reviews_clean_comment before insert or update of comment on public.user_reviews for each row execute function public.clean_guard('comment', 'review');
-
-create or replace function public.member_attended(p_post uuid, p_user uuid) returns boolean
-language sql stable security definer set search_path = public as $$
-  select case when exists (select 1 from public.events e where e.post_id = p_post and p_user in (e.host_id, e.cohost_id)) then true
-    else coalesce((select public.attendance(m.host_mark, m.self_mark) = 'attended' from public.event_members m
-                    where m.post_id = p_post and m.user_id = p_user and m.status = 'going'), false) end $$;
-
--- кого можно оценить по этой встрече (окно 7 суток после окончания, оба присутствовали)
-create or replace function public.review_targets(p_post uuid) returns table (user_id uuid, nickname text, role text, done boolean)
-language sql stable security definer set search_path = public as $$
-  with e as (select * from public.events where post_id = p_post and status = 'scheduled'
-              and public.meeting_end(events) < now() and public.meeting_end(events) + interval '7 days' > now()),
-  people as (
-    select e.host_id uid, 'host' r from e union select e.cohost_id, 'host' from e where e.cohost_id is not null
-    union select m.user_id, 'participant' from public.event_members m join e on e.post_id = m.post_id where m.status = 'going')
-  select p.uid, pr.nickname, p.r, exists (select 1 from public.user_reviews r where r.meeting_id = p_post and r.reviewer_id = auth.uid() and r.target_id = p.uid)
-    from people p join public.profiles pr on pr.id = p.uid
-   where p.uid <> auth.uid() and public.member_attended(p_post, auth.uid()) and public.member_attended(p_post, p.uid) $$;
-
-create or replace function public.review_submit(p_post uuid, p_target uuid, p_rating int, p_tags text[], p_comment text) returns jsonb
-language plpgsql security definer set search_path = public as $$
-declare t record; rv record;
-begin
-  perform public.shield_require('write');
-  select * into t from public.review_targets(p_post) where user_id = p_target;
-  if t.user_id is null then
-    raise exception using errcode = 'NR403', message = 'Отзыв могут оставить только подтвержденные участники в течение 7 дней после встречи', hint = 'review_closed';
-  end if;
-  if p_rating not between 1 and 5 then raise exception using errcode = 'NR422', message = 'Поставьте оценку от 1 до 5'; end if;
-  perform public.rate('review');
-  insert into public.user_reviews (meeting_id, reviewer_id, target_id, target_role, rating, tags, comment)
-  values (p_post, auth.uid(), p_target, t.role, p_rating,
-          (select coalesce(array_agg(x), '{}') from unnest(coalesce(p_tags, '{}')) x where x in ('punctual','polite','responsible','organized','as_described','team')),
-          nullif(left(btrim(coalesce(p_comment, '')), 500), ''))
-  on conflict (meeting_id, reviewer_id, target_id) do nothing returning * into rv;
-  if rv.id is null then select * into rv from public.user_reviews where meeting_id = p_post and reviewer_id = auth.uid() and target_id = p_target;
-    return jsonb_build_object('id', rv.id, 'repeat', true); end if;
-  perform public.rep_recalc(p_target);
-  return jsonb_build_object('id', rv.id);
-end $$;
-
--- встречи, по которым ждут отзыва (для уведомления "Оцените встречу")
-create or replace function public.reviews_pending() returns table (post_id uuid, title text, ended_at timestamptz, left_count int)
-language sql stable security definer set search_path = public as $$
-  select e.post_id, left(p.text, 80), public.meeting_end(e), (select count(*)::int from public.review_targets(e.post_id) t where not t.done)
-    from public.events e join public.posts p on p.id = e.post_id
-   where p.category = 'meetup' and e.status = 'scheduled' and public.meeting_end(e) < now() and public.meeting_end(e) + interval '7 days' > now()
-     and (e.host_id = auth.uid() or e.cohost_id = auth.uid() or exists (select 1 from public.event_members m where m.post_id = e.post_id and m.user_id = auth.uid() and m.status = 'going'))
-     and exists (select 1 from public.review_targets(e.post_id) t where not t.done) $$;
-
--- ---------- 12. Репутация NEAR Reputation ----------
-create table if not exists public.user_reputation (
-  user_id          uuid primary key references public.profiles(id) on delete cascade,
-  score            int,                 -- null = "Новый участник · недостаточно данных"
-  components       jsonb not null default '{}'::jsonb,
-  review_count     int not null default 0,
-  host_rating      numeric(3,2), host_reviews int not null default 0,
-  member_rating    numeric(3,2), member_reviews int not null default 0,
-  attendance_pct   int,
-  thanks           int not null default 0,
-  meetings_done    int not null default 0,
-  formula_version  text not null default 'rep-1',
-  updated_at       timestamptz not null default now()
-);
-alter table public.user_reputation enable row level security;
-drop policy if exists "rep read" on public.user_reputation;
-create policy "rep read" on public.user_reputation for select using (true);
-
--- R = round(0,30·V + 0,25·A + 0,25·S + 0,10·U + 0,10·H); отсутствующий компонент исключается, веса перенормируются
-create or replace function public.rep_formula(v numeric, a numeric, s numeric, u numeric, h numeric) returns int
+create or replace function public.post_ttl(cat text, sos boolean) returns interval
 language sql immutable as $$
-  select case when w = 0 then null else round(t / w)::int end from (
-    select coalesce(0.30 * v, 0) + coalesce(0.25 * a, 0) + coalesce(0.25 * s, 0) + coalesce(0.10 * u, 0) + coalesce(0.10 * h, 0) t,
-           (case when v is null then 0 else 0.30 end) + (case when a is null then 0 else 0.25 end) + (case when s is null then 0 else 0.25 end)
-         + (case when u is null then 0 else 0.10 end) + (case when h is null then 0 else 0.10 end) w) x $$;
+  select case when sos then interval '3 hours'
+    when cat = 'incident' then interval '24 hours'
+    when cat in ('lost','found') then interval '30 days'
+    when cat = 'help' then interval '7 days'
+    when cat in ('deal','ad') then interval '14 days'
+    when cat = 'meetup' then interval '7 days'
+    when cat = 'event' then interval '30 days'
+    else interval '90 days' end $$;
 
-create or replace function public.rep_level(score int) returns text
-language sql immutable as $$
-  select case when score is null then 'new' when score >= 90 then 'high' when score >= 75 then 'good' when score >= 50 then 'medium' else 'low' end $$;
+-- ссылка: только https, без сокращателей; иначе null
+create or replace function public.clean_url(u text) returns text language sql immutable as $$
+  select case when u ~* '^https://[a-z0-9.-]+\.[a-z]{2,}(/[^\s<>"]*)?$' and char_length(u) <= 300 and public.near_block_reason(u || ' ') is null then u end $$;
 
-create or replace function public.rep_recalc(p_user uuid) returns void
-language plpgsql security definer set search_path = public as $$
-declare
-  avg_r numeric; n_rev int; n_people int; v numeric; committed int; attended int; a numeric; pen int; s numeric;
-  thanks int; useful int; u numeric; months numeric; h numeric; hr numeric; hn int; mr numeric; mn int; done int; sc int;
+-- разрешенные поля по категории; тексты проходят NEAR Clean и правила блокировки
+create or replace function public.post_meta_clean(cat text, m jsonb) returns jsonb
+language plpgsql immutable as $$
+declare o jsonb := '{}'::jsonb; t text; r text; k text;
 begin
-  select avg(rating), count(*), count(distinct reviewer_id) into avg_r, n_rev, n_people from public.user_reviews where target_id = p_user and status = 'visible';
-  v := case when n_rev > 0 then 25 * (avg_r - 1) end;
-  select avg(rating), count(*) into hr, hn from public.user_reviews where target_id = p_user and status = 'visible' and target_role = 'host';
-  select avg(rating), count(*) into mr, mn from public.user_reviews where target_id = p_user and status = 'visible' and target_role = 'participant';
-  -- обязательства: прошедшие неотмененные встречи; своевременный отказ и спорные исключены
-  select count(*) filter (where public.attendance(m.host_mark, m.self_mark) in ('attended','missed') and m.status = 'going'),
-         count(*) filter (where public.attendance(m.host_mark, m.self_mark) = 'attended' and m.status = 'going')
-    into committed, attended
-    from public.event_members m join public.events e on e.post_id = m.post_id join public.posts p on p.id = m.post_id
-   where m.user_id = p_user and p.category = 'meetup' and e.status = 'scheduled' and public.meeting_end(e) < now();
-  a := case when committed > 0 then 100.0 * attended / committed end;
-  select count(*) into done from public.events e join public.posts p on p.id = e.post_id
-   where p.category = 'meetup' and e.status = 'scheduled' and public.meeting_end(e) < now()
-     and (e.host_id = p_user or public.member_attended(e.post_id, p_user));
-  -- соблюдение правил: только подтвержденные решения (жалобы без решения не влияют)
-  select coalesce(-sum(points), 0) into pen from public.reputation_events where user_id = p_user and kind in ('penalty','reversal');
-  s := greatest(0, 100 - pen);
-  -- полезность: благодарности (лайки) от разных людей к помощи и находкам, без взаимных серий
-  select count(distinct l.user_id) into thanks from public.likes l join public.posts p on p.id = l.post_id
-   where p.user_id = p_user and l.user_id <> p_user and p.category in ('lost','found','incident','talk')
-     and (select count(*) from public.likes l2 join public.posts p2 on p2.id = l2.post_id
-           where l2.user_id = p_user and p2.user_id = l.user_id and l2.created_at > now() - interval '30 days') < 3;
-  useful := thanks;
-  u := case when useful > 0 then least(100, 40 + 10 * useful) end;
-  -- история: только прибавляется со стажем, не уменьшается за неактивность
-  select extract(epoch from now() - created_at) / 2592000 into months from public.profiles where id = p_user;
-  h := case when months >= 1 then least(100, 50 + 10 * floor(months)) end;
-  sc := case when n_people >= 3 and done >= 3 then public.rep_formula(v, a, s, u, h) end;
-  insert into public.user_reputation (user_id, score, components, review_count, host_rating, host_reviews, member_rating, member_reviews,
-                                      attendance_pct, thanks, meetings_done, formula_version, updated_at)
-  values (p_user, sc, jsonb_build_object('V', round(v), 'A', round(a), 'S', round(s), 'U', round(u), 'H', round(h)), n_rev, round(hr, 2), hn, round(mr, 2), mn,
-          round(a)::int, thanks, done, coalesce(public.shield_cfg()->>'formula', 'rep-1'), now())
-  on conflict (user_id) do update set score = excluded.score, components = excluded.components, review_count = excluded.review_count,
-    host_rating = excluded.host_rating, host_reviews = excluded.host_reviews, member_rating = excluded.member_rating, member_reviews = excluded.member_reviews,
-    attendance_pct = excluded.attendance_pct, thanks = excluded.thanks, meetings_done = excluded.meetings_done,
-    formula_version = excluded.formula_version, updated_at = now();
+  m := coalesce(m, '{}'::jsonb);
+  foreach k in array array['title','organizer','org','conditions','price_text'] loop
+    t := btrim(m->>k);
+    if t is not null and t <> '' then
+      r := public.near_block_reason(t);
+      if r is not null then raise exception using errcode = 'NR422', message = public.near_block_message(r), hint = r; end if;
+      m := jsonb_set(m, array[k], to_jsonb(public.near_clean(left(t, case k when 'title' then 80 when 'conditions' then 300 else 60 end))));
+    end if;
+  end loop;
+  if cat = 'incident' then
+    if m->>'itype' in ('dtp','water','power','gas','heat','road','other') then o := o || jsonb_build_object('itype', m->>'itype'); end if;
+    if (m->>'ttl_h') in ('1','3','6','12','24') then o := o || jsonb_build_object('ttl_h', (m->>'ttl_h')::int); end if;
+  elsif cat = 'event' then
+    -- название обязательно в форме; старые клиенты без поля — название пустое (карточка покажет текст)
+    if coalesce(m->>'title', '') <> '' then
+      if char_length(m->>'title') < 5 then raise exception using errcode = 'NR422', message = 'Название события: от 5 до 80 символов'; end if;
+      o := o || jsonb_build_object('title', m->>'title');
+    end if;
+    if coalesce(m->>'organizer', '') <> '' then o := o || jsonb_build_object('organizer', m->>'organizer'); end if;
+    if (m->>'price_kzt') ~ '^\d{1,7}$' then o := o || jsonb_build_object('price_kzt', (m->>'price_kzt')::int);
+    elsif m->>'price_kzt' = 'free' then o := o || jsonb_build_object('price_kzt', 0); end if;
+    if public.clean_url(m->>'source_url') is not null then o := o || jsonb_build_object('source_url', m->>'source_url'); end if;
+  elsif cat = 'deal' then
+    if coalesce(m->>'org', '') <> '' then o := o || jsonb_build_object('org', m->>'org'); end if;
+    if coalesce(m->>'price_text', '') <> '' then o := o || jsonb_build_object('price_text', m->>'price_text'); end if;
+    if (m->>'until') is not null then
+      begin
+        if (m->>'until')::timestamptz > now() and (m->>'until')::timestamptz <= now() + interval '14 days' then o := o || jsonb_build_object('until', m->>'until');
+        else raise exception using errcode = 'NR422', message = 'Срок акции: от сегодня до 14 дней'; end if;
+      exception when invalid_datetime_format or datetime_field_overflow then raise exception using errcode = 'NR422', message = 'Проверьте срок акции'; end;
+    end if;
+    if public.clean_url(m->>'url') is not null then o := o || jsonb_build_object('url', m->>'url'); end if;
+  elsif cat = 'help' then
+    if m->>'hkind' in ('need','offer') then o := o || jsonb_build_object('hkind', m->>'hkind'); else o := o || '{"hkind":"need"}'::jsonb; end if;
+  elsif cat = 'ad' then
+    if coalesce(m->>'price_text', '') <> '' then o := o || jsonb_build_object('price_text', m->>'price_text'); end if;
+  end if;
+  return o;
 end $$;
 
-create or replace function public.reputation(p_user uuid) returns jsonb
+-- триггер последним в цепочке (имя "zz"): очищает meta и уточняет срок по полям формы
+create or replace function public.post_meta_trigger() returns trigger
 language plpgsql security definer set search_path = public as $$
-declare r record;
 begin
-  select * into r from public.user_reputation where user_id = p_user;
-  if r.user_id is null or r.updated_at < now() - interval '1 hour' then perform public.rep_recalc(p_user); select * into r from public.user_reputation where user_id = p_user; end if;
-  return jsonb_build_object('score', r.score, 'level', public.rep_level(r.score), 'review_count', r.review_count,
-    'host_rating', r.host_rating, 'host_reviews', r.host_reviews, 'member_rating', r.member_rating, 'member_reviews', r.member_reviews,
-    'attendance_pct', r.attendance_pct, 'thanks', r.thanks, 'meetings_done', r.meetings_done, 'formula', r.formula_version,
-    'components', case when p_user = auth.uid() then r.components end);
+  if tg_op = 'INSERT' or new.meta is distinct from old.meta or new.category is distinct from old.category then
+    new.meta := public.post_meta_clean(new.category, new.meta);
+    if tg_op = 'INSERT' and not new.is_sos then
+      if new.category = 'incident' and new.meta ? 'ttl_h' then new.expires_at := least(new.expires_at, now() + make_interval(hours => (new.meta->>'ttl_h')::int)); end if;
+      if new.category = 'deal' and new.meta ? 'until' then new.expires_at := least(new.expires_at, (new.meta->>'until')::timestamptz); end if;
+    end if;
+  end if;
+  return new;
 end $$;
+drop trigger if exists posts_zz_meta on public.posts;
+create trigger posts_zz_meta before insert or update on public.posts for each row execute function public.post_meta_trigger();
 
--- ---------- 13. Общие чаты (вместо личных сообщений) ----------
-create table if not exists public.group_chats (
-  id          uuid primary key default gen_random_uuid(),
-  kind        text not null check (kind in ('city','district','meeting')),
-  title       text not null,
-  district    text,
-  post_id     uuid unique references public.posts(id) on delete cascade,
-  created_at  timestamptz not null default now(),
-  last_message_at timestamptz,
-  unique (kind, district)
-);
-create table if not exists public.chat_members (
-  chat_id           uuid not null references public.group_chats(id) on delete cascade,
-  user_id           uuid not null references public.profiles(id) on delete cascade,
-  role              text not null default 'member' check (role in ('member','host','cohost')),
-  joined_at         timestamptz not null default now(),
-  last_read_at      timestamptz not null default now(),
-  restricted_until  timestamptz,
-  primary key (chat_id, user_id)
-);
-create table if not exists public.chat_messages (
-  id          uuid primary key default gen_random_uuid(),
-  chat_id     uuid not null references public.group_chats(id) on delete cascade,
-  sender_id   uuid not null references public.profiles(id) on delete cascade,
-  text        text not null check (char_length(text) between 1 and 1000),
-  client_key  uuid,
-  mod_status  text not null default 'ok' check (mod_status in ('ok','pending','hidden')),
-  created_at  timestamptz not null default now(),
-  unique (sender_id, client_key)
-);
-create index if not exists chat_messages_chat_idx on public.chat_messages (chat_id, created_at desc);
-alter table public.group_chats enable row level security;
-alter table public.chat_members enable row level security;
-alter table public.chat_messages enable row level security;
+-- ---------- 06/58/60: закрытые медиа ----------
+-- Новые файлы публикаций: приватный бакет post-private (своя папка <user>/<post>/...).
+-- Читать (получить подписанную ссылку) можно: автору, модератору, а остальным — только одобренный файл видимой публикации.
+-- Прямая загрузка в публичный post-media закрыта (старые файлы там остаются читаемыми).
+insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+values ('post-private', 'post-private', false, 20971520,
+        array['image/jpeg','image/png','image/webp','video/mp4','video/quicktime','video/webm','video/x-m4v'])
+on conflict (id) do update set public = false, file_size_limit = excluded.file_size_limit, allowed_mime_types = excluded.allowed_mime_types;
+-- аватары: отдельный публичный бакет, только изображения до 2 МБ, своя папка
+insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+values ('avatars', 'avatars', true, 2097152, array['image/jpeg','image/png','image/webp'])
+on conflict (id) do update set public = true, file_size_limit = excluded.file_size_limit, allowed_mime_types = excluded.allowed_mime_types;
 
-create unique index if not exists group_chats_one_city on public.group_chats (kind) where kind = 'city';
-insert into public.group_chats (kind, title) select 'city', 'Алматы — общий чат' where not exists (select 1 from public.group_chats where kind = 'city');
-insert into public.group_chats (kind, title, district)
-select 'district', d || ' — чат района', d from unnest(array['Алмалинский район','Бостандыкский район','Медеуский район','Ауэзовский район',
-  'Алатауский район','Наурызбайский район','Жетысуский район','Турксибский район']) d on conflict do nothing;
+alter table public.post_media drop constraint if exists post_media_mod_status_check;
+alter table public.post_media add constraint post_media_mod_status_check check (mod_status in ('ok','pending','review','flagged','rejected'));
 
-create or replace function public.chat_can_read(p_chat uuid) returns boolean
+create or replace function public.storage_media_visible(obj_name text) returns boolean
 language sql stable security definer set search_path = public as $$
-  select public.shield_ok() and exists (select 1 from public.group_chats c where c.id = p_chat and
-    (c.kind in ('city','district') or exists (select 1 from public.chat_members m where m.chat_id = c.id and m.user_id = auth.uid()) or public.is_mod())) $$;
+  select (storage.foldername(obj_name))[1] = auth.uid()::text or public.is_mod()
+      or exists (select 1 from public.post_media m
+                  where obj_name in (m.path, regexp_replace(m.path, '\.[a-z0-9]+$', '') || '-t.jpg', regexp_replace(m.path, '\.[a-z0-9]+$', '') || '-t.webp', regexp_replace(m.path, '\.[a-z0-9]+$', '') || '-p.jpg')
+                    and m.bucket = 'post-private' and m.mod_status = 'ok' and public.can_see_post(m.post_id)) $$;
 
-drop policy if exists "chats read" on public.group_chats;
-create policy "chats read" on public.group_chats for select using (public.chat_can_read(id));
-drop policy if exists "chat members read" on public.chat_members;
-create policy "chat members read" on public.chat_members for select using (public.chat_can_read(chat_id));
-drop policy if exists "chat messages read" on public.chat_messages;
--- блокировка между пользователями скрывает историю, превью и счетчики
-create policy "chat messages read" on public.chat_messages for select using (
-  public.chat_can_read(chat_id) and (mod_status = 'ok' or sender_id = auth.uid() or public.is_mod())
-  and not public.is_blocked(auth.uid(), sender_id));
+drop policy if exists "near media upload" on storage.objects;
+drop policy if exists "near media delete" on storage.objects;
+drop policy if exists "near private read" on storage.objects;
+drop policy if exists "near avatars read" on storage.objects;
+create policy "near media upload" on storage.objects for insert to authenticated
+  with check ((storage.foldername(name))[1] = auth.uid()::text and (
+    bucket_id in ('post-private','avatars') or (bucket_id = 'chat-media' and public.chat_file_allowed(name))));
+create policy "near media delete" on storage.objects for delete to authenticated
+  using (bucket_id in ('post-media','chat-media','post-private','avatars') and (storage.foldername(name))[1] = auth.uid()::text);
+create policy "near private read" on storage.objects for select using (bucket_id = 'post-private' and public.storage_media_visible(name));
+create policy "near avatars read" on storage.objects for select using (bucket_id = 'avatars');
 
-drop trigger if exists chat_messages_clean on public.chat_messages;
-create trigger chat_messages_clean before insert or update of text on public.chat_messages for each row execute function public.clean_guard('text', 'chat');
-drop trigger if exists chat_messages_profile on public.chat_messages;
-create trigger chat_messages_profile before insert on public.chat_messages for each row execute function public.profile_guard();
-drop trigger if exists chat_messages_verified on public.chat_messages;
-create trigger chat_messages_verified before insert on public.chat_messages for each row execute function public.verified_guard();
-
--- отправка только через функцию: guard, ограничения чата, лимит 10/мин, повтор с тем же ключом не создает дубль
-create or replace function public.chat_send(p_chat uuid, p_text text, p_key uuid) returns public.chat_messages
+-- файл публикации: только своя папка, только post-private; статус — по настройкам проверки (fail closed)
+create or replace function public.media_limit() returns trigger
 language plpgsql security definer set search_path = public as $$
-declare c record; m record; r public.chat_messages;
 begin
-  perform public.shield_require('write');
-  if p_key is not null then
-    select * into r from public.chat_messages where sender_id = auth.uid() and client_key = p_key;
-    if r.id is not null then return r; end if;
+  if (select count(*) from public.post_media where post_id = new.post_id) >= 5 then
+    raise exception using errcode = 'NR422', message = 'Не больше 5 вложений в публикации';
   end if;
-  select * into c from public.group_chats where id = p_chat;
-  if c.id is null or not public.chat_can_read(p_chat) then raise exception using errcode = 'NR404', message = 'Чат не найден'; end if;
-  if c.kind = 'meeting' and not exists (select 1 from public.chat_members where chat_id = p_chat and user_id = auth.uid()) then
-    raise exception using errcode = 'NR403', message = 'Чат встречи — только для участников';
+  if new.path is null or new.path !~ ('^' || new.user_id::text || '/' || new.post_id::text || '/') then
+    raise exception using errcode = 'NR403', message = 'Файл должен лежать в вашей папке публикации';
   end if;
-  select * into m from public.chat_members where chat_id = p_chat and user_id = auth.uid();
-  if m.restricted_until > now() then
-    raise exception using errcode = 'NR403', message = 'Организатор ограничил вас в этом чате до ' || to_char(m.restricted_until at time zone 'Asia/Almaty', 'DD.MM HH24:MI'), hint = 'chat_restricted';
+  if auth.uid() is not null then
+    new.bucket := 'post-private';
+    new.url := 'private:' || new.path;
+    if new.thumb_url is not null and new.thumb_url !~ '^private:' then new.thumb_url := null; end if;
+    if new.poster_url is not null and new.poster_url !~ '^private:' then new.poster_url := null; end if;
   end if;
-  if exists (select 1 from public.user_bans where user_id = auth.uid() and scope = 'chat' and scope_id = p_chat and status = 'active' and (expires_at is null or expires_at > now())) then
-    raise exception using errcode = 'NR403', message = 'Модератор ограничил вас в этом чате', hint = 'chat_restricted';
-  end if;
-  perform public.rate('chat');
-  if c.kind <> 'meeting' then insert into public.chat_members (chat_id, user_id) values (p_chat, auth.uid()) on conflict do nothing; end if;
-  insert into public.chat_messages (chat_id, sender_id, text, client_key) values (p_chat, auth.uid(), p_text, p_key) returning * into r;
-  update public.group_chats set last_message_at = r.created_at where id = p_chat;
-  update public.chat_members set last_read_at = r.created_at where chat_id = p_chat and user_id = auth.uid();
-  return r;
+  return new;
 end $$;
+-- статус нового файла: ИИ включена — "pending" (решит ИИ); нужна проверка, но ИИ нет — "review" (решит модератор);
+-- проверка не требуется — "ok". Функция moderate в любом случае проверяет тип, размер и метаданные.
+create or replace function public.media_pending() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare s record;
+begin
+  select ai_moderation, media_requires_check into s from public.app_settings where id = 1;
+  if tg_table_name = 'post_media' then
+    new.mod_status := case when s.ai_moderation then 'pending' when s.media_requires_check then 'review' else 'ok' end;
+  elsif tg_table_name = 'messages' then
+    new.mod_status := case when s.ai_moderation and new.kind in ('image','text') then 'pending' else 'ok' end;
+  end if;
+  return new;
+end $$;
+-- запрет вставки файла без ИИ из 014 заменен статусом "review"
+drop trigger if exists post_media_gate on public.post_media;
 
--- ответы и реакции в общих чатах
-alter table public.chat_messages add column if not exists reply_to uuid references public.chat_messages(id) on delete set null;
-create table if not exists public.chat_reactions (
-  message_id uuid not null references public.chat_messages(id) on delete cascade,
-  user_id    uuid not null references public.profiles(id) on delete cascade,
-  emoji      text not null check (emoji in ('❤️','👍','😂','😮','😢','🙏')),
-  created_at timestamptz not null default now(),
-  primary key (message_id, user_id, emoji)
-);
-alter table public.chat_reactions enable row level security;
-drop policy if exists "reactions read" on public.chat_reactions;
-create policy "reactions read" on public.chat_reactions for select using (
-  exists (select 1 from public.chat_messages m where m.id = message_id and public.chat_can_read(m.chat_id)));
-
-create or replace function public.chat_react(p_msg uuid, p_emoji text) returns boolean
+-- модератор одобряет или отклоняет файл из очереди
+create or replace function public.mod_media(p_id uuid, p_approve boolean, p_note text default null) returns void
 language plpgsql security definer set search_path = public as $$
 declare m record;
 begin
-  perform public.shield_require('write');
-  select * into m from public.chat_messages where id = p_msg and mod_status = 'ok';
-  if m.id is null or not public.chat_can_read(m.chat_id) or public.is_blocked(auth.uid(), m.sender_id) then raise exception using errcode = 'NR404', message = 'Сообщение не найдено'; end if;
-  if exists (select 1 from public.chat_reactions where message_id = p_msg and user_id = auth.uid() and emoji = p_emoji) then
-    delete from public.chat_reactions where message_id = p_msg and user_id = auth.uid() and emoji = p_emoji; return false;
+  if not public.is_mod() then raise exception using errcode = 'NR403', message = 'Только для модераторов'; end if;
+  update public.post_media set mod_status = case when p_approve then 'ok' else 'rejected' end where id = p_id returning * into m;
+  if m.id is null then raise exception using errcode = 'NR404', message = 'Файл не найден'; end if;
+  insert into public.mod_actions (moderator_id, target_type, target_id, action, note) values (auth.uid(), 'media', p_id, case when p_approve then 'approve' else 'reject' end, left(p_note, 400));
+  if not p_approve then
+    insert into public.notifications (user_id, type, post_id, text) values (m.user_id, 'post_hidden', m.post_id, 'Файл в публикации отклонен' || coalesce(': ' || left(p_note, 160), '') || '. Можно обжаловать 14 дней');
+    perform public.call_fn('moderate', jsonb_build_object('kind', 'media_delete', 'id', p_id));
   end if;
-  perform public.rate('like');
-  insert into public.chat_reactions (message_id, user_id, emoji) values (p_msg, auth.uid(), p_emoji);
-  return true;
 end $$;
-
--- страница сообщений: ник, ответ, реакции; блокировка скрывает сообщения и реакции
-create or replace function public.chat_page(p_chat uuid, p_before timestamptz default null, p_limit int default 40)
-returns table (id uuid, chat_id uuid, sender_id uuid, nickname text, avatar_url text, text text, mod_status text, created_at timestamptz,
-               reply_to uuid, reply_nick text, reply_text text, reactions jsonb, mine_reactions text[])
+create or replace function public.mod_media_queue() returns jsonb
 language sql stable security definer set search_path = public as $$
-  select m.id, m.chat_id, m.sender_id, p.nickname, p.avatar_url, m.text, m.mod_status, m.created_at,
-         m.reply_to, rp.nickname, left(r.text, 80),
-         coalesce((select jsonb_object_agg(emoji, n) from (select x.emoji, count(*) n from public.chat_reactions x
-                    where x.message_id = m.id and not public.is_blocked(auth.uid(), x.user_id) group by x.emoji) z), '{}'::jsonb),
-         coalesce((select array_agg(x.emoji) from public.chat_reactions x where x.message_id = m.id and x.user_id = auth.uid()), '{}')
-    from public.chat_messages m join public.profiles p on p.id = m.sender_id
-    left join public.chat_messages r on r.id = m.reply_to left join public.profiles rp on rp.id = r.sender_id
-   where m.chat_id = p_chat and public.chat_can_read(p_chat) and (m.mod_status = 'ok' or m.sender_id = auth.uid())
-     and not public.is_blocked(auth.uid(), m.sender_id) and (p_before is null or m.created_at < p_before)
-   order by m.created_at desc limit least(greatest(p_limit, 1), 100) $$;
+  select case when public.is_mod() then coalesce((select jsonb_agg(jsonb_build_object('id', m.id, 'post_id', m.post_id, 'type', m.type, 'path', m.path, 'bucket', m.bucket,
+      'status', m.mod_status, 'created_at', m.created_at, 'text', left(p.text, 120), 'author', pr.name) order by m.created_at)
+    from public.post_media m join public.posts p on p.id = m.post_id left join public.profiles pr on pr.id = m.user_id
+   where m.mod_status in ('review','flagged','pending') and p.status <> 'deleted'), '[]'::jsonb) end $$;
 
-create or replace function public.chat_send2(p_chat uuid, p_text text, p_key uuid, p_reply uuid default null) returns public.chat_messages
-language plpgsql security definer set search_path = public as $$
-declare r public.chat_messages;
-begin
-  r := public.chat_send(p_chat, p_text, p_key);
-  if p_reply is not null and r.reply_to is null and exists (select 1 from public.chat_messages where id = p_reply and chat_id = p_chat) then
-    update public.chat_messages set reply_to = p_reply where id = r.id returning * into r;
-  end if;
-  return r;
-end $$;
+-- ---------- 55: NEAR City — официальные карточки ----------
+alter table public.posts add column if not exists official boolean not null default false;
+alter table public.posts add column if not exists source_name text;
+alter table public.posts add column if not exists source_url text;
+alter table public.posts add column if not exists source_id text;
+alter table public.posts add column if not exists verified_at timestamptz;
+create unique index if not exists posts_source_uidx on public.posts (source_id) where source_id is not null;
+create table if not exists public.city_log (
+  id         bigserial primary key,
+  post_id    uuid not null references public.posts(id) on delete cascade,
+  version    int not null,
+  data       jsonb not null,
+  editor_id  uuid references public.profiles(id) on delete set null,
+  created_at timestamptz not null default now()
+);
+alter table public.city_log enable row level security;
+drop policy if exists "city log mod" on public.city_log;
+create policy "city log mod" on public.city_log for select using (public.is_mod());
 
--- организатор встречи ограничивает участника только в чате своей встречи
-create or replace function public.chat_restrict(p_chat uuid, p_user uuid, p_hours int) returns void
-language plpgsql security definer set search_path = public as $$
-declare c record; e record;
-begin
-  perform public.shield_require('write');
-  select * into c from public.group_chats where id = p_chat;
-  select * into e from public.events where post_id = c.post_id;
-  if c.kind <> 'meeting' or auth.uid() not in (e.host_id, e.cohost_id) then
-    if not public.is_mod() then raise exception using errcode = 'NR403', message = 'Ограничивать в чате может организатор встречи или модератор'; end if;
-  end if;
-  if p_user in (e.host_id, e.cohost_id) then raise exception using errcode = 'NR403', message = 'Нельзя ограничить организатора'; end if;
-  insert into public.chat_members (chat_id, user_id) values (p_chat, p_user) on conflict do nothing;
-  update public.chat_members set restricted_until = now() + make_interval(hours => least(greatest(p_hours, 1), 720)) where chat_id = p_chat and user_id = p_user;
-  perform public.audit('chat_restrict', 'user', p_user, jsonb_build_object('chat', p_chat, 'hours', p_hours));
-end $$;
-
-create or replace function public.chat_list() returns table (id uuid, kind text, title text, district text, post_id uuid, last_message_at timestamptz,
-  last_text text, last_nick text, unread int, member boolean, role text)
-language sql stable security definer set search_path = public as $$
-  select c.id, c.kind, c.title, c.district, c.post_id, c.last_message_at,
-         lm.text, lm.nickname,
-         (select count(*)::int from public.chat_messages x where x.chat_id = c.id and x.mod_status = 'ok' and x.sender_id <> auth.uid()
-            and x.created_at > coalesce(m.last_read_at, now()) and not public.is_blocked(auth.uid(), x.sender_id)),
-         m.user_id is not null, m.role
-    from public.group_chats c
-    left join public.chat_members m on m.chat_id = c.id and m.user_id = auth.uid()
-    left join lateral (select x.text, pr.nickname from public.chat_messages x join public.profiles pr on pr.id = x.sender_id
-                        where x.chat_id = c.id and x.mod_status = 'ok' and not public.is_blocked(auth.uid(), x.sender_id)
-                        order by x.created_at desc limit 1) lm on true
-   where public.shield_ok() and (c.kind = 'city' or m.user_id is not null
-      or (c.kind = 'district' and c.district = (select district from public.profiles where id = auth.uid())))
-   order by (c.kind = 'city') desc, c.last_message_at desc nulls last $$;
-
-create or replace function public.chat_read(p_chat uuid) returns void
-language sql security definer set search_path = public as $$
-  update public.chat_members set last_read_at = now() where chat_id = p_chat and user_id = auth.uid() $$;
-
-do $$ begin
-  begin alter publication supabase_realtime add table public.chat_messages; exception when others then null; end;
-end $$;
-
--- личные сообщения в v14.8 убраны: новые переписки и сообщения не создаются, старые доступны только для чтения
-create or replace function public.dm_disabled() returns trigger
+-- пользователь не может выдать свою публикацию за официальную
+create or replace function public.official_guard() returns trigger
 language plpgsql security definer set search_path = public as $$
 begin
-  if auth.uid() is not null and not coalesce((public.shield_cfg()->>'dm')::boolean, false) then
-    -- переписка, которую создавал бы другой триггер (например, принятая дружба), просто не создается
-    if tg_table_name = 'conversations' and pg_trigger_depth() > 1 then return null; end if;
-    raise exception using errcode = 'NR403', message = 'Личные сообщения в NEAR отключены. Общайтесь в общих чатах и чатах встреч', hint = 'dm_off';
+  if coalesce(current_setting('near.city', true), '') = '1' then return new; end if;
+  if tg_op = 'INSERT' then
+    if auth.uid() is not null then new.likes_count := 0; new.comments_count := 0; end if;
+    new.official := false; new.source_name := null; new.source_url := null; new.source_id := null; new.verified_at := null;
+  else
+    new.official := old.official; new.source_name := old.source_name; new.source_url := old.source_url; new.source_id := old.source_id; new.verified_at := old.verified_at;
+    -- счетчики меняют только триггеры лайков и комментариев
+    if coalesce(current_setting('near.system', true), '') <> '1' and auth.uid() is not null then
+      new.likes_count := old.likes_count; new.comments_count := old.comments_count;
+    end if;
   end if;
   return new;
 end $$;
-drop trigger if exists conversations_dm_off on public.conversations;
-create trigger conversations_dm_off before insert on public.conversations for each row execute function public.dm_disabled();
-drop trigger if exists messages_dm_off on public.messages;
-create trigger messages_dm_off before insert on public.messages for each row execute function public.dm_disabled();
+drop trigger if exists posts_official on public.posts;
+create trigger posts_official before insert or update on public.posts for each row execute function public.official_guard();
 
--- ---------- 14. Медиа: приватный staging → processing → pending_review → approved ----------
--- Видео обязательно (ТЗ плеера v14.9): публикуется только после серверной обработки и проверки.
-update public.app_settings set shield = shield || '{"video": true}'::jsonb where id = 1 and (shield->>'video_decided') is null;
-update public.app_settings set shield = shield || '{"video_decided": "player_v14_9"}'::jsonb where id = 1;
-insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
-values ('post-staging', 'post-staging', false, 20971520,
-        array['image/jpeg','image/png','image/webp','image/heic','image/heif','video/mp4','video/quicktime','video/webm'])
-on conflict (id) do update set public = false, file_size_limit = 20971520, allowed_mime_types = excluded.allowed_mime_types;
-drop policy if exists "staging own write" on storage.objects;
-drop policy if exists "staging own read" on storage.objects;
-drop policy if exists "staging own delete" on storage.objects;
-create policy "staging own write" on storage.objects for insert to authenticated
-  with check (bucket_id = 'post-staging' and (storage.foldername(name))[1] = auth.uid()::text and not public.is_banned());
-create policy "staging own read" on storage.objects for select to authenticated
-  using (bucket_id = 'post-staging' and public.shield_ok() and ((storage.foldername(name))[1] = auth.uid()::text or public.is_mod()));
-create policy "staging own delete" on storage.objects for delete to authenticated
-  using (bucket_id = 'post-staging' and (storage.foldername(name))[1] = auth.uid()::text);
+-- редактор (модератор) создает или обновляет карточку по уникальному source_id; каждая версия — в журнал
+create or replace function public.city_upsert(p jsonb) returns uuid
+language plpgsql security definer set search_path = public as $$
+declare pid uuid; v int; cat text := coalesce(p->>'category', 'incident'); exp timestamptz; sid text := nullif(btrim(p->>'source_id'), '');
+begin
+  if not public.is_mod() then raise exception using errcode = 'NR403', message = 'Только для редакторов NEAR City'; end if;
+  if cat not in ('incident','event','talk') then raise exception using errcode = 'NR422', message = 'Тип: происшествие, событие или новость'; end if;
+  if char_length(coalesce(btrim(p->>'source_name'), '')) < 2 then raise exception using errcode = 'NR422', message = 'Укажите источник'; end if;
+  if char_length(coalesce(btrim(p->>'text'), '')) < 5 then raise exception using errcode = 'NR422', message = 'Добавьте описание'; end if;
+  if (p->>'lat') is null or (p->>'lng') is null then raise exception using errcode = 'NR422', message = 'Укажите место на карте'; end if;
+  exp := nullif(p->>'expires_at', '')::timestamptz;
+  if exp is not null and (exp <= now() or exp > now() + interval '30 days') then raise exception using errcode = 'NR422', message = 'Срок: от сейчас до 30 дней'; end if;
+  perform set_config('near.city', '1', true); perform set_config('near.system', '1', true);
+  sid := coalesce(sid, 'manual:' || md5(cat || coalesce(p->>'source_name', '') || coalesce(p->>'text', '') || coalesce(p->>'lat', '') || coalesce(p->>'lng', '')));
+  select id into pid from public.posts where source_id = sid for update;
+  if pid is null then
+    insert into public.posts (user_id, category, text, lat, lng, exact, status, meta, official, source_name, source_url, source_id, verified_at)
+    values (auth.uid(), cat, left(btrim(p->>'text'), 1000), (p->>'lat')::float8, (p->>'lng')::float8, true, 'active',
+            jsonb_strip_nulls(jsonb_build_object('title', p->>'title', 'itype', p->>'itype')),
+            true, left(btrim(p->>'source_name'), 80), public.clean_url(p->>'source_url'), sid, now())
+    returning id into pid;
+  else
+    update public.posts set text = left(btrim(p->>'text'), 1000), lat = (p->>'lat')::float8, lng = (p->>'lng')::float8, category = cat,
+      meta = jsonb_strip_nulls(jsonb_build_object('title', p->>'title', 'itype', p->>'itype')),
+      source_name = left(btrim(p->>'source_name'), 80), source_url = public.clean_url(p->>'source_url'), verified_at = now(),
+      status = case when p->>'status' = 'closed' then 'closed' else 'active' end, updated_at = now()
+     where id = pid;
+  end if;
+  if exp is not null then update public.posts set expires_at = exp where id = pid; end if;
+  select coalesce(max(version), 0) + 1 into v from public.city_log where post_id = pid;
+  insert into public.city_log (post_id, version, data, editor_id) values (pid, v, p, auth.uid());
+  insert into public.mod_actions (moderator_id, target_type, target_id, action, note) values (auth.uid(), 'post', pid, 'city_v' || v, left(p->>'source_name', 80));
+  perform set_config('near.city', '', true); perform set_config('near.system', '', true);
+  return pid;
+end $$;
 
-alter table public.post_media add column if not exists state text not null default 'approved';
-alter table public.post_media add column if not exists object_key text;
-alter table public.post_media add column if not exists size_bytes bigint;
-alter table public.post_media add column if not exists cover_key text;
-alter table public.post_media add column if not exists moderation_id text;
-alter table public.post_media add column if not exists job_id uuid;
-alter table public.post_media add column if not exists edit jsonb not null default '{}'::jsonb;
-alter table public.post_media add column if not exists error text;
-do $$ begin
-  alter table public.post_media add constraint post_media_state_chk check (state in ('uploading','processing','pending_review','approved','rejected','failed'));
-exception when duplicate_object then null; end $$;
-alter table public.posts add column if not exists publish_requested boolean not null default false;
-
-create table if not exists public.media_jobs (
-  id           uuid primary key default gen_random_uuid(),
-  media_id     uuid not null unique references public.post_media(id) on delete cascade,   -- одно задание на файл: повтор идемпотентен
-  kind         text not null check (kind in ('image','video')),
-  status       text not null default 'queued' check (status in ('queued','running','done','failed')),
-  attempts     int not null default 0,
-  worker       text,
-  locked_until timestamptz,
-  last_error   text,
-  created_at   timestamptz not null default now(),
-  updated_at   timestamptz not null default now()
-);
-create index if not exists media_jobs_queue_idx on public.media_jobs (status, created_at);
-alter table public.media_jobs enable row level security;
-
-create or replace function public.media_shield() returns trigger
+-- ---------- 57: счетчики лайков и комментариев в таблице (транзакционно, с периодической сверкой) ----------
+alter table public.posts add column if not exists likes_count int not null default 0;
+alter table public.posts add column if not exists comments_count int not null default 0;
+create or replace function public.post_counters() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare d int := case when tg_op = 'INSERT' then 1 else -1 end; pid uuid := coalesce(new.post_id, old.post_id);
+begin
+  perform set_config('near.system', '1', true);
+  if tg_table_name = 'likes' then update public.posts set likes_count = greatest(0, likes_count + d) where id = pid;
+  else update public.posts set comments_count = greatest(0, comments_count + d) where id = pid; end if;
+  perform set_config('near.system', '', true);
+  return null;
+end $$;
+drop trigger if exists likes_counter on public.likes;
+create trigger likes_counter after insert or delete on public.likes for each row execute function public.post_counters();
+drop trigger if exists comments_counter on public.comments;
+create trigger comments_counter after insert or delete on public.comments for each row execute function public.post_counters();
+create or replace function public.counters_reconcile() returns int
 language plpgsql security definer set search_path = public as $$
 declare n int;
 begin
-  if auth.uid() is null then return new; end if;
-  if new.type = 'video' and not coalesce((public.shield_cfg()->>'video')::boolean, true) then
-    raise exception using errcode = 'NR422', message = 'Видео временно недоступно', hint = 'video_off';
-  end if;
-  if public.is_banned() then raise exception using errcode = 'NR403', message = 'Действие недоступно', hint = 'banned'; end if;
-  select count(*) into n from public.post_media where post_id = new.post_id;
-  if n >= 5 then raise exception using errcode = 'NR422', message = 'Не больше 5 вложений', hint = 'media_limit'; end if;
-  if new.size_bytes is not null and new.size_bytes > 20971520 then raise exception using errcode = 'NR422', message = 'Файл больше 20 МБ', hint = 'media_size'; end if;
-  -- статус и доступ задает только сервер: клиенту не доверяем
-  new.state := 'processing'; new.mod_status := 'pending'; new.bucket := 'post-staging';
-  new.object_key := coalesce(new.object_key, new.path); new.path := new.object_key;
-  new.url := 'private:' || new.object_key; new.thumb_url := null; new.poster_url := null; new.cover_key := null;
-  new.checked_at := null; new.moderation_id := null;
-  if new.object_key is null or split_part(new.object_key, '/', 1) <> auth.uid()::text then
-    raise exception using errcode = 'NR403', message = 'Файл должен быть в вашей папке', hint = 'media_owner';
-  end if;
-  return new;
+  perform set_config('near.system', '1', true);
+  update public.posts p set likes_count = x.l, comments_count = x.c
+    from (select p2.id, (select count(*) from public.likes where post_id = p2.id) l, (select count(*) from public.comments where post_id = p2.id) c from public.posts p2) x
+   where x.id = p.id and (p.likes_count <> x.l or p.comments_count <> x.c);
+  get diagnostics n = row_count;
+  perform set_config('near.system', '', true);
+  return n;
 end $$;
-drop trigger if exists post_media_shield on public.post_media;
-create trigger post_media_shield before insert on public.post_media for each row execute function public.media_shield();
+select public.counters_reconcile();
 
--- статус меняет только сервер
-create or replace function public.media_state_guard() returns trigger
+-- ---------- 57: лента одним запросом ----------
+-- Возвращает строки posts (клиент подтягивает автора, файлы и событие тем же запросом через select).
+-- Курсор: id последней карточки (+ время снимка для "Для вас"); позиция якоря пересчитывается на сервере.
+create or replace function public.feed_v14(p_lat double precision, p_lng double precision, p_radius int,
+  p_cats text[] default null, p_sort text default 'new', p_period text default null, p_friends boolean default false,
+  p_after_id uuid default null, p_snapshot timestamptz default null, p_limit int default 15)
+returns setof public.posts
+language sql stable set search_path = public, extensions as $$
+  with prm as (select least(coalesce(p_snapshot, now()), now()) t0),
+  me as (select extensions.st_setsrid(extensions.st_makepoint(p_lng, p_lat), 4326)::extensions.geography g),
+  base as (
+    select p.id, p.created_at, p.category, p.is_sos, p.status,
+           extensions.st_distance(p.geog, me.g) dist,
+           case when coalesce(p_sort, 'new') = 'top' then
+             (case when p.status = 'active' and (p.is_sos or (p.category = 'incident' and p.created_at > prm.t0 - interval '3 hours')) then 1000 else 0 end)
+             + case when p.official then 50 else 0 end
+             + 100 * exp(-greatest(extract(epoch from prm.t0 - p.created_at), 0) / 86400.0)
+             + 40 * exp(-extensions.st_distance(p.geog, me.g) / 1500.0)
+             + 8 * ln(1 + (select count(*) from public.comments c where c.post_id = p.id and c.created_at <= prm.t0))
+             + 3 * ln(1 + (select count(*) from public.likes l where l.post_id = p.id and l.created_at <= prm.t0))
+           else 0 end score
+      from public.posts p, me, prm
+     where p.status in ('active','closed')
+       and (p.expires_at is null or p.expires_at > now())
+       and (coalesce(p_sort, 'new') <> 'top' or p.created_at <= prm.t0)
+       and extensions.st_dwithin(p.geog, me.g, least(greatest(coalesce(p_radius, 1000), 100), 50000))
+       and (p_cats is null or p.category = any (p_cats))
+       and (p_period is null or (p_period = 'today' and p.created_at > date_trunc('day', now() at time zone 'Asia/Almaty') at time zone 'Asia/Almaty')
+                             or (p_period = 'week' and p.created_at > now() - interval '7 days'))
+       and (not coalesce(p_friends, false) or public.are_friends(auth.uid(), p.user_id))
+       and not public.is_blocked(auth.uid(), p.user_id)
+  ), anchor as (select * from base where id = p_after_id),
+  page as (
+    select b.* from base b
+     where p_after_id is null or not exists (select 1 from anchor) or case coalesce(p_sort, 'new')
+       when 'near' then (b.dist, b.id) > (select a.dist, a.id from anchor a)
+       when 'top' then (b.score, b.id) < (select a.score, a.id from anchor a)
+       else (b.created_at, b.id) < (select a.created_at, a.id from anchor a) end
+     order by case when p_sort = 'near' then b.dist end asc, case when p_sort = 'near' then b.id end asc,
+              case when p_sort = 'top' then b.score end desc, case when p_sort = 'top' then b.id end desc,
+              b.created_at desc, b.id desc
+     limit least(greatest(coalesce(p_limit, 15), 1), 20)
+  )
+  select p.* from page g join public.posts p on p.id = g.id
+   order by case when p_sort = 'near' then g.dist end asc, case when p_sort = 'near' then g.id end asc,
+            case when p_sort = 'top' then g.score end desc, case when p_sort = 'top' then g.id end desc,
+            g.created_at desc, g.id desc $$;
+
+-- ---------- 46/57: карта — легкий ответ и признак неполной выдачи ----------
+create or replace function public.map_v14(p_w double precision, p_s double precision, p_e double precision, p_n double precision,
+  p_cats text[] default null, p_lat double precision default null, p_lng double precision default null, p_radius int default null,
+  p_period text default null, p_friends boolean default false, p_limit int default 400)
+returns jsonb language sql stable set search_path = public, extensions as $$
+  with q as (
+    select p.id, p.lat, p.lng, p.category, p.status, p.created_at, p.is_sos, p.official, p.user_id, p.expires_at,
+           p.likes_count, p.comments_count, ev.starts_at, left(coalesce(p.meta->>'title', p.text), 80) title
+      from public.posts p left join public.events ev on ev.post_id = p.id
+     where p.status in ('active','closed')
+       and (p.expires_at is null or p.expires_at > now())
+       and case when p_radius is not null and p_lat is not null
+             then extensions.st_dwithin(p.geog, extensions.st_setsrid(extensions.st_makepoint(p_lng, p_lat), 4326)::extensions.geography, least(greatest(p_radius, 100), 50000))
+             else p.geog operator(extensions.&&) extensions.st_makeenvelope(p_w, p_s, p_e, p_n, 4326)::extensions.geography end
+       and (p_cats is null or p.category = any (p_cats))
+       and (p_period is null or (p_period = 'today' and p.created_at > date_trunc('day', now() at time zone 'Asia/Almaty') at time zone 'Asia/Almaty')
+                             or (p_period = 'week' and p.created_at > now() - interval '7 days'))
+       and (not coalesce(p_friends, false) or public.are_friends(auth.uid(), p.user_id))
+       and not public.is_blocked(auth.uid(), p.user_id)
+     order by p.created_at desc, p.id desc
+     limit least(greatest(coalesce(p_limit, 400), 1), 500) + 1)
+  select jsonb_build_object(
+    'truncated', (select count(*) from q) > least(greatest(coalesce(p_limit, 400), 1), 500),
+    'items', coalesce((select jsonb_agg(to_jsonb(x) - 'user_id') from (select * from q limit least(greatest(coalesce(p_limit, 400), 1), 500)) x), '[]'::jsonb)) $$;
+
+-- ---------- 61/03: замер задержки API из приложения (без данных пользователя) ----------
+create or replace function public.ping() returns timestamptz language sql stable as $$ select now() $$;
+
+-- ---------- уборка: + сверка счетчиков ----------
+create or replace function public.near_cleanup() returns jsonb
 language plpgsql security definer set search_path = public as $$
+declare a int; b int; c int; d int; e int;
 begin
-  if auth.uid() is not null and not public.is_mod() then
-    new.state := old.state; new.mod_status := old.mod_status; new.url := old.url; new.bucket := old.bucket;
-    new.thumb_url := old.thumb_url; new.poster_url := old.poster_url; new.cover_key := old.cover_key; new.object_key := old.object_key;
-  end if;
-  new.mod_status := case new.state when 'approved' then 'ok' when 'rejected' then 'flagged' else 'pending' end;
-  return new;
-end $$;
-drop trigger if exists post_media_state_guard on public.post_media;
-create trigger post_media_state_guard before update on public.post_media for each row execute function public.media_state_guard();
-
--- задание обработки создается сразу; фото проверяет функция moderate, видео — изолированный FFmpeg worker
-create or replace function public.media_enqueue() returns trigger
-language plpgsql security definer set search_path = public as $$
-declare jid uuid;
-begin
-  insert into public.media_jobs (media_id, kind) values (new.id, new.type) on conflict (media_id) do nothing returning id into jid;
-  if jid is not null then
-    update public.post_media set job_id = jid where id = new.id;
-    if new.type = 'image' then perform public.call_fn('moderate', jsonb_build_object('kind', 'media_check', 'id', new.id)); end if;
-  end if;
-  return null;
-end $$;
-drop trigger if exists post_media_check on public.post_media;
-drop trigger if exists post_media_ai on public.post_media;
-drop trigger if exists post_media_enqueue on public.post_media;
-create trigger post_media_enqueue after insert on public.post_media for each row execute function public.media_enqueue();
-
--- публикация атомарная: пост становится видимым, только когда ВСЕ вложения approved
-create or replace function public.post_publish_guard() returns trigger
-language plpgsql security definer set search_path = public as $$
-begin
-  if new.status = 'active' and old.status = 'draft' and auth.uid() is not null
-     and exists (select 1 from public.post_media where post_id = new.id and state <> 'approved') then
-    new.status := 'draft'; new.publish_requested := true;
-  end if;
-  return new;
-end $$;
-drop trigger if exists posts_publish_guard on public.posts;
-create trigger posts_publish_guard before update of status on public.posts for each row execute function public.post_publish_guard();
-
-create or replace function public.media_after_state() returns trigger
-language plpgsql security definer set search_path = public as $$
-declare p record;
-begin
-  if new.state = old.state then return null; end if;
-  select * into p from public.posts where id = new.post_id;
-  if new.state = 'approved' and p.status = 'draft' and p.publish_requested
-     and not exists (select 1 from public.post_media where post_id = new.post_id and state <> 'approved') then
-    perform set_config('near.system', '1', true);
-    update public.posts set status = 'active', publish_requested = false, created_at = now() where id = new.post_id;
-    insert into public.notifications (user_id, type, post_id, text) values (new.user_id, 'media', new.post_id, 'Публикация прошла проверку и опубликована');
-  elsif new.state in ('rejected','failed') then
-    insert into public.notifications (user_id, type, post_id, text) values (new.user_id, 'media', new.post_id,
-      case new.state when 'rejected' then 'Файл не прошел проверку' || coalesce(': ' || new.error, '') || '. Замените файл или подайте апелляцию'
-                     else 'Не удалось обработать файл. Повторите загрузку' end);
-  end if;
-  return null;
-end $$;
-drop trigger if exists post_media_after_state on public.post_media;
-create trigger post_media_after_state after update of state on public.post_media for each row execute function public.media_after_state();
-
--- worker забирает задание (SKIP LOCKED: два worker не возьмут одно и то же), повтор до 3 раз
-create or replace function public.media_job_claim(p_worker text, p_kind text default 'video') returns jsonb
-language plpgsql security definer set search_path = public as $$
-declare j record; m record;
-begin
-  select * into j from public.media_jobs
-   where kind = p_kind and (status = 'queued' or (status = 'running' and locked_until < now())) and attempts < 3
-   order by created_at for update skip locked limit 1;
-  if j.id is null then return null; end if;
-  update public.media_jobs set status = 'running', attempts = attempts + 1, worker = p_worker, locked_until = now() + interval '5 minutes', updated_at = now() where id = j.id;
-  select * into m from public.post_media where id = j.media_id;
-  return jsonb_build_object('job_id', j.id, 'attempt', j.attempts + 1, 'media_id', m.id, 'post_id', m.post_id, 'user_id', m.user_id,
-                            'object_key', m.object_key, 'edit', m.edit, 'type', m.type);
+  delete from public.rate_events where created_at < now() - interval '2 days';
+  delete from public.rate_counters where day < (now() at time zone 'Asia/Almaty')::date - 2;
+  delete from public.rate_idem where created_at < now() - interval '3 days';
+  delete from public.client_errors where created_at < now() - interval '30 days'; get diagnostics a = row_count;
+  delete from public.analytics_events where created_at < now() - interval '180 days'; get diagnostics b = row_count;
+  delete from public.push_log where created_at < now() - interval '90 days';
+  select count(*) into c from public.posts where status = 'draft' and created_at < now() - interval '24 hours';
+  select count(*) into d from public.conversations where orphaned_at < now() - interval '30 days';
+  e := public.counters_reconcile();
+  perform public.call_fn('moderate', jsonb_build_object('kind', 'cleanup'));
+  return jsonb_build_object('errors_removed', a, 'events_removed', b, 'stale_drafts', c, 'orphaned_conversations', d, 'counters_fixed', e);
 end $$;
 
-create or replace function public.media_job_done(p_job uuid, p_state text, p_result jsonb) returns void
-language plpgsql security definer set search_path = public as $$
-declare j record;
-begin
-  select * into j from public.media_jobs where id = p_job for update;
-  -- повтор отчета ничего не меняет; после pending_review решение принимает модератор (approved/rejected)
-  if j.id is null then return; end if;
-  if j.status = 'done' and not (p_state in ('approved','rejected') and (select state from public.post_media where id = j.media_id) = 'pending_review'
-                                and coalesce(p_result->>'by', '') = 'moderator') then return; end if;
-  if p_state = 'retry' then
-    update public.media_jobs set status = case when attempts >= 3 then 'failed' else 'queued' end, last_error = left(p_result->>'error', 300), updated_at = now() where id = p_job;
-    if j.attempts >= 3 then update public.post_media set state = 'failed', error = left(p_result->>'error', 200) where id = j.media_id; end if;
-    insert into public.client_errors (kind, message) select 'media_worker', left(coalesce(p_result->>'error', 'error'), 300) where to_regclass('public.client_errors') is not null;
-    return;
-  end if;
-  if p_state not in ('approved','pending_review','rejected','failed') then raise exception 'bad state'; end if;
-  update public.media_jobs set status = case when p_state = 'failed' then 'failed' else 'done' end, updated_at = now() where id = p_job;
-  update public.post_media set
-    state = p_state, error = p_result->>'error',
-    object_key = coalesce(p_result->>'object_key', object_key), cover_key = coalesce(p_result->>'cover_key', cover_key),
-    url = coalesce(p_result->>'url', url), poster_url = coalesce(p_result->>'poster_url', poster_url), thumb_url = coalesce(p_result->>'thumb_url', thumb_url),
-    bucket = coalesce(p_result->>'bucket', bucket), duration = coalesce((p_result->>'duration')::real, duration),
-    w = coalesce((p_result->>'w')::int, w), h = coalesce((p_result->>'h')::int, h), size_bytes = coalesce((p_result->>'size')::bigint, size_bytes),
-    moderation_id = coalesce(p_result->>'moderation_id', moderation_id), checked_at = now()
-  where id = j.media_id;
-  if p_state = 'pending_review' then
-    perform public.queue_add('post_media', j.media_id, (select user_id from public.post_media where id = j.media_id),
-      case when p_result->>'reason' in ('intimate','minors') then p_result->>'reason' else 'media_review' end);
-  end if;
-end $$;
+-- =====================================================
+--  Права v14.2
+-- =====================================================
+-- профиль: Instagram и служебные поля не читаются напрямую (Instagram — через profile_instagram, по настройке владельца)
+revoke select on public.profiles from anon, authenticated;
+grant select (id, name, nickname, avatar_url, district, created_at, updated_at, verified, last_seen_at, banned, bio, show_seen,
+              is_admin, is_moderator, interests, accepted_rules_at) on public.profiles to anon, authenticated;
+revoke update on public.profiles from authenticated;
+grant update (avatar_url, district, instagram, instagram_public, interests, bio, show_seen, accepted_rules_at, updated_at) on public.profiles to authenticated;
 
--- решение модератора по медиа: публикация копирует файл из staging в публичный бакет (делает функция moderate)
-create or replace function public.media_decide(p_media uuid, p_approve boolean) returns void
-language plpgsql security definer set search_path = public as $$
-begin
-  if not public.is_mod() then raise exception using errcode = 'NR403', message = 'Только для модераторов'; end if;
-  if p_approve then
-    perform public.call_fn('moderate', jsonb_build_object('kind', 'media_publish', 'id', p_media));
-  else
-    update public.post_media set state = 'rejected', error = 'Отклонено модератором' where id = p_media;
-  end if;
-  update public.moderation_queue set status = 'decided', decision = case when p_approve then 'approved' else 'rejected' end, decided_by = auth.uid(), decided_at = now()
-   where content_type = 'post_media' and content_id = p_media;
-  perform public.audit('media_decide', 'media', p_media, jsonb_build_object('approve', p_approve));
-end $$;
+revoke all on public.user_sanctions, public.city_log from anon, authenticated;
+grant select on public.user_sanctions, public.city_log to authenticated; -- RLS: свои решения / модератор
 
--- повторить обработку своего файла (после сбоя) — без дубля задания
-create or replace function public.media_retry(p_media uuid) returns void
-language plpgsql security definer set search_path = public as $$
-begin
-  perform public.shield_require('write');
-  update public.media_jobs set status = 'queued', attempts = 0, updated_at = now()
-   where media_id = p_media and status = 'failed' and exists (select 1 from public.post_media m where m.id = p_media and m.user_id = auth.uid());
-  update public.post_media set state = 'processing', error = null where id = p_media and user_id = auth.uid() and state = 'failed';
-end $$;
-
--- просмотр видео: после 3 секунд видимого воспроизведения, уникальные зрители за сутки
-create table if not exists public.media_views (
-  media_id uuid not null references public.post_media(id) on delete cascade,
-  viewer   text not null,
-  day      date not null default (now() at time zone 'Asia/Almaty')::date,
-  watched  real not null default 0,
-  primary key (media_id, viewer, day)
-);
-alter table public.media_views enable row level security;
-create or replace function public.media_view(p_media uuid, p_seconds real) returns void
-language sql security definer set search_path = public as $$
-  insert into public.media_views (media_id, viewer, watched)
-  select p_media, coalesce(auth.uid()::text, public.req_ip_hash(), 'anon'), least(greatest(p_seconds, 0), 60)
-   where p_seconds >= 3 and exists (select 1 from public.post_media where id = p_media and state = 'approved')
-  on conflict (media_id, viewer, day) do update set watched = greatest(media_views.watched, excluded.watched) $$;
-create or replace function public.media_stats(p_post uuid) returns jsonb
-language sql stable security definer set search_path = public as $$
-  select jsonb_build_object('views', count(*), 'avg_seconds', round(avg(watched)::numeric, 1))
-    from public.media_views v join public.post_media m on m.id = v.media_id
-   where m.post_id = p_post and exists (select 1 from public.posts p where p.id = p_post and (p.user_id = auth.uid() or public.is_mod())) $$;
-
--- ---------- 15. Защита закрытых данных: только актуальная сессия ----------
-create or replace function public.is_participant(conv uuid) returns boolean
-language sql stable security definer set search_path = public as $$
-  select public.shield_ok() and exists (select 1 from public.conversations c where c.id = conv and auth.uid() in (c.user_a, c.user_b)) $$;
-drop policy if exists "notifs read" on public.notifications;
-create policy "notifs read" on public.notifications for select using (auth.uid() = user_id and public.shield_ok());
-
--- подписка на push только с актуальной сессией и без бана
-create or replace function public.push_guard() returns trigger
-language plpgsql security definer set search_path = public as $$
-begin
-  if auth.uid() is not null and public.is_banned() then
-    raise exception using errcode = 'NR403', message = 'Уведомления недоступны', hint = 'banned';
-  end if;
-  return new;
-end $$;
-drop trigger if exists push_subs_guard on public.push_subs;
-create trigger push_subs_guard before insert or update on public.push_subs for each row execute function public.push_guard();
-
--- жалобы на сообщения общих чатов и отзывы
-do $$ begin
-  alter table public.reports drop constraint if exists reports_target_type_check;
-  alter table public.reports add constraint reports_target_type_check check (target_type in ('post','user','message','comment','chat_message','review'));
-end $$;
-alter table public.reports add column if not exists priority int not null default 3;
-create or replace function public.report_priority() returns trigger
-language plpgsql as $$
-begin
-  if new.reason in ('threat','threats','intimate','minors','угрозы','интимный контент') then new.priority := 1;
-    perform public.queue_add(new.target_type, new.target_id, new.target_user, case when new.reason in ('minors') then 'minors' when new.reason in ('intimate','интимный контент') then 'intimate' else 'threat' end);
-  end if;
-  return new;
-end $$;
-drop trigger if exists reports_priority on public.reports;
-create trigger reports_priority before insert on public.reports for each row execute function public.report_priority();
-
--- ---------- 16. Карточка решения для администратора ----------
-create or replace function public.shield_overview() returns jsonb
-language plpgsql security definer set search_path = public as $$
-begin
-  if not public.is_mod() then raise exception using errcode = 'NR403', message = 'Только для модераторов'; end if;
-  return jsonb_build_object(
-    'active_bans', (select count(distinct user_id) from public.user_bans where status = 'active' and kind = 'ban' and scope = 'global' and (expires_at is null or expires_at > now())),
-    'evasion', (select count(*) from public.account_links where review_status = 'pending'),
-    'appeals', (select count(*) from public.ban_appeals where status in ('pending','in_review')),
-    'reports', (select count(*) from public.reports where status = 'open'),
-    'queue', (select count(*) from public.moderation_queue where status = 'open' and (public.is_admin() or not restricted)),
-    'overdue_appeals', (select count(*) from public.ban_appeals where status in ('pending','in_review') and due_at < now()));
-end $$;
-
-create or replace function public.shield_find(p_q text) returns table (id uuid, nickname text, name text, state text, risk int, created_at timestamptz)
-language plpgsql security definer set search_path = public as $$
-begin
-  if not public.is_mod() then raise exception using errcode = 'NR403', message = 'Только для модераторов'; end if;
-  return query select p.id, p.nickname, p.name, public.account_state(p.id)->>'state', public.risk_score(p.id), p.created_at
-    from public.profiles p
-   where p_q is null or p_q = '' or p.nickname ilike public.nick_norm(p_q) || '%' or p.id::text = btrim(p_q)
-   order by p.created_at desc limit 20;
-end $$;
-
-create or replace function public.shield_user_card(p_user uuid) returns jsonb
-language plpgsql security definer set search_path = public as $$
-declare p record; st jsonb;
-begin
-  if not public.is_mod() then raise exception using errcode = 'NR403', message = 'Только для модераторов'; end if;
-  select id, nickname, name, created_at, verified into p from public.profiles where id = p_user;
-  if p.id is null then raise exception using errcode = 'NR404', message = 'Пользователь не найден'; end if;
-  st := public.account_state(p_user);
-  perform public.audit('view_user_card', 'user', p_user, '{}'::jsonb);
-  return jsonb_build_object(
-    'user', to_jsonb(p), 'account', st, 'reputation', public.reputation(p_user),
-    'risk', public.risk_score(p_user), 'hold', public.risk_hold_active(p_user),
-    'risk_events', (select coalesce(jsonb_agg(jsonb_build_object('type', event_type, 'weight', weight, 'confirmed', confirmed, 'at', created_at) order by created_at desc), '[]')
-                      from public.risk_events where user_id = p_user and status = 'active' and (expires_at is null or expires_at > now())),
-    'reports', jsonb_build_object(
-      'total', (select count(*) from public.reports where target_user = p_user or (target_type = 'user' and target_id = p_user)),
-      'confirmed', (select count(*) from public.reports where (target_user = p_user or target_id = p_user) and status = 'resolved'),
-      'rejected', (select count(*) from public.reports where (target_user = p_user or target_id = p_user) and status = 'dismissed'),
-      'open', (select count(*) from public.reports where (target_user = p_user or target_id = p_user) and status = 'open')),
-    'links', (select coalesce(jsonb_agg(jsonb_build_object('id', l.id, 'candidate', l.candidate_id, 'nickname', c.nickname, 'evidence', l.evidence, 'status', l.review_status)), '[]')
-                from public.account_links l join public.profiles c on c.id = l.candidate_id where l.account_id = p_user),
-    'decisions', (select coalesce(jsonb_agg(jsonb_build_object('id', b.id, 'no', b.decision_no, 'kind', b.kind, 'scope', b.scope, 'rule', b.rule, 'reason', b.reason,
-                     'starts_at', b.starts_at, 'expires_at', b.expires_at, 'status', b.status, 'moderator', m.nickname) order by b.created_at desc), '[]')
-                    from public.user_bans b left join public.profiles m on m.id = b.moderator_id where b.user_id = p_user),
-    'appeals', (select coalesce(jsonb_agg(jsonb_build_object('id', a.id, 'ban', a.ban_id, 'message', a.message, 'status', a.status, 'due_at', a.due_at) order by a.created_at desc), '[]')
-                  from public.ban_appeals a where a.user_id = p_user),
-    'sessions', (select coalesce(jsonb_agg(jsonb_build_object('device', device_label, 'status', status, 'at', created_at) order by created_at desc), '[]')
-                   from (select * from public.user_sessions where user_id = p_user order by created_at desc limit 5) s),
-    'rules', public.ban_rules());
-end $$;
-
-create or replace function public.shield_queue() returns table (id uuid, content_type text, content_id uuid, user_id uuid, nickname text, reason text, priority int, created_at timestamptz, preview text)
-language plpgsql security definer set search_path = public as $$
-begin
-  if not public.is_mod() then raise exception using errcode = 'NR403', message = 'Только для модераторов'; end if;
-  return query
-  select q.id, q.content_type, q.content_id, q.user_id, p.nickname, q.reason, q.priority, q.created_at,
-         case q.content_type
-           when 'posts' then (select left(text, 160) from public.posts where posts.id = q.content_id)
-           when 'comments' then (select left(text, 160) from public.comments where comments.id = q.content_id)
-           when 'chat_messages' then (select left(text, 160) from public.chat_messages where chat_messages.id = q.content_id)
-           when 'appeal' then (select left(message, 160) from public.ban_appeals where ban_appeals.id = q.content_id)
-           else null end
-    from public.moderation_queue q left join public.profiles p on p.id = q.user_id
-   where q.status = 'open' and (public.is_admin() or not q.restricted)
-   order by q.priority, q.created_at limit 100;
-end $$;
-
-create or replace function public.audit_list(p_target uuid default null) returns setof public.security_audit_log
-language plpgsql security definer set search_path = public as $$
-begin
-  if not public.is_auditor() then raise exception using errcode = 'NR403', message = 'Только для аудита'; end if;
-  return query select * from public.security_audit_log where p_target is null or target_id = p_target order by id desc limit 200;
-end $$;
-
--- модераторские действия v11 тоже пишутся в аудит
-create or replace function public.mod_actions_audit() returns trigger
-language plpgsql security definer set search_path = public as $$
-begin
-  insert into public.security_audit_log (actor_id, action, target_type, target_id, details)
-  values (new.moderator_id, 'mod_' || new.action, new.target_type, new.target_id, jsonb_build_object('note', new.note));
-  return new;
-end $$;
-drop trigger if exists mod_actions_to_audit on public.mod_actions;
-create trigger mod_actions_to_audit after insert on public.mod_actions for each row execute function public.mod_actions_audit();
-
--- ---------- 17. Сроки хранения ----------
-create or replace function public.shield_cleanup() returns jsonb
-language plpgsql security definer set search_path = public as $$
-declare a int; b int; c int;
-begin
-  -- сырые сигналы — 30 дней
-  update public.user_sessions set ip_hash = null where ip_hash is not null and created_at < now() - interval '30 days';
-  get diagnostics a = row_count;
-  delete from public.session_challenges where created_at < now() - interval '30 days';
-  delete from public.clean_recent where created_at < now() - interval '1 day';
-  delete from public.risk_events where not confirmed and expires_at < now() - interval '30 days'; get diagnostics b = row_count;
-  -- журнал решений — 180 дней после завершения
-  perform set_config('near.audit_purge', '1', true);
-  delete from public.security_audit_log where created_at < now() - interval '180 days'
-    and (target_id is null or not exists (select 1 from public.user_bans u where u.user_id = target_id and u.status = 'active'
-         and (u.expires_at is null or u.expires_at > now() - interval '180 days')));
-  get diagnostics c = row_count;
-  -- уведомления "Оцените встречу" — один раз на встречу
-  insert into public.notifications (user_id, type, post_id, text)
-  select x.uid, 'review', x.post_id, 'Встреча завершена. Оцените участников'
-    from (select e.post_id, e.host_id uid from public.events e join public.posts p on p.id = e.post_id
-           where p.category = 'meetup' and e.status = 'scheduled' and public.meeting_end(e) between now() - interval '1 day' and now()
-          union select m.post_id, m.user_id from public.event_members m join public.events e on e.post_id = m.post_id join public.posts p on p.id = m.post_id
-           where p.category = 'meetup' and m.status = 'going' and e.status = 'scheduled' and public.meeting_end(e) between now() - interval '1 day' and now()) x
-   where not exists (select 1 from public.notifications n where n.user_id = x.uid and n.post_id = x.post_id and n.type = 'review');
-  return jsonb_build_object('ip_cleared', a, 'risk_deleted', b, 'audit_deleted', c);
-end $$;
-
--- ---------- 18. Права: SECURITY DEFINER с фиксированным search_path, минимальные grants ----------
-revoke all on public.shield_secret, public.clean_recent, public.session_challenges from public, anon, authenticated;
-grant select on public.security_audit_log, public.user_devices, public.user_sessions, public.user_bans, public.risk_events, public.risk_holds,
-  public.account_links, public.ban_appeals, public.reputation_events, public.moderation_queue, public.user_reviews,
-  public.group_chats, public.chat_members, public.chat_messages, public.chat_reactions, public.device_restrictions to authenticated;
-grant select on public.user_reputation to anon, authenticated;
-revoke insert, update, delete on public.security_audit_log, public.user_bans, public.risk_events, public.risk_holds, public.account_links,
-  public.ban_appeals, public.reputation_events, public.moderation_queue, public.user_reviews, public.user_sessions, public.user_devices,
-  public.chat_messages, public.chat_members, public.group_chats, public.chat_reactions, public.user_reputation, public.device_restrictions from anon, authenticated;
-grant execute on function public.session_begin(text, text), public.session_confirm(uuid, text), public.session_resend(uuid), public.session_cancel(),
-  public.session_end(), public.session_state(), public.session_list(), public.account_state(uuid), public.my_decisions(),
-  public.appeal_submit(uuid, text), public.nickname_available(text), public.reputation(uuid), public.review_targets(uuid),
-  public.review_submit(uuid, uuid, int, text[], text), public.reviews_pending(), public.meeting_join(uuid), public.meeting_leave(uuid),
-  public.meeting_exclude(uuid, uuid, text), public.meeting_set_cohost(uuid, uuid), public.meeting_cancel(uuid, text),
-  public.meeting_mark(uuid, uuid, boolean), public.meeting_role(uuid), public.chat_send(uuid, text, uuid), public.chat_restrict(uuid, uuid, int),
-  public.chat_list(), public.chat_read(uuid), public.chat_react(uuid, text), public.chat_page(uuid, timestamptz, int), public.chat_send2(uuid, text, uuid, uuid), public.staff_role(), public.shield_sanction(uuid, text, text, int, text, text, text, text, uuid),
-  public.shield_revoke(uuid, text), public.shield_extend(uuid, int, text), public.shield_link_decide(uuid, boolean, text),
-  public.risk_decide(uuid, boolean, text), public.appeal_take(uuid), public.appeal_decide(uuid, boolean, text), public.shield_overview(),
-  public.shield_find(text), public.shield_user_card(uuid), public.shield_queue(), public.audit_list(uuid), public.media_decide(uuid, boolean),
-  public.media_retry(uuid), public.media_view(uuid, real), public.media_stats(uuid),
-  public.clean_text(text, text), public.session_ok(), public.shield_ok(), public.is_auditor(), public.chat_can_read(uuid),
-  public.member_attended(uuid, uuid), public.is_meeting(uuid), public.meeting_access()
+grant execute on function public.mfa_ok(), public.has_mod_role(), public.profile_instagram(uuid), public.active_sanction(uuid, text),
+  public.near_norm_text(text), public.near_block_reason(text), public.near_flag_reason(text), public.near_block_message(text),
+  public.clean_url(text), public.post_meta_clean(text, jsonb), public.storage_media_visible(text),
+  public.feed_v14(double precision, double precision, int, text[], text, text, boolean, uuid, timestamptz, int),
+  public.map_v14(double precision, double precision, double precision, double precision, text[], double precision, double precision, int, text, boolean, int),
+  public.ping()
+  to anon, authenticated;
+grant execute on function public.limit_status(text), public.my_account(), public.mod_restrict(uuid, text, int, text), public.mod_unrestrict(uuid, text),
+  public.mod_media(uuid, boolean, text), public.mod_media_queue(), public.city_upsert(jsonb)
   to authenticated;
-grant execute on function public.nickname_available(text), public.reputation(uuid), public.account_state(uuid), public.session_state(), public.clean_text(text, text), public.media_view(uuid, real) to anon;
-revoke all on public.media_jobs, public.media_views from anon, authenticated;
-revoke execute on function public.shield_hash(text), public.risk_add(uuid, text, text, boolean, jsonb), public.risk_on_register(uuid, text),
-  public.shield_revoke_internal(uuid, text), public.meeting_cancel_internal(uuid, text), public.queue_add(text, uuid, uuid, text),
-  public.ban_sync(uuid), public.audit(text, text, uuid, jsonb), public.revoke_auth_session(uuid), public.session_reauth_mark(uuid, uuid),
-  public.rep_recalc(uuid), public.shield_cleanup(), public.clean_guard(), public.nick_guard(), public.dm_disabled(), public.media_shield(),
-  public.meeting_guard(), public.meeting_setup(), public.push_guard(), public.media_state_guard(), public.media_enqueue(), public.post_publish_guard(), public.media_after_state(),
-  public.media_job_claim(text, text), public.media_job_done(uuid, text, jsonb), public.on_password_change(), public.mod_actions_audit(), public.audit_immutable()
+revoke execute on function public.sanction_guard(), public.message_age_guard(), public.flag_after_insert(), public.post_meta_trigger(),
+  public.official_guard(), public.post_counters(), public.counters_reconcile()
   from public, anon, authenticated;
--- Готово ✅ v14.9 NEAR Shield
 
--- удаление аккаунта: встречи передаются co-host или отменяются с уведомлением, членство в чатах снимается,
--- файлы в приватном staging удаляет функция delete-account (папка пользователя)
-create or replace function public.account_predelete(p_user uuid) returns jsonb
+-- Готово ✅ v14.2 (этап 1.2)
+
+
+-- =====================================================================
+-- NEAR v14.8 (ТЗ v14.8): общие чаты и встречи вместо личных сообщений и друзей.
+-- Часть A: отключение личных сообщений и дружбы, вход по нику, состояния аккаунта.
+-- Скрипт идемпотентный. Перед запуском — резервная копия (SETUP.md, шаг 19).
+-- =====================================================================
+
+-- ---------- 12: личные диалоги и друзья — контролируемый отказ ----------
+alter table public.app_settings add column if not exists legacy_dm_closed_at timestamptz;
+update public.app_settings set legacy_dm_closed_at = coalesce(legacy_dm_closed_at, now()) where id = 1;
+
+create or replace function public.legacy_dm_refuse() returns trigger
 language plpgsql security definer set search_path = public as $$
-declare m record; moved int := 0; cancelled int := 0;
 begin
-  for m in select e.post_id, e.cohost_id from public.events e where e.host_id = p_user and e.status = 'scheduled' and e.starts_at > now() loop
-    if m.cohost_id is not null and public.ban_level(m.cohost_id) = 0 then
-      update public.events set host_id = m.cohost_id, cohost_id = null where post_id = m.post_id;
-      update public.posts set user_id = m.cohost_id where id = m.post_id;     -- встреча не исчезает вместе с автором
-      insert into public.notifications (user_id, type, post_id, text) values (m.cohost_id, 'meeting', m.post_id, 'Вы стали организатором встречи');
-      moved := moved + 1;
-    else
-      perform public.meeting_cancel_internal(m.post_id, 'Встреча отменена: организатор удалил аккаунт');
-      cancelled := cancelled + 1;
+  -- сервер (service role, миграции) может чистить старые данные; пользователи ничего не создают
+  if auth.uid() is null then return coalesce(new, old); end if;
+  raise exception using errcode = 'NR410',
+    message = 'Личные сообщения и друзья больше не поддерживаются. Общайтесь в общих чатах и встречах', hint = 'legacy_dm';
+end $$;
+drop trigger if exists legacy_dm_conv on public.conversations;
+create trigger legacy_dm_conv before insert or update on public.conversations for each row execute function public.legacy_dm_refuse();
+drop trigger if exists legacy_dm_msg on public.messages;
+create trigger legacy_dm_msg before insert or update on public.messages for each row execute function public.legacy_dm_refuse();
+drop trigger if exists legacy_dm_friend on public.friendships;
+create trigger legacy_dm_friend before insert or update on public.friendships for each row execute function public.legacy_dm_refuse();
+
+create or replace function public.get_or_create_conversation(other uuid) returns uuid
+language plpgsql security definer set search_path = public as $$
+begin
+  raise exception using errcode = 'NR410',
+    message = 'Личные сообщения больше не поддерживаются. Общайтесь в общих чатах и встречах', hint = 'legacy_dm';
+end $$;
+create or replace function public.conversation_respond(conv uuid, accept boolean) returns text
+language plpgsql security definer set search_path = public as $$
+begin
+  raise exception using errcode = 'NR410', message = 'Личные сообщения больше не поддерживаются', hint = 'legacy_dm';
+end $$;
+-- старые данные: не читаются клиентом, не превращаются в публичные; удаление — по утвержденной политике хранения
+revoke all on public.conversations, public.messages, public.friendships from anon, authenticated;
+do $$ begin alter publication supabase_realtime drop table public.messages; exception when others then null; end $$;
+do $$ begin alter publication supabase_realtime drop table public.conversations; exception when others then null; end $$;
+-- друзья больше ничего не открывают (в том числе обход возрастного допуска)
+create or replace function public.are_friends(a uuid, b uuid) returns boolean language sql stable as $$ select false $$;
+
+-- ---------- 03: вход по нику без раскрытия email ----------
+-- Вызывается только Edge Function login (service role). Пользователь email чужого ника не получает никогда.
+create or replace function public.login_email(p_login text) returns text
+language sql stable security definer set search_path = public, auth as $$
+  select u.email from auth.users u join public.profiles p on p.id = u.id
+   where p.nickname_norm = public.nick_norm(btrim(p_login)) and u.deleted_at is null limit 1 $$;
+revoke all on function public.login_email(text) from public, anon, authenticated;
+do $$ begin grant execute on function public.login_email(text) to service_role; exception when undefined_object then null; end $$;
+
+-- журнал попыток входа: ограничение частоты по нику и по IP (хэш), без паролей
+create table if not exists public.login_attempts (
+  id         bigserial primary key,
+  login_key  text not null,
+  ip_hash    text,
+  ok         boolean not null default false,
+  created_at timestamptz not null default now()
+);
+create index if not exists login_attempts_key_idx on public.login_attempts (login_key, created_at desc);
+create index if not exists login_attempts_ip_idx on public.login_attempts (ip_hash, created_at desc);
+alter table public.login_attempts enable row level security;
+revoke all on public.login_attempts from anon, authenticated;
+
+create or replace function public.login_gate(p_login text, p_ip text) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare k text := public.nick_norm(lower(btrim(p_login))); n_key int; n_ip int;
+begin
+  select count(*) into n_key from public.login_attempts where login_key = k and not ok and created_at > now() - interval '15 minutes';
+  select count(*) into n_ip from public.login_attempts where ip_hash = p_ip and not ok and created_at > now() - interval '15 minutes';
+  if n_key >= 5 or n_ip >= 20 then
+    return jsonb_build_object('ok', false, 'retry_after', 900);
+  end if;
+  return jsonb_build_object('ok', true);
+end $$;
+create or replace function public.login_note(p_login text, p_ip text, p_ok boolean) returns void
+language sql security definer set search_path = public as $$
+  insert into public.login_attempts (login_key, ip_hash, ok) values (public.nick_norm(lower(btrim(p_login))), p_ip, p_ok);
+  delete from public.login_attempts where created_at < now() - interval '2 days' and random() < 0.05 $$;
+revoke all on function public.login_gate(text, text), public.login_note(text, text, boolean) from public, anon, authenticated;
+do $$ begin
+  grant execute on function public.login_gate(text, text), public.login_note(text, text, boolean) to service_role;
+exception when undefined_object then null; end $$;
+
+-- ---------- 03: допуск к встречам — отдельно от возраста для чатов ----------
+alter table public.app_settings add column if not exists meet_age_gate boolean not null default true;
+create or replace function public.meet_ok(u uuid) returns boolean
+language sql stable security definer set search_path = public as $$
+  select not coalesce((select meet_age_gate from public.app_settings where id = 1), true)
+      or exists (select 1 from public.profile_private where user_id = u and age_status = 'adult') $$;
+
+-- =====================================================================
+-- Часть B (разделы 08, 09, 12): единая модель комнат — город, районы, темы, встречи.
+-- rooms / room_members / room_messages / room_mentions / outbox. Без личных диалогов.
+-- =====================================================================
+
+create table if not exists public.rooms (
+  id              uuid primary key default gen_random_uuid(),
+  type            text not null check (type in ('city','district','topic','meeting')),
+  scope_id        text,                    -- 'almaty', название района, тема или id встречи
+  title           text not null check (char_length(title) between 2 and 80),
+  about           text check (about is null or char_length(about) <= 300),
+  rules           text check (rules is null or char_length(rules) <= 1000),
+  pinned          text check (pinned is null or char_length(pinned) <= 300),
+  status          text not null default 'active' check (status in ('active','readonly','archived','closed')),
+  is_public       boolean not null default true,
+  slow_mode_sec   int not null default 0 check (slow_mode_sec between 0 and 600),
+  meeting_id      uuid unique,             -- UNIQUE(meeting_id): одна комната на встречу
+  last_message_at timestamptz,
+  members_count   int not null default 0,
+  created_at      timestamptz not null default now(),
+  unique (type, scope_id)
+);
+create index if not exists rooms_type_idx on public.rooms (type, status, last_message_at desc nulls last);
+
+create table if not exists public.room_members (
+  room_id       uuid not null references public.rooms(id) on delete cascade,
+  user_id       uuid not null references public.profiles(id) on delete cascade,
+  role          text not null default 'member' check (role in ('host','cohost','moderator','member')),
+  status        text not null default 'active' check (status in ('active','left','removed')),
+  muted_until   timestamptz,
+  notify        text not null default 'mentions' check (notify in ('all','mentions','silent','off')),
+  last_read_at  timestamptz not null default now(),
+  active_until  timestamptz,               -- приложение открыто в этой комнате: push не дублируется
+  joined_at     timestamptz not null default now(),
+  primary key (room_id, user_id)           -- UNIQUE(room_id, user_id)
+);
+create index if not exists room_members_room_status_idx on public.room_members (room_id, status);
+create index if not exists room_members_user_idx on public.room_members (user_id, status);
+
+create table if not exists public.room_messages (
+  id          uuid primary key default gen_random_uuid(),
+  room_id     uuid not null references public.rooms(id) on delete cascade,
+  sender_id   uuid references public.profiles(id) on delete set null,   -- null = системный автор
+  kind        text not null default 'text' check (kind in ('text','system','action','checkin')),
+  body_masked text not null check (char_length(body_masked) between 1 and 1000),
+  client_id   text,
+  reply_to    uuid references public.room_messages(id) on delete set null,
+  meta        jsonb not null default '{}'::jsonb,
+  status      text not null default 'ok' check (status in ('ok','hidden','deleted')),
+  created_at  timestamptz not null default now(),
+  unique (room_id, sender_id, client_id)   -- повтор отправки не создает дубль
+);
+create index if not exists room_messages_room_idx on public.room_messages (room_id, created_at desc, id desc);
+create index if not exists room_messages_sender_idx on public.room_messages (sender_id, created_at desc);
+
+create table if not exists public.room_mentions (
+  message_id uuid not null references public.room_messages(id) on delete cascade,
+  user_id    uuid not null references public.profiles(id) on delete cascade,
+  primary key (message_id, user_id)
+);
+create index if not exists room_mentions_user_idx on public.room_mentions (user_id);
+
+-- outbox: уведомления и напоминания с повтором и дедупликацией
+create table if not exists public.outbox (
+  id          bigserial primary key,
+  user_id     uuid not null references public.profiles(id) on delete cascade,
+  kind        text not null,
+  dedup_key   text not null unique,
+  payload     jsonb not null default '{}'::jsonb,
+  status      text not null default 'pending' check (status in ('pending','sent','failed','skipped')),
+  attempts    int not null default 0,
+  next_retry  timestamptz not null default now(),
+  last_error  text,
+  created_at  timestamptz not null default now()
+);
+create index if not exists outbox_status_idx on public.outbox (status, next_retry);
+alter table public.outbox enable row level security;
+revoke all on public.outbox from anon, authenticated;
+
+-- уведомления знают комнату и ссылку (deep link проверяет доступ при открытии)
+alter table public.notifications add column if not exists room_id uuid references public.rooms(id) on delete cascade;
+alter table public.notifications add column if not exists link text;
+
+-- настройка push: все / упоминания и важное / без звука / отключить
+alter table public.profiles add column if not exists notify_level text not null default 'important'
+  check (notify_level in ('all','important','silent','off'));
+
+alter table public.rooms enable row level security;
+alter table public.room_members enable row level security;
+alter table public.room_messages enable row level security;
+alter table public.room_mentions enable row level security;
+
+create or replace function public.room_role(r uuid, u uuid) returns text
+language sql stable security definer set search_path = public as $$
+  select role from public.room_members where room_id = r and user_id = u and status = 'active' $$;
+create or replace function public.room_can_read(r uuid) returns boolean
+language sql stable security definer set search_path = public as $$
+  select exists (select 1 from public.rooms x where x.id = r and x.status <> 'closed'
+                   and ((x.is_public and x.type <> 'meeting') or public.room_role(r, auth.uid()) is not null))
+      or public.is_mod() $$;
+
+drop policy if exists rooms_read on public.rooms;
+create policy rooms_read on public.rooms for select using ((is_public and type <> 'meeting') or public.room_role(id, auth.uid()) is not null or public.is_mod());
+drop policy if exists room_members_read on public.room_members;
+-- состав видят участники комнаты; GPS, телефон и email в комнатах не хранятся
+create policy room_members_read on public.room_members for select using (user_id = auth.uid() or public.room_role(room_id, auth.uid()) is not null or public.is_mod());
+drop policy if exists room_messages_read on public.room_messages;
+-- чтение: публичная комната (гость тоже) или участник; сообщения заблокированных скрыты; при кике доступ к истории сразу закрывается
+create policy room_messages_read on public.room_messages for select using (
+  public.room_can_read(room_id)
+  and (status = 'ok' or public.is_mod() or (sender_id = auth.uid() and status <> 'deleted'))
+  and (sender_id is null or auth.uid() is null or not exists (select 1 from public.blocks b where b.blocker_id = auth.uid() and b.blocked_id = room_messages.sender_id)));
+drop policy if exists room_mentions_read on public.room_mentions;
+create policy room_mentions_read on public.room_mentions for select using (user_id = auth.uid());
+-- запись только через RPC: клиент не меняет роль, счетчики, статус
+revoke insert, update, delete on public.rooms, public.room_members, public.room_messages, public.room_mentions from anon, authenticated;
+grant select on public.rooms, public.room_members, public.room_messages, public.room_mentions to anon, authenticated;
+do $$ begin alter publication supabase_realtime add table public.room_messages; exception when others then null; end $$;
+
+-- ---------- города, районы ----------
+insert into public.rooms (type, scope_id, title, about, rules, pinned) values
+  ('city', 'almaty', 'Алматы — общий чат', 'Городские вопросы', 'Уважайте соседей. Без рекламы, ссылок на сборы денег и личных данных. Мат скрывается, угрозы и скам удаляются.', 'Правила: уважение, без личных данных и сборов денег')
+on conflict (type, scope_id) do nothing;
+insert into public.rooms (type, scope_id, title, about, rules)
+select 'district', d, d || ' район', 'Новости соседей', 'Только о районе. Уважайте соседей, без рекламы и личных данных.'
+from unnest(array['Алатауский','Алмалинский','Ауэзовский','Бостандыкский','Жетысуский','Медеуский','Наурызбайский','Турксибский']) d
+on conflict (type, scope_id) do nothing;
+
+-- ---------- outbox ----------
+create or replace function public.outbox_put(p_user uuid, p_kind text, p_key text, p_payload jsonb, p_at timestamptz default now()) returns void
+language sql security definer set search_path = public as $$
+  insert into public.outbox (user_id, kind, dedup_key, payload, next_retry) values (p_user, p_kind, p_key, p_payload, p_at)
+  on conflict (dedup_key) do nothing $$;
+
+-- обработка: due → уведомление в приложении (push уходит триггером уведомлений). Повтор с паузой, без дублей.
+create or replace function public.outbox_process(p_limit int default 200) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare o record; sent int := 0; skipped int := 0; failed int := 0; lvl text; mem record;
+begin
+  for o in select * from public.outbox where status = 'pending' and next_retry <= now() order by next_retry limit p_limit for update skip locked loop
+    begin
+      select notify_level into lvl from public.profiles where id = o.user_id;
+      -- комната: участник ушел/исключен — уведомление не нужно; активный чат — не дублировать
+      if o.payload ? 'room_id' then
+        select * into mem from public.room_members where room_id = (o.payload->>'room_id')::uuid and user_id = o.user_id;
+        if mem.status is distinct from 'active' or (o.kind = 'message' and mem.active_until > now()) then
+          update public.outbox set status = 'skipped' where id = o.id; skipped := skipped + 1; continue;
+        end if;
+      end if;
+      if lvl = 'off' or (lvl in ('important','silent') and o.kind = 'message') then
+        update public.outbox set status = 'skipped' where id = o.id; skipped := skipped + 1; continue;
+      end if;
+      insert into public.notifications (user_id, actor_id, type, text, room_id, link, post_id)
+      values (o.user_id, nullif(o.payload->>'actor', '')::uuid, o.kind, left(o.payload->>'text', 300),
+              nullif(o.payload->>'room_id', '')::uuid, o.payload->>'link', nullif(o.payload->>'post_id', '')::uuid);
+      update public.outbox set status = 'sent', attempts = attempts + 1 where id = o.id; sent := sent + 1;
+    exception when others then
+      update public.outbox set attempts = attempts + 1, last_error = left(sqlerrm, 200),
+        status = case when attempts + 1 >= 5 then 'failed' else 'pending' end,
+        next_retry = now() + (interval '1 minute' * power(2, attempts)) where id = o.id;
+      failed := failed + 1;
+    end;
+  end loop;
+  return jsonb_build_object('sent', sent, 'skipped', skipped, 'failed', failed);
+end $$;
+revoke all on function public.outbox_process(int) from public, anon, authenticated;
+
+-- ---------- вступить / выйти / настройки комнаты ----------
+create or replace function public.join_room(p_room uuid) returns void
+language plpgsql security definer set search_path = public as $$
+declare r public.rooms;
+begin
+  if auth.uid() is null then raise exception using errcode = 'NR401', message = 'Войдите, чтобы вступить'; end if;
+  select * into r from public.rooms where id = p_room;
+  if r.id is null or r.status = 'closed' then raise exception using errcode = 'NR404', message = 'Комната не найдена'; end if;
+  if r.type = 'meeting' then raise exception using errcode = 'NR403', message = 'Чат встречи открывается после принятия заявки', hint = 'meeting_room'; end if;
+  insert into public.room_members (room_id, user_id) values (p_room, auth.uid())
+  on conflict (room_id, user_id) do update set status = 'active', joined_at = now() where room_members.status = 'left';
+  update public.rooms set members_count = (select count(*) from public.room_members where room_id = p_room and status = 'active') where id = p_room;
+end $$;
+
+create or replace function public.leave_room(p_room uuid) returns void
+language plpgsql security definer set search_path = public as $$
+begin
+  if exists (select 1 from public.rooms where id = p_room and type = 'meeting') then
+    raise exception using errcode = 'NR409', message = 'Чтобы выйти из чата встречи, отмените участие во встрече', hint = 'meeting_room';
+  end if;
+  update public.room_members set status = 'left' where room_id = p_room and user_id = auth.uid() and status = 'active';
+  update public.rooms set members_count = (select count(*) from public.room_members where room_id = p_room and status = 'active') where id = p_room;
+end $$;
+
+create or replace function public.room_settings(p_room uuid, p_notify text default null, p_read boolean default false, p_active boolean default null) returns void
+language plpgsql security definer set search_path = public as $$
+begin
+  update public.room_members set
+    notify = coalesce(p_notify, notify),
+    last_read_at = case when p_read then now() else last_read_at end,
+    active_until = case when p_active is true then now() + interval '90 seconds' when p_active is false then null else active_until end
+  where room_id = p_room and user_id = auth.uid() and status = 'active';
+end $$;
+
+-- список: Рядом (город + районы + темы), Встречи (мои встречи), Мои (все, где я участник); с непрочитанными
+create or replace function public.rooms_list(p_tab text default 'near', p_q text default null) returns jsonb
+language sql stable security definer set search_path = public as $$
+  select coalesce(jsonb_agg(x order by x.ord, x.last desc nulls last), '[]'::jsonb) from (
+    select r.id, r.type, r.title, r.about, r.pinned, r.status, r.meeting_id, r.members_count,
+           r.last_message_at as last,
+           m.status = 'active' as joined, m.role, m.notify,
+           case when m.status = 'active' then (select count(*) from public.room_messages x where x.room_id = r.id and x.created_at > m.last_read_at and x.status = 'ok' and x.sender_id is distinct from auth.uid()) else 0 end as unread,
+           (select left(x.body_masked, 80) from public.room_messages x where x.room_id = r.id and x.status = 'ok' order by x.created_at desc limit 1) as preview,
+           case r.type when 'city' then 0 when 'district' then 1 when 'meeting' then 2 else 3 end as ord
+      from public.rooms r
+      left join public.room_members m on m.room_id = r.id and m.user_id = auth.uid()
+     where r.status <> 'closed'
+       and case p_tab
+             when 'near' then r.type in ('city','district','topic') and r.is_public
+             when 'meet' then r.type = 'meeting' and m.status = 'active'
+             else m.status = 'active' end
+       and (p_q is null or r.title ilike '%' || replace(replace(btrim(p_q), '%', ''), '_', '') || '%')
+     limit 100) x $$;
+
+-- ---------- отправка сообщения: маска, блок опасного, лимиты, slow mode, упоминания ----------
+create or replace function public.send_message(p_room uuid, p_body text, p_client_id text, p_reply_to uuid default null,
+                                               p_kind text default 'text', p_action text default null) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare uid uuid := auth.uid(); r public.rooms; m public.room_members; s public.user_sanctions; body text; why text;
+        mid uuid; ts timestamptz; n10 int; n60 int; links int; trusted boolean; all_mention boolean := false;
+        meet record; t text; target uuid; host uuid; v_meta jsonb := '{}'::jsonb;
+begin
+  if uid is null then raise exception using errcode = 'NR401', message = 'Войдите, чтобы писать'; end if;
+  if p_client_id is null or char_length(p_client_id) > 64 then raise exception using errcode = 'NR422', message = 'Нет ключа отправки'; end if;
+  -- повтор того же ключа — тот же результат (идемпотентность)
+  select id, created_at into mid, ts from public.room_messages where room_id = p_room and sender_id = uid and client_id = p_client_id;
+  if mid is not null then return jsonb_build_object('id', mid, 'created_at', ts, 'duplicate', true); end if;
+
+  select * into r from public.rooms where id = p_room;
+  if r.id is null or r.status = 'closed' then raise exception using errcode = 'NR404', message = 'Комната не найдена'; end if;
+  select * into m from public.room_members where room_id = p_room and user_id = uid;
+  if m.status is distinct from 'active' then
+    raise exception using errcode = 'NR403', message = case when r.type = 'meeting' then 'Писать могут только участники встречи' else 'Вступите в комнату, чтобы писать' end, hint = 'not_member';
+  end if;
+  if exists (select 1 from public.profiles where id = uid and (nickname is null or accepted_rules_at is null)) then
+    raise exception using errcode = 'NR403', message = 'Заполните профиль: никнейм и согласие с правилами', hint = 'profile_incomplete';
+  end if;
+  if not exists (select 1 from public.profiles where id = uid and verified) then
+    raise exception using errcode = 'NR403', message = 'Подтвердите почту, чтобы писать', hint = 'pending_email';
+  end if;
+  s := public.active_sanction(uid, 'chat');
+  if s.id is not null then
+    raise exception using errcode = 'NR403', hint = 'restricted',
+      message = 'Сообщения ограничены модератором' || case when s.until is null then '' else ' до ' || to_char(s.until at time zone 'Asia/Almaty', 'DD.MM HH24:MI') end || '. Причина: ' || s.reason;
+  end if;
+  if m.muted_until > now() then
+    raise exception using errcode = 'NR403', hint = 'muted', message = 'Вам временно нельзя писать в этой комнате до ' || to_char(m.muted_until at time zone 'Asia/Almaty', 'DD.MM HH24:MI');
+  end if;
+  -- архив встречи: только чтение через 7 дней после окончания; отмененная встреча — только чтение
+  if r.type = 'meeting' then
+    select mt.* into meet from public.meetings mt where mt.id = r.meeting_id;
+    if meet.status = 'cancelled' or meet.ends_at < now() - interval '7 days' or r.status <> 'active' then
+      raise exception using errcode = 'NR403', message = 'Чат встречи в архиве: только чтение', hint = 'archived';
+    end if;
+  elsif r.status <> 'active' then
+    raise exception using errcode = 'NR403', message = 'Комната только для чтения', hint = 'readonly';
+  end if;
+
+  body := btrim(coalesce(p_body, ''));
+  if p_kind = 'action' then
+    if p_action is null then raise exception using errcode = 'NR422', message = 'Неизвестное действие'; end if;
+    v_meta := jsonb_build_object('action', left(p_action, 40));
+  elsif p_kind <> 'text' then raise exception using errcode = 'NR422', message = 'Недопустимый тип сообщения';
+  end if;
+  if body = '' then raise exception using errcode = 'NR422', message = 'Пустое сообщение'; end if;
+  if char_length(body) > 1000 then raise exception using errcode = 'NR422', message = 'Сообщение длиннее 1000 символов'; end if;
+  why := public.near_block_reason(body);
+  if why is not null then raise exception using errcode = 'NR422', message = public.near_block_message(why), hint = why; end if;
+
+  -- частота: 5 за 10 секунд, 30 в минуту; slow mode комнаты
+  if not public.is_mod() then
+    select count(*) filter (where created_at > now() - interval '10 seconds'), count(*) into n10, n60
+      from public.room_messages where sender_id = uid and created_at > now() - interval '1 minute';
+    if n10 >= 5 or n60 >= 30 then
+      raise exception using errcode = 'NR429', message = 'Слишком часто. Подождите немного', hint = 'retry_after=' || case when n10 >= 5 then 10 else 60 end || ';action=chat';
+    end if;
+    if r.slow_mode_sec > 0 and m.role not in ('host','cohost','moderator') and exists (
+         select 1 from public.room_messages where room_id = p_room and sender_id = uid and created_at > now() - make_interval(secs => r.slow_mode_sec)) then
+      raise exception using errcode = 'NR429', message = 'В комнате медленный режим: одно сообщение в ' || r.slow_mode_sec || ' с', hint = 'retry_after=' || r.slow_mode_sec || ';action=slow';
+    end if;
+    -- ссылки: только доверенным (телефон или 7 дней в NEAR), не больше 3 в час
+    if body ~* '(https?://|www\.|[a-z0-9-]+\.(kz|ru|com|net|org|me|io|ly|link)\y)' then
+      select exists (select 1 from public.profile_private where user_id = uid and phone_verified_at is not null)
+          or exists (select 1 from public.profiles where id = uid and created_at < now() - interval '7 days') into trusted;
+      if not trusted then raise exception using errcode = 'NR403', message = 'Ссылки можно отправлять через 7 дней после регистрации', hint = 'links'; end if;
+      select count(*) into links from public.room_messages where sender_id = uid and created_at > now() - interval '1 hour' and (room_messages.meta->>'link')::boolean;
+      if links >= 3 then raise exception using errcode = 'NR429', message = 'Не больше 3 ссылок в час', hint = 'retry_after=3600;action=links'; end if;
+      v_meta := v_meta || '{"link":true}';
+    end if;
+  end if;
+
+  -- @all: Host, co-host или модератор комнаты, не чаще 1 раза в 5 минут
+  if body ~* '(^|\s)@all\y' then
+    if m.role not in ('host','cohost','moderator') and not public.is_mod() then
+      raise exception using errcode = 'NR403', message = '@all доступен только организатору и модераторам', hint = 'mention_all';
+    end if;
+    if exists (select 1 from public.room_messages where room_id = p_room and (room_messages.meta->>'all')::boolean and created_at > now() - interval '5 minutes') then
+      raise exception using errcode = 'NR429', message = '@all можно использовать раз в 5 минут', hint = 'retry_after=300;action=mention_all';
+    end if;
+    all_mention := true; v_meta := v_meta || '{"all":true}';
+  end if;
+  if p_reply_to is not null and not exists (select 1 from public.room_messages where id = p_reply_to and room_id = p_room) then p_reply_to := null; end if;
+
+  insert into public.room_messages (room_id, sender_id, kind, body_masked, client_id, reply_to, meta)
+  values (p_room, uid, p_kind, public.near_clean(body), p_client_id, p_reply_to, v_meta)
+  on conflict (room_id, sender_id, client_id) do nothing
+  returning id, created_at into mid, ts;
+  if mid is null then
+    select id, created_at into mid, ts from public.room_messages where room_id = p_room and sender_id = uid and client_id = p_client_id;
+    return jsonb_build_object('id', mid, 'created_at', ts, 'duplicate', true);
+  end if;
+  update public.rooms set last_message_at = ts where id = p_room;
+  update public.room_members set last_read_at = ts where room_id = p_room and user_id = uid;
+
+  -- упоминания по ID; заблокировавшие отправителя не получают прямых упоминаний
+  if r.type = 'meeting' then select host_id into host from public.meetings where id = r.meeting_id; end if;
+  for target in
+    select distinct rm.user_id from public.room_members rm
+      left join public.profiles p on p.id = rm.user_id
+     where rm.room_id = p_room and rm.status = 'active' and rm.user_id <> uid
+       and (all_mention
+            or (host is not null and rm.user_id = host and body ~* '(^|\s)@host\y')
+            or (p.nickname_norm is not null and public.nick_norm(body) ~ ('(^|[^[:alnum:]_])@' || p.nickname_norm || '($|[^[:alnum:]_])')))
+       and not exists (select 1 from public.blocks b where b.blocker_id = rm.user_id and b.blocked_id = uid)
+  loop
+    insert into public.room_mentions (message_id, user_id) values (mid, target) on conflict do nothing;
+    perform public.outbox_put(target, 'mention', 'mention:' || mid || ':' || target,
+      jsonb_build_object('room_id', p_room, 'actor', uid, 'text', case when all_mention then 'Сообщение для всех в "' || r.title || '"' else 'Вас упомянули в "' || r.title || '"' end,
+                         'link', '#room=' || p_room));
+  end loop;
+  -- сообщение для тех, кто включил "все" (кроме упомянутых и автора)
+  if r.type = 'meeting' then
+    insert into public.outbox (user_id, kind, dedup_key, payload)
+    select rm.user_id, 'message', 'msg:' || mid || ':' || rm.user_id,
+           jsonb_build_object('room_id', p_room, 'actor', uid, 'text', 'Новое сообщение в "' || r.title || '"', 'link', '#room=' || p_room)
+      from public.room_members rm
+     where rm.room_id = p_room and rm.status = 'active' and rm.user_id <> uid and rm.notify = 'all'
+       and not exists (select 1 from public.room_mentions x where x.message_id = mid and x.user_id = rm.user_id)
+    on conflict (dedup_key) do nothing;
+  end if;
+  return jsonb_build_object('id', mid, 'created_at', ts);
+end $$;
+
+-- системное сообщение (шаблон RU + ключ для перевода в приложении)
+create or replace function public.room_system(p_room uuid, p_body text, p_meta jsonb default '{}'::jsonb, p_kind text default 'system') returns uuid
+language sql security definer set search_path = public as $$
+  with i as (insert into public.room_messages (room_id, sender_id, kind, body_masked, meta) values (p_room, null, p_kind, left(p_body, 1000), p_meta) returning id, created_at)
+  , u as (update public.rooms set last_message_at = (select created_at from i) where id = p_room)
+  select id from i $$;
+revoke all on function public.room_system(uuid, text, jsonb, text) from public, anon, authenticated;
+
+-- лента сообщений комнаты, по 40, курсором (created_at, id)
+create or replace function public.room_feed(p_room uuid, p_before timestamptz default null, p_before_id uuid default null, p_limit int default 40) returns setof public.room_messages
+language sql stable security invoker set search_path = public as $$
+  select * from public.room_messages
+   where room_id = p_room
+     and (p_before is null or (created_at, id) < (p_before, coalesce(p_before_id, 'ffffffff-ffff-ffff-ffff-ffffffffffff'::uuid)))
+   order by created_at desc, id desc
+   limit least(greatest(coalesce(p_limit, 40), 1), 50) $$;
+
+-- модерация комнаты: скрыть сообщение, мут, медленный режим
+create or replace function public.room_hide_message(p_msg uuid, p_reason text) returns void
+language plpgsql security definer set search_path = public as $$
+declare r uuid; role text := '';
+begin
+  select room_id into r from public.room_messages where id = p_msg;
+  role := coalesce(public.room_role(r, auth.uid()), '');
+  if not (public.is_mod() or role in ('host','cohost','moderator')) then raise exception using errcode = 'NR403', message = 'Нет прав'; end if;
+  update public.room_messages set status = 'hidden', meta = meta || jsonb_build_object('hidden_by', auth.uid(), 'reason', left(p_reason, 200)) where id = p_msg;
+end $$;
+
+create or replace function public.set_mute(p_room uuid, p_user uuid, p_minutes int, p_reason text default null) returns void
+language plpgsql security definer set search_path = public as $$
+declare my text := coalesce(public.room_role(p_room, auth.uid()), ''); their text := coalesce(public.room_role(p_room, p_user), ''); mt uuid;
+begin
+  if not (public.is_mod() or my in ('host','cohost','moderator')) then raise exception using errcode = 'NR403', message = 'Мутить может организатор или модератор'; end if;
+  if their = '' then raise exception using errcode = 'NR404', message = 'Участник не найден'; end if;
+  if their = 'host' or (their in ('cohost','moderator') and my not in ('host') and not public.is_mod()) then
+    raise exception using errcode = 'NR403', message = 'Нельзя ограничить организатора';
+  end if;
+  if p_minutes is null or p_minutes < 0 or p_minutes > 10080 then raise exception using errcode = 'NR422', message = 'Срок от 0 до 7 дней'; end if;
+  update public.room_members set muted_until = case when p_minutes = 0 then null else now() + make_interval(mins => p_minutes) end where room_id = p_room and user_id = p_user;
+  select meeting_id into mt from public.rooms where id = p_room;
+  if mt is not null then
+    insert into public.meeting_audit (meeting_id, actor_id, action, target_id, reason) values (mt, auth.uid(), case when p_minutes = 0 then 'unmute' else 'mute' end, p_user, left(p_reason, 300));
+  end if;
+end $$;
+
+create or replace function public.room_slow_mode(p_room uuid, p_sec int) returns void
+language plpgsql security definer set search_path = public as $$
+begin
+  if not (public.is_mod() or coalesce(public.room_role(p_room, auth.uid()), '') in ('host','cohost','moderator')) then raise exception using errcode = 'NR403', message = 'Нет прав'; end if;
+  update public.rooms set slow_mode_sec = greatest(0, least(coalesce(p_sec, 0), 600)) where id = p_room;
+end $$;
+
+-- тематическая комната создается модератором по спросу
+create or replace function public.mod_create_room(p_title text, p_about text, p_rules text) returns uuid
+language plpgsql security definer set search_path = public as $$
+declare v_id uuid;
+begin
+  if not public.is_mod() then raise exception using errcode = 'NR403', message = 'Только модератор'; end if;
+  insert into public.rooms (type, scope_id, title, about, rules) values ('topic', public.nick_norm(p_title), public.near_clean(btrim(p_title)), public.near_clean(p_about), public.near_clean(p_rules))
+  on conflict (type, scope_id) do update set status = 'active' returning rooms.id into v_id;
+  return v_id;
+end $$;
+
+-- жалоба на сообщение комнаты: в общую очередь модерации
+alter table public.reports drop constraint if exists reports_target_type_check;
+alter table public.reports add constraint reports_target_type_check check (target_type in ('post','user','message','comment','room_message','meeting','review'));
+
+-- =====================================================================
+-- Часть C (разделы 07, 09, 12): встречи, заявки, Host, готовность, напоминания, посещение.
+-- Встреча — это публикация категории meetup (лента и карта) + запись meetings + комната.
+-- =====================================================================
+
+create table if not exists public.meetings (
+  id           uuid primary key references public.posts(id) on delete cascade,
+  host_id      uuid references public.profiles(id) on delete set null,
+  category     text not null check (category in ('games','cinema','board','sport','cafe','walk','mountains','study','other')),
+  title        text not null check (char_length(title) between 5 and 80),
+  details      jsonb not null default '{}'::jsonb,
+  pin          text,
+  place_name   text check (place_name is null or char_length(place_name) <= 120),
+  starts_at    timestamptz not null,
+  ends_at      timestamptz not null,
+  capacity     int not null check (capacity between 3 and 50),          -- включая Host
+  price_kzt    int check (price_kzt is null or price_kzt >= 0),         -- null = неизвестно
+  rules        text check (rules is null or char_length(rules) <= 500),
+  status       text not null default 'open' check (status in ('open','closed','cancelled','finished')),
+  cancel_reason text,
+  room_id      uuid references public.rooms(id) on delete set null,
+  created_at   timestamptz not null default now(),
+  updated_at   timestamptz not null default now(),
+  check (ends_at > starts_at and ends_at <= starts_at + interval '24 hours')
+);
+create index if not exists meetings_starts_idx on public.meetings (status, starts_at);
+create index if not exists meetings_cat_idx on public.meetings (category, starts_at);
+
+create table if not exists public.meeting_members (
+  meeting_id  uuid not null references public.meetings(id) on delete cascade,
+  user_id     uuid not null references public.profiles(id) on delete cascade,
+  role        text not null default 'member' check (role in ('host','cohost','member')),
+  status      text not null default 'requested' check (status in ('requested','waitlist','accepted','declined','removed','left','left_late')),
+  note        text check (note is null or char_length(note) <= 200),
+  reason      text,
+  attended    text check (attended in ('claimed','confirmed','noshow','disputed')),
+  created_at  timestamptz not null default now(),
+  decided_at  timestamptz,
+  primary key (meeting_id, user_id)
+);
+create index if not exists meeting_members_user_idx on public.meeting_members (user_id, status);
+create index if not exists meeting_members_status_idx on public.meeting_members (meeting_id, status);
+
+create table if not exists public.meeting_checkins (
+  id          uuid primary key default gen_random_uuid(),
+  meeting_id  uuid not null references public.meetings(id) on delete cascade,
+  created_by  uuid references public.profiles(id) on delete set null,
+  for_start   timestamptz not null,       -- время встречи на момент запроса; перенос закрывает запрос
+  created_at  timestamptz not null default now(),
+  closed_at   timestamptz
+);
+create unique index if not exists meeting_checkins_open_uidx on public.meeting_checkins (meeting_id) where closed_at is null;
+create table if not exists public.checkin_answers (
+  checkin_id  uuid not null references public.meeting_checkins(id) on delete cascade,
+  user_id     uuid not null references public.profiles(id) on delete cascade,
+  answer      text not null check (answer in ('ready','late','cant')),
+  updated_at  timestamptz not null default now(),
+  primary key (checkin_id, user_id)        -- один изменяемый ответ на запрос
+);
+
+create table if not exists public.meeting_audit (
+  id          bigserial primary key,
+  meeting_id  uuid not null references public.meetings(id) on delete cascade,
+  actor_id    uuid references public.profiles(id) on delete set null,
+  action      text not null,
+  target_id   uuid,
+  reason      text,
+  created_at  timestamptz not null default now()
+);
+create index if not exists meeting_audit_idx on public.meeting_audit (meeting_id, created_at desc);
+
+alter table public.meetings enable row level security;
+alter table public.meeting_members enable row level security;
+alter table public.meeting_checkins enable row level security;
+alter table public.checkin_answers enable row level security;
+alter table public.meeting_audit enable row level security;
+
+create or replace function public.meet_role(mt uuid, u uuid) returns text
+language sql stable security definer set search_path = public as $$
+  select role from public.meeting_members where meeting_id = mt and user_id = u and status = 'accepted' $$;
+
+drop policy if exists meetings_read on public.meetings;
+create policy meetings_read on public.meetings for select using (
+  exists (select 1 from public.posts p where p.id = meetings.id and p.status in ('active','closed')) or host_id = auth.uid() or public.is_mod());
+drop policy if exists meeting_members_read on public.meeting_members;
+-- свою заявку видит заявитель; состав — участники; заявки — Host и co-host
+create policy meeting_members_read on public.meeting_members for select using (
+  user_id = auth.uid() or public.is_mod()
+  or (status = 'accepted' and public.meet_role(meeting_id, auth.uid()) is not null)
+  or public.meet_role(meeting_id, auth.uid()) in ('host','cohost'));
+drop policy if exists checkins_read on public.meeting_checkins;
+create policy checkins_read on public.meeting_checkins for select using (public.meet_role(meeting_id, auth.uid()) is not null or public.is_mod());
+drop policy if exists checkin_answers_read on public.checkin_answers;
+create policy checkin_answers_read on public.checkin_answers for select using (
+  exists (select 1 from public.meeting_checkins c where c.id = checkin_id and (public.meet_role(c.meeting_id, auth.uid()) is not null or public.is_mod())));
+drop policy if exists meeting_audit_read on public.meeting_audit;
+create policy meeting_audit_read on public.meeting_audit for select using (public.meet_role(meeting_id, auth.uid()) in ('host','cohost') or public.is_mod());
+revoke insert, update, delete on public.meetings, public.meeting_members, public.meeting_checkins, public.checkin_answers, public.meeting_audit from anon, authenticated;
+grant select on public.meetings to anon, authenticated;
+grant select on public.meeting_members, public.meeting_checkins, public.checkin_answers, public.meeting_audit to authenticated;
+
+-- ---------- справочник категорий: поля, закрепление, приветствие ----------
+create or replace function public.meet_fields(cat text) returns text[] language sql immutable as $$
+  select case cat
+    when 'games'     then array['game','mode','level','club','booking','price_hour']
+    when 'cinema'    then array['film','cinema','session','lang','format','price']
+    when 'board'     then array['game','level','club','inventory','duration']
+    when 'sport'     then array['sport','format','level','venue','inventory','rent']
+    when 'cafe'      then array['goal','cafe','budget','table','topic']
+    when 'walk'      then array['route','meet_point','distance','pace','duration']
+    when 'mountains' then array['route','difficulty','distance','elevation','gear','return_time','weather']
+    when 'study'     then array['topic','level','format','place','materials','duration']
+    when 'other'     then array['goal','place','materials','cost']
+  end $$;
+
+create or replace function public.meet_greeting(cat text) returns text language sql immutable as $$
+  select case cat
+    when 'games'     then 'Всем привет! Напишите, кто на какой позиции играет.'
+    when 'cinema'    then 'Обсудим покупку билетов и места в зале. Каждый покупает билет сам.'
+    when 'board'     then 'Новичкам объясним правила.'
+    when 'sport'     then 'Напишите позицию и подтвердите участие.'
+    when 'cafe'      then 'Обсудим время и бронирование столика.'
+    when 'walk'      then 'Маршрут и время закреплены в чате.'
+    when 'mountains' then 'Проверьте снаряжение, прогноз и маршрут. Подтвердите готовность.'
+    when 'study'     then 'Подготовьте материалы. Распределим задания заранее.'
+    else 'Обсудим организацию и необходимые материалы.' end $$;
+
+-- закрепление строится сервером из полей категории
+create or replace function public.meet_pin(cat text, d jsonb, st timestamptz, en timestamptz, cap int) returns text
+language sql immutable as $$
+  select left(case cat
+    when 'games'     then concat_ws(' • ', nullif(d->>'game',''), nullif(d->>'mode',''), coalesce(nullif(d->>'level',''), 'любой уровень'))
+    when 'cinema'    then 'Кино • сеанс ' || coalesce(nullif(d->>'session',''), to_char(st at time zone 'Asia/Almaty', 'HH24:MI'))
+    when 'board'     then concat_ws(' • ', coalesce(nullif(d->>'game',''), 'Настольные игры'), cap || ' участников', coalesce(nullif(d->>'duration',''), round(extract(epoch from en - st) / 3600.0, 1) || ' ч'))
+    when 'sport'     then concat_ws(' • ', coalesce(nullif(d->>'sport',''), 'Спорт'), nullif(d->>'format',''), round(extract(epoch from en - st) / 60) || ' минут')
+    when 'cafe'      then coalesce(nullif(d->>'goal',''), 'Кофе') || ' • каждый платит за себя'
+    when 'walk'      then concat_ws(' • ', nullif(d->>'distance',''), coalesce(nullif(d->>'pace',''), 'спокойный темп'))
+    when 'mountains' then concat_ws(' • ', nullif(d->>'distance',''), coalesce(nullif(d->>'difficulty',''), 'сложность уточняется'))
+    when 'study'     then concat_ws(' • ', coalesce(nullif(d->>'topic',''), 'Обучение'), nullif(d->>'format',''), nullif(d->>'duration',''))
+    else coalesce(nullif(d->>'goal',''), 'Совместное мероприятие') end, 120) $$;
+
+create or replace function public.meet_details_clean(cat text, d jsonb) returns jsonb
+language plpgsql as $$
+declare k text; v text; o jsonb := '{}'::jsonb; why text;
+begin
+  if public.meet_fields(cat) is null then raise exception using errcode = 'NR422', message = 'Неизвестная категория встречи'; end if;
+  foreach k in array public.meet_fields(cat) loop
+    v := btrim(coalesce(d->>k, ''));
+    if v = '' then continue; end if;
+    if char_length(v) > 60 then raise exception using errcode = 'NR422', message = 'Поле слишком длинное (до 60 символов)'; end if;
+    why := public.near_block_reason(v);
+    if why is not null then raise exception using errcode = 'NR422', message = public.near_block_message(why), hint = why; end if;
+    o := o || jsonb_build_object(k, public.near_clean(v));
+  end loop;
+  return o;
+end $$;
+
+-- напоминания 24 ч / 1 ч / 15 мин без дублей
+create or replace function public.meet_schedule(mt uuid, u uuid) returns void
+language plpgsql security definer set search_path = public as $$
+declare m public.meetings; x record;
+begin
+  select * into m from public.meetings where id = mt;
+  for x in select * from (values ('24h', interval '24 hours'), ('1h', interval '1 hour'), ('15m', interval '15 minutes')) v(k, d) loop
+    if m.starts_at - x.d > now() then
+      perform public.outbox_put(u, 'meeting_reminder', 'remind:' || mt || ':' || u || ':' || x.k || ':' || extract(epoch from m.starts_at)::bigint,
+        jsonb_build_object('room_id', m.room_id, 'post_id', mt, 'text', 'Скоро встреча "' || m.title || '"', 'link', '#meet=' || mt), m.starts_at - x.d);
     end if;
   end loop;
-  delete from public.chat_members where user_id = p_user;
-  update public.user_sessions set status = 'revoked', revoked_at = now(), revoke_reason = 'deleted' where user_id = p_user and status <> 'revoked';
-  insert into public.security_audit_log (actor_id, action, target_type, target_id, details) values (p_user, 'account_delete', 'user', p_user, jsonb_build_object('moved', moved, 'cancelled', cancelled));
-  return jsonb_build_object('moved', moved, 'cancelled', cancelled);
 end $$;
-revoke execute on function public.account_predelete(uuid) from public, anon, authenticated;
+create or replace function public.meet_unschedule(mt uuid, u uuid) returns void
+language sql security definer set search_path = public as $$
+  update public.outbox set status = 'skipped' where status = 'pending' and dedup_key like 'remind:' || mt || ':' || coalesce(u::text, '') || '%' $$;
+
+create or replace function public.meet_notify(mt uuid, u uuid, p_kind text, p_text text, p_key text) returns void
+language sql security definer set search_path = public as $$
+  select public.outbox_put(u, p_kind, p_key, jsonb_build_object('post_id', mt, 'text', left(p_text, 300), 'link', '#meet=' || mt,
+    'room_id', (select room_id from public.meetings where id = mt))) $$;
+
+create or replace function public.meet_accepted_count(mt uuid) returns int
+language sql stable security definer set search_path = public as $$
+  select count(*)::int from public.meeting_members where meeting_id = mt and status = 'accepted' $$;
+
+-- ---------- создание: атомарно публикация + встреча + Host + комната + приветствие ----------
+create or replace function public.create_meeting(p jsonb) returns uuid
+language plpgsql security definer set search_path = public as $$
+declare uid uuid := auth.uid(); cat text := p->>'category'; title text := btrim(coalesce(p->>'title', ''));
+        descr text := btrim(coalesce(p->>'description', '')); st timestamptz; en timestamptz; cap int; price int; d jsonb;
+        pid uuid; rid uuid; why text; ck text := left(p->>'client_key', 64);
+begin
+  if uid is null then raise exception using errcode = 'NR401', message = 'Войдите, чтобы создать встречу'; end if;
+  -- повтор с тем же ключом — та же встреча
+  if ck is not null then
+    select id into pid from public.posts where user_id = uid and client_key = ck and category = 'meetup';
+    if pid is not null then return pid; end if;
+  end if;
+  if not public.meet_ok(uid) then
+    raise exception using errcode = 'NR403', message = 'Встречи пока доступны только после проверки возраста', hint = 'meet_age';
+  end if;
+  if char_length(title) not between 5 and 80 then raise exception using errcode = 'NR422', message = 'Название: от 5 до 80 символов'; end if;
+  if char_length(descr) not between 10 and 1000 then raise exception using errcode = 'NR422', message = 'Описание: от 10 до 1000 символов'; end if;
+  begin st := (p->>'starts_at')::timestamptz; en := (p->>'ends_at')::timestamptz;
+  exception when others then raise exception using errcode = 'NR422', message = 'Укажите дату и время'; end;
+  if st is null or en is null then raise exception using errcode = 'NR422', message = 'Укажите начало и конец'; end if;
+  if st < now() + interval '15 minutes' then raise exception using errcode = 'NR422', message = 'Начало — не раньше чем через 15 минут'; end if;
+  if st > now() + interval '90 days' then raise exception using errcode = 'NR422', message = 'Дата — не дальше 90 дней вперед'; end if;
+  if en <= st then raise exception using errcode = 'NR422', message = 'Конец должен быть позже начала'; end if;
+  if en > st + interval '24 hours' then raise exception using errcode = 'NR422', message = 'Длительность — до 24 часов'; end if;
+  cap := (p->>'capacity')::int;
+  if cap is null or cap not between 3 and 50 then raise exception using errcode = 'NR422', message = 'Участников: от 3 до 50, включая организатора'; end if;
+  price := nullif(p->>'price_kzt', '')::int;
+  if price < 0 then raise exception using errcode = 'NR422', message = 'Цена не может быть отрицательной'; end if;
+  if coalesce((p->>'public_place')::boolean, false) is not true then
+    raise exception using errcode = 'NR422', message = 'Встречи проводятся только в публичных местах', hint = 'public_place';
+  end if;
+  why := coalesce(public.near_block_reason(title), public.near_block_reason(descr), public.near_block_reason(p->>'rules'));
+  if why is not null then raise exception using errcode = 'NR422', message = public.near_block_message(why), hint = why; end if;
+  -- сборы денег через организатора запрещены (ТЗ 07: не принимать платежи через Host)
+  if (descr || ' ' || coalesce(p->>'rules', '')) ~* '(переведите|перевод на карту|скиньте на (карту|kaspi|каспи)|оплата организатору|предоплат)' then
+    raise exception using errcode = 'NR422', message = 'Нельзя собирать деньги через организатора. Каждый платит сам на месте или на сайте площадки', hint = 'payment';
+  end if;
+  d := public.meet_details_clean(cat, coalesce(p->'details', '{}'::jsonb));
+
+  perform set_config('near.meeting', '1', true);
+  insert into public.posts (user_id, category, text, lat, lng, exact, meta, client_key)
+  values (uid, 'meetup', descr, (p->>'lat')::float8, (p->>'lng')::float8, coalesce((p->>'exact')::boolean, true),
+          jsonb_build_object('title', title, 'mcat', cat), ck)
+  returning id into pid;
+  perform set_config('near.meeting', '', true);
+
+  insert into public.rooms (type, scope_id, title, is_public, meeting_id, pinned, rules)
+  values ('meeting', pid::text, public.near_clean(title), false, pid, public.meet_pin(cat, d, st, en, cap), nullif(public.near_clean(btrim(coalesce(p->>'rules', ''))), ''))
+  returning id into rid;
+  insert into public.meetings (id, host_id, category, title, details, pin, place_name, starts_at, ends_at, capacity, price_kzt, rules, room_id)
+  values (pid, uid, cat, public.near_clean(title), d, public.meet_pin(cat, d, st, en, cap), nullif(public.near_clean(left(btrim(coalesce(p->>'place_name', '')), 120)), ''),
+          st, en, cap, price, nullif(public.near_clean(btrim(coalesce(p->>'rules', ''))), ''), rid);
+  update public.posts set expires_at = en + interval '1 hour' where id = pid;
+  insert into public.meeting_members (meeting_id, user_id, role, status, decided_at) values (pid, uid, 'host', 'accepted', now());
+  insert into public.room_members (room_id, user_id, role, notify) values (rid, uid, 'host', 'all');
+  update public.rooms set members_count = 1 where id = rid;
+  perform public.room_system(rid, public.meet_greeting(cat), jsonb_build_object('tpl', 'greet.' || cat));
+  if cat = 'mountains' then
+    perform public.room_system(rid, 'Горы — это риск. Проверьте прогноз погоды, снаряжение и время возврата. Сообщите близким маршрут. В экстренной ситуации звоните 112.', '{"tpl":"warn.mountains"}');
+  end if;
+  insert into public.meeting_audit (meeting_id, actor_id, action) values (pid, uid, 'create');
+  perform public.meet_schedule(pid, uid);
+  return pid;
+end $$;
+
+-- публикацию "встреча" можно создать только через create_meeting; лимит — свой
+create or replace function public.meetup_guard() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  if new.category = 'meetup' and auth.uid() is not null and current_setting('near.meeting', true) is distinct from '1' then
+    raise exception using errcode = 'NR403', message = 'Встречи создаются через форму встречи', hint = 'use_create_meeting';
+  end if;
+  return new;
+end $$;
+drop trigger if exists posts_meetup_guard on public.posts;
+create trigger posts_meetup_guard before insert on public.posts for each row execute function public.meetup_guard();
+update public.app_settings set day_limits = jsonb_set(day_limits, '{meeting}', '[1,3]') where id = 1 and day_limits->'meeting' = '[0,3]'::jsonb;
+
+-- лимит публикаций: встреча расходует свой лимит "meeting", а не "post"
+create or replace function public.rate_trigger() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  if tg_table_name = 'posts' then
+    perform public.rate('post'); perform public.rate('post_day');
+    if new.is_sos then perform public.rate('sos');
+    elsif new.category = 'meetup' then perform public.rate_take('meeting', new.client_key);
+    else
+      if auth.uid() is not null and char_length(coalesce(new.text, '')) >= 10 and exists (
+           select 1 from public.posts where user_id = new.user_id and created_at > now() - interval '24 hours'
+              and status in ('draft','active','closed','hidden') and client_key is distinct from new.client_key
+              and public.text_key(text) = public.text_key(new.text)) then
+        raise exception using errcode = 'NR409', message = 'Вы уже публиковали такой же текст сегодня', hint = 'duplicate';
+      end if;
+      perform public.rate_take('post', new.client_key);
+    end if;
+  elsif tg_table_name = 'comments' then
+    perform public.rate('comment');
+    if auth.uid() is not null and char_length(coalesce(new.text, '')) >= 10 and exists (
+         select 1 from public.comments where user_id = new.user_id and created_at > now() - interval '10 minutes' and public.text_key(text) = public.text_key(new.text)) then
+      raise exception using errcode = 'NR409', message = 'Такой же комментарий вы уже отправляли. Напишите по-другому', hint = 'duplicate';
+    end if;
+    perform public.rate_take('comment', new.client_key);
+  elsif tg_table_name = 'reports' then perform public.rate('report');
+  elsif tg_table_name = 'likes' then perform public.rate('like');
+  end if;
+  return new;
+end $$;
+
+-- ---------- заявка участника ----------
+create or replace function public.request_join(p_meeting uuid, p_note text default null) returns text
+language plpgsql security definer set search_path = public as $$
+declare uid uuid := auth.uid(); m public.meetings; cur text; st text;
+begin
+  if uid is null then raise exception using errcode = 'NR401', message = 'Войдите, чтобы подать заявку'; end if;
+  if not public.meet_ok(uid) then raise exception using errcode = 'NR403', message = 'Встречи пока доступны только после проверки возраста', hint = 'meet_age'; end if;
+  if exists (select 1 from public.profiles where id = uid and (nickname is null or accepted_rules_at is null or not verified)) then
+    raise exception using errcode = 'NR403', message = 'Подтвердите почту и заполните никнейм', hint = 'profile_incomplete';
+  end if;
+  select * into m from public.meetings where id = p_meeting for update;
+  if m.id is null then raise exception using errcode = 'NR404', message = 'Встреча не найдена'; end if;
+  if m.status <> 'open' or m.starts_at <= now() then raise exception using errcode = 'NR409', message = 'Набор закрыт', hint = 'closed'; end if;
+  if public.is_blocked(uid, m.host_id) then raise exception using errcode = 'NR403', message = 'Заявка недоступна'; end if;
+  select status into cur from public.meeting_members where meeting_id = p_meeting and user_id = uid;
+  if cur in ('accepted','requested','waitlist') then return cur; end if;
+  if cur = 'removed' then raise exception using errcode = 'NR403', message = 'Организатор исключил вас из этой встречи', hint = 'removed'; end if;
+  st := case when public.meet_accepted_count(p_meeting) >= m.capacity then 'waitlist' else 'requested' end;
+  if p_note is not null and public.near_block_reason(p_note) is not null then raise exception using errcode = 'NR422', message = public.near_block_message(public.near_block_reason(p_note)); end if;
+  insert into public.meeting_members (meeting_id, user_id, status, note) values (p_meeting, uid, st, nullif(public.near_clean(left(btrim(coalesce(p_note, '')), 200)), ''))
+  on conflict (meeting_id, user_id) do update set status = excluded.status, note = excluded.note, created_at = now(), decided_at = null, reason = null;
+  perform public.meet_notify(p_meeting, m.host_id, 'meeting_request', 'Новая заявка на "' || m.title || '"', 'req:' || p_meeting || ':' || uid || ':' || extract(epoch from now())::bigint);
+  return st;
+end $$;
+
+-- ---------- решение Host: транзакция с блокировкой встречи и проверкой мест ----------
+create or replace function public.decide_request(p_meeting uuid, p_user uuid, p_accept boolean, p_reason text default null) returns text
+language plpgsql security definer set search_path = public as $$
+declare m public.meetings; my text := coalesce(public.meet_role(p_meeting, auth.uid()), ''); cur text; nick text;
+begin
+  if my not in ('host','cohost') then raise exception using errcode = 'NR403', message = 'Решать заявки может организатор'; end if;
+  select * into m from public.meetings where id = p_meeting for update;      -- два решения на последнее место: одно успешно
+  select status into cur from public.meeting_members where meeting_id = p_meeting and user_id = p_user for update;
+  if cur not in ('requested','waitlist') then raise exception using errcode = 'NR409', message = 'Заявка уже рассмотрена', hint = 'decided'; end if;
+  if m.status in ('cancelled','finished') or m.ends_at < now() then raise exception using errcode = 'NR409', message = 'Встреча уже завершена или отменена'; end if;
+  if not p_accept then
+    update public.meeting_members set status = 'declined', decided_at = now(), reason = left(p_reason, 300) where meeting_id = p_meeting and user_id = p_user;
+    insert into public.meeting_audit (meeting_id, actor_id, action, target_id, reason) values (p_meeting, auth.uid(), 'decline', p_user, left(p_reason, 300));
+    perform public.meet_notify(p_meeting, p_user, 'meeting_declined', 'Заявка на "' || m.title || '" отклонена', 'dec:' || p_meeting || ':' || p_user || ':' || extract(epoch from now())::bigint);
+    return 'declined';
+  end if;
+  if public.meet_accepted_count(p_meeting) >= m.capacity then
+    raise exception using errcode = 'NR409', message = 'Свободных мест нет', hint = 'full';
+  end if;
+  update public.meeting_members set status = 'accepted', decided_at = now(), reason = null where meeting_id = p_meeting and user_id = p_user;
+  insert into public.room_members (room_id, user_id, role, notify) values (m.room_id, p_user, 'member', 'all')
+  on conflict (room_id, user_id) do update set status = 'active', role = 'member', joined_at = now();
+  update public.rooms set members_count = public.meet_accepted_count(p_meeting) where id = m.room_id;
+  select nickname into nick from public.profiles where id = p_user;
+  perform public.room_system(m.room_id, '@' || coalesce(nick, 'участник') || ' присоединился', jsonb_build_object('tpl', 'joined', 'user', p_user));
+  insert into public.meeting_audit (meeting_id, actor_id, action, target_id) values (p_meeting, auth.uid(), 'accept', p_user);
+  perform public.meet_notify(p_meeting, p_user, 'meeting_accepted', 'Вас приняли во встречу "' || m.title || '". Чат открыт', 'acc:' || p_meeting || ':' || p_user);
+  perform public.meet_schedule(p_meeting, p_user);
+  return 'accepted';
+end $$;
+
+-- место освободилось: лист ожидания получает уведомление и снова становится заявкой
+create or replace function public.meet_free_place(p_meeting uuid) returns void
+language plpgsql security definer set search_path = public as $$
+declare w record; m public.meetings;
+begin
+  select * into m from public.meetings where id = p_meeting;
+  update public.rooms set members_count = public.meet_accepted_count(p_meeting) where id = m.room_id;
+  for w in update public.meeting_members set status = 'requested' where meeting_id = p_meeting and status = 'waitlist' returning user_id loop
+    perform public.meet_notify(p_meeting, w.user_id, 'meeting_place', 'Освободилось место во встрече "' || m.title || '"', 'free:' || p_meeting || ':' || w.user_id || ':' || extract(epoch from now())::bigint);
+    perform public.meet_notify(p_meeting, m.host_id, 'meeting_request', 'Заявка из листа ожидания на "' || m.title || '"', 'req:' || p_meeting || ':' || w.user_id || ':' || extract(epoch from now())::bigint);
+  end loop;
+end $$;
+
+-- ---------- исключение: атомарно членство, история, подписка Realtime (RLS) и будущие push ----------
+create or replace function public.remove_member(p_meeting uuid, p_user uuid, p_reason text) returns void
+language plpgsql security definer set search_path = public as $$
+declare m public.meetings; my text := coalesce(public.meet_role(p_meeting, auth.uid()), ''); their text := coalesce(public.meet_role(p_meeting, p_user), '');
+begin
+  if my not in ('host','cohost') and not public.is_mod() then raise exception using errcode = 'NR403', message = 'Исключать может организатор'; end if;
+  if their = '' then raise exception using errcode = 'NR404', message = 'Участник не найден'; end if;
+  if their = 'host' or (their = 'cohost' and my <> 'host' and not public.is_mod()) then raise exception using errcode = 'NR403', message = 'Нельзя исключить организатора'; end if;
+  if char_length(btrim(coalesce(p_reason, ''))) < 3 then raise exception using errcode = 'NR422', message = 'Укажите причину'; end if;
+  select * into m from public.meetings where id = p_meeting for update;
+  update public.meeting_members set status = 'removed', role = 'member', reason = left(p_reason, 300), decided_at = now() where meeting_id = p_meeting and user_id = p_user;
+  update public.room_members set status = 'removed', muted_until = null where room_id = m.room_id and user_id = p_user;
+  update public.outbox set status = 'skipped' where status = 'pending' and user_id = p_user and payload->>'room_id' = m.room_id::text;
+  perform public.meet_unschedule(p_meeting, p_user);
+  insert into public.meeting_audit (meeting_id, actor_id, action, target_id, reason) values (p_meeting, auth.uid(), 'remove', p_user, left(p_reason, 300));
+  perform public.room_system(m.room_id, 'Участник исключен организатором', jsonb_build_object('tpl', 'removed'));
+  perform public.meet_notify(p_meeting, p_user, 'meeting_removed', 'Организатор исключил вас из встречи "' || m.title || '". Причина: ' || left(p_reason, 200), 'rm:' || p_meeting || ':' || p_user);
+  perform public.meet_free_place(p_meeting);
+end $$;
+
+-- отказ участника: за 2 часа и раньше — без штрафа, позже — учитывается как неявка
+create or replace function public.leave_meeting(p_meeting uuid) returns text
+language plpgsql security definer set search_path = public as $$
+declare uid uuid := auth.uid(); m public.meetings; cur text; st text;
+begin
+  select * into m from public.meetings where id = p_meeting for update;
+  select status into cur from public.meeting_members where meeting_id = p_meeting and user_id = uid;
+  if cur is null then raise exception using errcode = 'NR404', message = 'Вы не участвуете'; end if;
+  if m.host_id = uid then raise exception using errcode = 'NR409', message = 'Организатор не может выйти: передайте роль или отмените встречу', hint = 'host'; end if;
+  if cur in ('requested','waitlist') then
+    delete from public.meeting_members where meeting_id = p_meeting and user_id = uid; return 'withdrawn';
+  end if;
+  if cur <> 'accepted' then return cur; end if;
+  st := case when m.starts_at - now() >= interval '2 hours' then 'left' else 'left_late' end;
+  update public.meeting_members set status = st, role = 'member', decided_at = now() where meeting_id = p_meeting and user_id = uid;
+  update public.room_members set status = 'left' where room_id = m.room_id and user_id = uid;
+  perform public.meet_unschedule(p_meeting, uid);
+  insert into public.meeting_audit (meeting_id, actor_id, action, target_id) values (p_meeting, uid, st, uid);
+  perform public.room_system(m.room_id, 'Участник отказался от участия', jsonb_build_object('tpl', 'left'));
+  perform public.meet_free_place(p_meeting);
+  return st;
+end $$;
+
+-- ---------- роли: co-host и передача Host ----------
+create or replace function public.set_cohost(p_meeting uuid, p_user uuid, p_on boolean) returns void
+language plpgsql security definer set search_path = public as $$
+declare m public.meetings;
+begin
+  if public.meet_role(p_meeting, auth.uid()) <> 'host' then raise exception using errcode = 'NR403', message = 'Назначать co-host может только Host'; end if;
+  if coalesce(public.meet_role(p_meeting, p_user), '') not in ('member','cohost') then raise exception using errcode = 'NR404', message = 'Участник не найден'; end if;
+  select * into m from public.meetings where id = p_meeting;
+  update public.meeting_members set role = case when p_on then 'cohost' else 'member' end where meeting_id = p_meeting and user_id = p_user;
+  update public.room_members set role = case when p_on then 'cohost' else 'member' end where room_id = m.room_id and user_id = p_user;
+  insert into public.meeting_audit (meeting_id, actor_id, action, target_id) values (p_meeting, auth.uid(), case when p_on then 'cohost_on' else 'cohost_off' end, p_user);
+end $$;
+
+create or replace function public.transfer_host(p_meeting uuid, p_user uuid) returns void
+language plpgsql security definer set search_path = public as $$
+declare m public.meetings; old uuid := auth.uid();
+begin
+  select * into m from public.meetings where id = p_meeting for update;
+  if m.host_id is distinct from old then raise exception using errcode = 'NR403', message = 'Передать роль может только Host'; end if;
+  if coalesce(public.meet_role(p_meeting, p_user), '') not in ('member','cohost') then raise exception using errcode = 'NR404', message = 'Новый Host должен быть участником встречи'; end if;
+  if not public.meet_ok(p_user) then raise exception using errcode = 'NR403', message = 'У участника нет допуска к организации встреч'; end if;
+  update public.meetings set host_id = p_user, updated_at = now() where id = p_meeting;
+  update public.posts set user_id = p_user where id = p_meeting;
+  update public.meeting_members set role = 'host' where meeting_id = p_meeting and user_id = p_user;
+  update public.meeting_members set role = 'cohost' where meeting_id = p_meeting and user_id = old;
+  update public.room_members set role = 'host' where room_id = m.room_id and user_id = p_user;
+  update public.room_members set role = 'cohost' where room_id = m.room_id and user_id = old;
+  insert into public.meeting_audit (meeting_id, actor_id, action, target_id) values (p_meeting, old, 'transfer_host', p_user);
+  perform public.room_system(m.room_id, 'Организатор передал роль Host', jsonb_build_object('tpl', 'host_changed', 'user', p_user));
+end $$;
+
+-- ---------- изменение места/времени, закрыть набор, отменить, завершить ----------
+create or replace function public.update_meeting(p_meeting uuid, p jsonb) returns void
+language plpgsql security definer set search_path = public as $$
+declare m public.meetings; st timestamptz; en timestamptz; moved boolean; u record; why text; nt text;
+begin
+  if public.meet_role(p_meeting, auth.uid()) not in ('host','cohost') then raise exception using errcode = 'NR403', message = 'Менять встречу может организатор'; end if;
+  select * into m from public.meetings where id = p_meeting for update;
+  if m.status in ('cancelled','finished') then raise exception using errcode = 'NR409', message = 'Встреча уже завершена или отменена'; end if;
+  st := coalesce((p->>'starts_at')::timestamptz, m.starts_at); en := coalesce((p->>'ends_at')::timestamptz, m.ends_at);
+  if en <= st or en > st + interval '24 hours' then raise exception using errcode = 'NR422', message = 'Конец позже начала, длительность до 24 часов'; end if;
+  if st <> m.starts_at and (st < now() + interval '15 minutes' or st > now() + interval '90 days') then raise exception using errcode = 'NR422', message = 'Новое время: от 15 минут до 90 дней вперед'; end if;
+  if p ? 'capacity' and ((p->>'capacity')::int not between 3 and 50 or (p->>'capacity')::int < public.meet_accepted_count(p_meeting)) then
+    raise exception using errcode = 'NR422', message = 'Мест не меньше, чем уже принято, и от 3 до 50';
+  end if;
+  nt := btrim(coalesce(p->>'place_name', ''));
+  why := public.near_block_reason(nt);
+  if why is not null then raise exception using errcode = 'NR422', message = public.near_block_message(why); end if;
+  moved := st <> m.starts_at or en <> m.ends_at or (p ? 'lat');
+  update public.meetings set starts_at = st, ends_at = en,
+    capacity = coalesce((p->>'capacity')::int, capacity),
+    place_name = case when p ? 'place_name' then nullif(public.near_clean(left(nt, 120)), '') else place_name end,
+    pin = public.meet_pin(category, details, st, en, coalesce((p->>'capacity')::int, capacity)), updated_at = now()
+  where id = p_meeting;
+  if p ? 'lat' then update public.posts set lat = (p->>'lat')::float8, lng = (p->>'lng')::float8, expires_at = en + interval '1 hour' where id = p_meeting;
+  else update public.posts set expires_at = en + interval '1 hour' where id = p_meeting; end if;
+  update public.rooms set pinned = (select pin from public.meetings where id = p_meeting) where id = m.room_id;
+  if moved then
+    update public.meeting_checkins set closed_at = now() where meeting_id = p_meeting and closed_at is null;   -- перенос закрывает старый запрос готовности
+    for u in select user_id from public.meeting_members where meeting_id = p_meeting and status = 'accepted' loop
+      perform public.meet_unschedule(p_meeting, u.user_id);
+      perform public.meet_schedule(p_meeting, u.user_id);
+      if u.user_id <> auth.uid() then
+        perform public.meet_notify(p_meeting, u.user_id, 'meeting_changed', 'Встреча "' || m.title || '" изменена: проверьте место и время', 'chg:' || p_meeting || ':' || u.user_id || ':' || extract(epoch from now())::bigint);
+      end if;
+    end loop;
+    perform public.room_system(m.room_id, 'Организатор изменил место или время встречи', jsonb_build_object('tpl', 'moved', 'starts_at', st));
+  end if;
+  insert into public.meeting_audit (meeting_id, actor_id, action, reason) values (p_meeting, auth.uid(), 'update', left(p::text, 300));
+  if p ? 'capacity' then perform public.meet_free_place(p_meeting); end if;
+end $$;
+
+create or replace function public.close_recruiting(p_meeting uuid, p_closed boolean) returns void
+language plpgsql security definer set search_path = public as $$
+begin
+  if public.meet_role(p_meeting, auth.uid()) not in ('host','cohost') then raise exception using errcode = 'NR403', message = 'Нет прав'; end if;
+  update public.meetings set status = case when p_closed then 'closed' else 'open' end, updated_at = now() where id = p_meeting and status in ('open','closed');
+  insert into public.meeting_audit (meeting_id, actor_id, action) values (p_meeting, auth.uid(), case when p_closed then 'close' else 'reopen' end);
+end $$;
+
+create or replace function public.cancel_meeting(p_meeting uuid, p_reason text) returns void
+language plpgsql security definer set search_path = public as $$
+declare m public.meetings; u record;
+begin
+  select * into m from public.meetings where id = p_meeting for update;
+  if m.host_id is distinct from auth.uid() and not public.is_mod() then raise exception using errcode = 'NR403', message = 'Отменить может Host'; end if;
+  if m.status in ('cancelled','finished') then return; end if;
+  if char_length(btrim(coalesce(p_reason, ''))) < 3 then raise exception using errcode = 'NR422', message = 'Укажите причину отмены'; end if;
+  update public.meetings set status = 'cancelled', cancel_reason = left(p_reason, 300), updated_at = now() where id = p_meeting;
+  update public.posts set status = 'closed' where id = p_meeting;
+  update public.meeting_checkins set closed_at = now() where meeting_id = p_meeting and closed_at is null;
+  for u in select user_id from public.meeting_members where meeting_id = p_meeting and status in ('accepted','requested','waitlist') loop
+    perform public.meet_unschedule(p_meeting, u.user_id);
+    if u.user_id <> m.host_id then
+      perform public.meet_notify(p_meeting, u.user_id, 'meeting_cancelled', 'Встреча "' || m.title || '" отменена: ' || left(p_reason, 200), 'cancel:' || p_meeting || ':' || u.user_id);
+    end if;
+  end loop;
+  perform public.room_system(m.room_id, 'Встреча отменена. Причина: ' || left(public.near_clean(p_reason), 200), jsonb_build_object('tpl', 'cancelled'));
+  insert into public.meeting_audit (meeting_id, actor_id, action, reason) values (p_meeting, auth.uid(), 'cancel', left(p_reason, 300));
+end $$;
+
+create or replace function public.finish_meeting(p_meeting uuid) returns void
+language plpgsql security definer set search_path = public as $$
+declare m public.meetings;
+begin
+  select * into m from public.meetings where id = p_meeting for update;
+  if public.meet_role(p_meeting, auth.uid()) not in ('host','cohost') then raise exception using errcode = 'NR403', message = 'Нет прав'; end if;
+  if m.starts_at > now() then raise exception using errcode = 'NR409', message = 'Встреча еще не началась'; end if;
+  update public.meetings set status = 'finished', ends_at = least(ends_at, now()), updated_at = now() where id = p_meeting and status in ('open','closed');
+  update public.meeting_checkins set closed_at = now() where meeting_id = p_meeting and closed_at is null;
+  perform public.room_system(m.room_id, 'Встреча завершена. Отметьте посещение и оцените участников в течение 7 дней', jsonb_build_object('tpl', 'finished'));
+  insert into public.meeting_audit (meeting_id, actor_id, action) values (p_meeting, auth.uid(), 'finish');
+end $$;
+
+-- ---------- готовность: запрос Host/co-host, один изменяемый ответ ----------
+create or replace function public.request_checkin(p_meeting uuid) returns uuid
+language plpgsql security definer set search_path = public as $$
+declare m public.meetings; cid uuid; u record;
+begin
+  if public.meet_role(p_meeting, auth.uid()) not in ('host','cohost') then raise exception using errcode = 'NR403', message = 'Запросить готовность может организатор'; end if;
+  select * into m from public.meetings where id = p_meeting for update;
+  if m.status in ('cancelled','finished') or m.ends_at < now() then raise exception using errcode = 'NR409', message = 'Встреча уже прошла'; end if;
+  if exists (select 1 from public.meeting_checkins where meeting_id = p_meeting and created_at > now() - interval '5 minutes') then
+    raise exception using errcode = 'NR429', message = 'Запрос готовности — не чаще раза в 5 минут', hint = 'retry_after=300;action=checkin';
+  end if;
+  update public.meeting_checkins set closed_at = now() where meeting_id = p_meeting and closed_at is null;
+  insert into public.meeting_checkins (meeting_id, created_by, for_start) values (p_meeting, auth.uid(), m.starts_at) returning id into cid;
+  insert into public.checkin_answers (checkin_id, user_id, answer) values (cid, auth.uid(), 'ready');
+  insert into public.room_messages (room_id, sender_id, kind, body_masked, meta)
+  values (m.room_id, auth.uid(), 'checkin', '@all • Подтвердите готовность', jsonb_build_object('checkin_id', cid, 'all', true, 'tpl', 'checkin'));
+  update public.rooms set last_message_at = now() where id = m.room_id;
+  for u in select user_id from public.meeting_members where meeting_id = p_meeting and status = 'accepted' and user_id <> auth.uid() loop
+    perform public.meet_notify(p_meeting, u.user_id, 'meeting_checkin', 'Подтвердите готовность: "' || m.title || '"', 'chk:' || cid || ':' || u.user_id);
+  end loop;
+  return cid;
+end $$;
+
+create or replace function public.answer_checkin(p_checkin uuid, p_answer text) returns void
+language plpgsql security definer set search_path = public as $$
+declare c public.meeting_checkins;
+begin
+  select * into c from public.meeting_checkins where id = p_checkin;
+  if c.id is null or public.meet_role(c.meeting_id, auth.uid()) is null then raise exception using errcode = 'NR403', message = 'Вы не участник встречи'; end if;
+  if c.closed_at is not null then raise exception using errcode = 'NR409', message = 'Запрос закрыт: время встречи изменилось', hint = 'closed'; end if;
+  if p_answer not in ('ready','late','cant') then raise exception using errcode = 'NR422', message = 'Неизвестный ответ'; end if;
+  insert into public.checkin_answers (checkin_id, user_id, answer) values (p_checkin, auth.uid(), p_answer)
+  on conflict (checkin_id, user_id) do update set answer = excluded.answer, updated_at = now();
+end $$;
+
+-- ---------- посещение: участник отмечается, Host подтверждает после окончания; спор — ручная проверка ----------
+create or replace function public.mark_attended(p_meeting uuid) returns void
+language plpgsql security definer set search_path = public as $$
+declare m public.meetings;
+begin
+  select * into m from public.meetings where id = p_meeting;
+  if public.meet_role(p_meeting, auth.uid()) is null then raise exception using errcode = 'NR403', message = 'Вы не участник встречи'; end if;
+  if m.starts_at > now() then raise exception using errcode = 'NR409', message = 'Отметиться можно после начала встречи'; end if;
+  if m.ends_at < now() - interval '7 days' then raise exception using errcode = 'NR409', message = 'Срок отметки прошел'; end if;
+  update public.meeting_members set attended = case when attended = 'noshow' then 'disputed' else coalesce(attended, 'claimed') end
+   where meeting_id = p_meeting and user_id = auth.uid() and coalesce(attended, '') <> 'confirmed';
+end $$;
+
+create or replace function public.confirm_attendance(p_meeting uuid, p_user uuid, p_came boolean) returns void
+language plpgsql security definer set search_path = public as $$
+declare m public.meetings; cur text;
+begin
+  select * into m from public.meetings where id = p_meeting;
+  if m.host_id is distinct from auth.uid() then raise exception using errcode = 'NR403', message = 'Подтверждает Host'; end if;
+  if m.ends_at > now() and m.status <> 'finished' then raise exception using errcode = 'NR409', message = 'Подтвердить можно после окончания встречи'; end if;
+  if m.ends_at < now() - interval '7 days' then raise exception using errcode = 'NR409', message = 'Срок подтверждения прошел'; end if;
+  select attended into cur from public.meeting_members where meeting_id = p_meeting and user_id = p_user and status in ('accepted','left_late');
+  if not found then raise exception using errcode = 'NR404', message = 'Участник не найден'; end if;
+  update public.meeting_members set attended = case
+      when p_came then 'confirmed'
+      when cur = 'claimed' or cur = 'disputed' then 'disputed'     -- участник говорит "был", Host — "нет": ручная проверка
+      else 'noshow' end
+   where meeting_id = p_meeting and user_id = p_user;
+  insert into public.meeting_audit (meeting_id, actor_id, action, target_id) values (p_meeting, auth.uid(), case when p_came then 'attend_yes' else 'attend_no' end, p_user);
+end $$;
+
+-- Host считается пришедшим, если встреча не отменена
+create or replace function public.meet_attended(mt uuid, u uuid) returns boolean
+language sql stable security definer set search_path = public as $$
+  select exists (select 1 from public.meeting_members mm join public.meetings m on m.id = mm.meeting_id
+                  where mm.meeting_id = mt and mm.user_id = u and m.status <> 'cancelled'
+                    and (mm.attended = 'confirmed' or (mm.role = 'host' and mm.status = 'accepted'))) $$;
+
+create or replace function public.mod_resolve_attendance(p_meeting uuid, p_user uuid, p_came boolean, p_note text) returns void
+language plpgsql security definer set search_path = public as $$
+begin
+  if not public.is_mod() then raise exception using errcode = 'NR403', message = 'Только модератор'; end if;
+  update public.meeting_members set attended = case when p_came then 'confirmed' else 'noshow' end where meeting_id = p_meeting and user_id = p_user and attended = 'disputed';
+  insert into public.meeting_audit (meeting_id, actor_id, action, target_id, reason) values (p_meeting, auth.uid(), 'attend_resolved', p_user, left(p_note, 300));
+end $$;
+
+
+-- =====================================================================
+-- Часть D (раздел 10): отзывы, рейтинг с журналом (ledger), публичный профиль, состояния аккаунта.
+-- Score = round(0.30R + 0.25A + 0.25S + 0.10U + 0.10H). Веса — проектные, калибруются по данным пилота.
+-- =====================================================================
+
+create table if not exists public.reviews (
+  id           uuid primary key default gen_random_uuid(),
+  meeting_id   uuid not null references public.meetings(id) on delete cascade,
+  reviewer_id  uuid not null references public.profiles(id) on delete cascade,
+  target_id    uuid not null references public.profiles(id) on delete cascade,
+  target_role  text not null check (target_role in ('host','member')),
+  stars        int not null check (stars between 1 and 5),
+  punctual     boolean, respectful boolean, organized boolean,
+  comment      text check (comment is null or char_length(comment) <= 500),
+  status       text not null default 'ok' check (status in ('ok','hidden')),
+  created_at   timestamptz not null default now(),
+  unique (reviewer_id, target_id, meeting_id),
+  check (reviewer_id <> target_id)          -- без самооценки
+);
+create index if not exists reviews_target_idx on public.reviews (target_id, target_role);
+alter table public.reviews enable row level security;
+revoke all on public.reviews from anon, authenticated;
+grant select on public.reviews to authenticated;
+-- автор видит свой отзыв; цель — только опубликованные (после взаимного отзыва или окончания окна 7 дней)
+create or replace function public.review_published(r public.reviews) returns boolean
+language sql stable security definer set search_path = public as $$
+  select r.status = 'ok' and (
+    exists (select 1 from public.reviews x where x.meeting_id = r.meeting_id and x.reviewer_id = r.target_id and x.target_id = r.reviewer_id)
+    or (select ends_at from public.meetings where id = r.meeting_id) < now() - interval '7 days') $$;
+drop policy if exists reviews_read on public.reviews;
+create policy reviews_read on public.reviews for select using (reviewer_id = auth.uid() or public.is_mod() or public.review_published(reviews));
+
+create or replace function public.submit_review(p_meeting uuid, p_target uuid, p_stars int, p_punctual boolean default null,
+                                                p_respectful boolean default null, p_organized boolean default null, p_comment text default null) returns uuid
+language plpgsql security definer set search_path = public as $$
+declare uid uuid := auth.uid(); m public.meetings; v_id uuid; why text;
+begin
+  select * into m from public.meetings where id = p_meeting;
+  if m.id is null then raise exception using errcode = 'NR404', message = 'Встреча не найдена'; end if;
+  if uid = p_target then raise exception using errcode = 'NR422', message = 'Себя оценить нельзя'; end if;
+  if m.status = 'cancelled' or (m.ends_at > now() and m.status <> 'finished') then raise exception using errcode = 'NR409', message = 'Оценить можно после окончания встречи'; end if;
+  if m.ends_at < now() - interval '7 days' then raise exception using errcode = 'NR409', message = 'Окно отзывов (7 дней) закрыто'; end if;
+  if not public.meet_attended(p_meeting, uid) or not public.meet_attended(p_meeting, p_target) then
+    raise exception using errcode = 'NR403', message = 'Отзывы оставляют только подтвержденные участники', hint = 'not_attended';
+  end if;
+  if p_stars is null or p_stars not between 1 and 5 then raise exception using errcode = 'NR422', message = 'Оценка от 1 до 5'; end if;
+  if p_comment is not null then
+    why := public.near_block_reason(p_comment);
+    if why is not null then raise exception using errcode = 'NR422', message = public.near_block_message(why); end if;
+  end if;
+  insert into public.reviews (meeting_id, reviewer_id, target_id, target_role, stars, punctual, respectful, organized, comment)
+  values (p_meeting, uid, p_target, case when p_target = m.host_id then 'host' else 'member' end, p_stars, p_punctual, p_respectful, p_organized,
+          nullif(public.near_clean(left(btrim(coalesce(p_comment, '')), 500)), ''))
+  on conflict (reviewer_id, target_id, meeting_id) do nothing returning reviews.id into v_id;
+  if v_id is null then raise exception using errcode = 'NR409', message = 'Вы уже оценили этого участника', hint = 'duplicate'; end if;
+  return v_id;
+end $$;
+
+-- ---------- журнал рейтинга: только безопасность (S); идемпотентный ключ, апелляция компенсирует ----------
+create table if not exists public.rating_ledger (
+  id          bigserial primary key,
+  user_id     uuid not null references public.profiles(id) on delete cascade,
+  component   text not null default 'S' check (component in ('S')),
+  kind        text not null check (kind in ('spam','insult','scam','reversal')),
+  delta       int not null,
+  decays      boolean not null default true,
+  source_key  text not null unique,
+  reason      text,
+  reverses    bigint references public.rating_ledger(id),
+  created_by  uuid references public.profiles(id) on delete set null,
+  created_at  timestamptz not null default now()
+);
+create index if not exists rating_ledger_user_idx on public.rating_ledger (user_id);
+alter table public.rating_ledger enable row level security;
+revoke all on public.rating_ledger from anon, authenticated;   -- сырые числа видит только модератор (через RPC)
+
+-- подтвержденное нарушение (решение модератора, а не сама жалоба)
+create or replace function public.rating_penalty(p_user uuid, p_kind text, p_source text, p_reason text) returns bigint
+language plpgsql security definer set search_path = public as $$
+declare v_id bigint;
+begin
+  if not public.is_mod() then raise exception using errcode = 'NR403', message = 'Только модератор'; end if;
+  if p_kind not in ('spam','insult','scam') then raise exception using errcode = 'NR422', message = 'Тип: spam, insult или scam'; end if;
+  insert into public.rating_ledger (user_id, kind, delta, decays, source_key, reason, created_by)
+  values (p_user, p_kind, case p_kind when 'spam' then -10 when 'insult' then -15 else -40 end, p_kind <> 'scam', p_source, left(p_reason, 300), auth.uid())
+  on conflict (source_key) do nothing returning rating_ledger.id into v_id;
+  if p_kind = 'scam' and v_id is not null then
+    perform public.mod_restrict(p_user, 'all', 30, 'Мошенничество: ' || left(p_reason, 200));    -- скам: штраф плюс санкция
+  end if;
+  return v_id;
+end $$;
+create or replace function public.rating_reverse(p_ledger bigint, p_reason text) returns bigint
+language plpgsql security definer set search_path = public as $$
+declare l public.rating_ledger; v_id bigint;
+begin
+  if not public.is_mod() then raise exception using errcode = 'NR403', message = 'Только модератор'; end if;
+  select * into l from public.rating_ledger where rating_ledger.id = p_ledger and kind <> 'reversal';
+  if l.id is null then raise exception using errcode = 'NR404', message = 'Запись не найдена'; end if;
+  insert into public.rating_ledger (user_id, kind, delta, decays, source_key, reason, reverses, created_by)
+  values (l.user_id, 'reversal', -l.delta, false, 'reverse:' || l.id, left(p_reason, 300), l.id, auth.uid())
+  on conflict (source_key) do nothing returning rating_ledger.id into v_id;
+  return v_id;
+end $$;
+
+-- компоненты 0–100
+create or replace function public.rating_parts(u uuid) returns jsonb
+language sql stable security definer set search_path = public as $$
+  with rv as (select r.* from public.reviews r where r.target_id = u and public.review_published(r)),
+       mm as (select mm.*, m.status ms, m.ends_at from public.meeting_members mm join public.meetings m on m.id = mm.meeting_id
+               where mm.user_id = u and m.status <> 'cancelled' and m.ends_at < now()),
+       att as (select count(*) filter (where attended = 'confirmed' or (role = 'host' and status = 'accepted')) ok,
+                      count(*) filter (where status = 'left_late' or attended = 'noshow') bad,
+                      count(*) filter (where (attended = 'confirmed' or (role = 'host' and status = 'accepted'))) meetings
+                 from mm where status in ('accepted','left_late')),
+       s as (select coalesce(sum(case when l.reverses is not null then 0
+                                      when exists (select 1 from public.rating_ledger x where x.reverses = l.id) then 0
+                                      when l.decays then l.delta * greatest(0, 1 - extract(epoch from now() - l.created_at) / (90 * 86400))
+                                      else l.delta end), 0) d
+               from public.rating_ledger l where l.user_id = u),
+       lk as (select count(*) n from public.likes k join public.posts p on p.id = k.post_id where p.user_id = u and k.user_id <> u),
+       pr as (select created_at from public.profiles where id = u)
+  select jsonb_build_object(
+    'R', case when (select count(*) from rv) = 0 then null else round((((select avg(stars) from rv) - 1) / 4.0 * 100)::numeric) end,
+    'A', case when (select ok + bad from att) = 0 then null else round(100.0 * (select ok from att) / (select ok + bad from att)) end,
+    'S', greatest(0, least(100, round(100 + (select d from s)))),
+    'U', least(100, round(20 * ln(1 + (select n from lk)))),
+    'H', least(100, round(extract(epoch from now() - (select created_at from pr)) / 86400 / 3 + 5 * (select meetings from att))),
+    'meetings', (select meetings from att),
+    'reviewers', (select count(distinct reviewer_id) from rv)) $$;
+
+-- публичный рейтинг: Host и участник отдельно с количеством отзывов; общий балл — только при ≥5 встреч и ≥3 независимых отзывов
+create or replace function public.user_rating(u uuid) returns jsonb
+language sql stable security definer set search_path = public as $$
+  with p as (select public.rating_parts(u) j),
+       rv as (select r.* from public.reviews r where r.target_id = u and public.review_published(r))
+  select jsonb_build_object(
+    'host', jsonb_build_object('avg', (select round(avg(stars)::numeric, 1) from rv where target_role = 'host'), 'count', (select count(*) from rv where target_role = 'host')),
+    'member', jsonb_build_object('avg', (select round(avg(stars)::numeric, 1) from rv where target_role = 'member'), 'count', (select count(*) from rv where target_role = 'member')),
+    'meetings', (p.j->>'meetings')::int,
+    'score', case when (p.j->>'meetings')::int >= 5 and (p.j->>'reviewers')::int >= 3 then
+      round(0.30 * coalesce((p.j->>'R')::numeric, 0) + 0.25 * coalesce((p.j->>'A')::numeric, 100) + 0.25 * (p.j->>'S')::numeric
+          + 0.10 * (p.j->>'U')::numeric + 0.10 * (p.j->>'H')::numeric) end,
+    'enough', (p.j->>'meetings')::int >= 5 and (p.j->>'reviewers')::int >= 3)
+  from p $$;
+
+create or replace function public.mod_rating_raw(u uuid) returns jsonb
+language plpgsql stable security definer set search_path = public as $$
+begin
+  if not public.is_mod() then raise exception using errcode = 'NR403', message = 'Только модератор'; end if;
+  return public.rating_parts(u) || jsonb_build_object('ledger', (select coalesce(jsonb_agg(to_jsonb(l) order by l.created_at desc), '[]'::jsonb) from public.rating_ledger l where l.user_id = u));
+end $$;
+
+-- публичный профиль: ник, аватар, подтверждение, лайки, публикации, встречи, рейтинги. Без личных сообщений и дружбы.
+create or replace function public.profile_public(u uuid) returns jsonb
+language sql stable security definer set search_path = public as $$
+  select jsonb_build_object('id', p.id, 'nickname', p.nickname, 'avatar_url', p.avatar_url, 'verified', p.verified, 'bio', p.bio, 'district', p.district,
+    'interests', p.interests, 'created_at', p.created_at, 'instagram', public.profile_instagram(p.id),
+    'likes', (select count(*) from public.likes k join public.posts x on x.id = k.post_id where x.user_id = p.id and k.user_id <> p.id),
+    'posts', (select count(*) from public.posts x where x.user_id = p.id and x.status in ('active','closed') and x.category <> 'meetup'),
+    'meetings', (select count(*) from public.meeting_members mm join public.meetings m on m.id = mm.meeting_id
+                   where mm.user_id = p.id and m.status <> 'cancelled' and (mm.attended = 'confirmed' or (mm.role = 'host' and mm.status = 'accepted'))),
+    'rating', public.user_rating(p.id),
+    'blocked', exists (select 1 from public.blocks b where b.blocker_id = auth.uid() and b.blocked_id = p.id))
+  from public.profiles p where p.id = u and not p.banned $$;
+
+-- состояние аккаунта: + deleted (запрошено удаление), встречи — отдельный допуск, лимит встреч
+create or replace function public.my_account() returns jsonb
+language plpgsql stable security definer set search_path = public as $$
+declare p record; pp record; st text; sa public.user_sanctions; can jsonb;
+begin
+  if auth.uid() is null then return null; end if;
+  select * into p from public.profiles where id = auth.uid();
+  if p.id is null or exists (select 1 from public.deletion_jobs where user_id = auth.uid() and status <> 'done') then return jsonb_build_object('state', 'deleted'); end if;
+  select * into pp from public.profile_private where user_id = auth.uid();
+  sa := public.active_sanction(auth.uid(), 'all');
+  st := case when p.banned then 'suspended'
+             when not public.is_verified() then 'pending_email'
+             when p.nickname is null or p.accepted_rules_at is null then 'profile_incomplete'
+             when sa.id is not null or exists (select 1 from public.user_sanctions where user_id = auth.uid() and revoked_at is null and (until is null or until > now())) then 'restricted'
+             else 'active' end;
+  can := jsonb_build_object(
+    'post', st in ('active','restricted') and public.active_sanction(auth.uid(), 'post') is null,
+    'comment', st in ('active','restricted') and public.active_sanction(auth.uid(), 'comment') is null,
+    'chat', st in ('active','restricted') and public.active_sanction(auth.uid(), 'chat') is null,
+    'meet', st = 'active' and public.meet_ok(auth.uid()),
+    'report', st <> 'suspended');
+  return jsonb_build_object(
+    'state', st, 'can', can,
+    'age_status', coalesce(pp.age_status, 'unknown'), 'meet_ok', public.meet_ok(auth.uid()),
+    'phone_verified', pp.phone_verified_at is not null,
+    'nickname_next_change', case when p.nickname_changed_at > now() - interval '30 days' then p.nickname_changed_at + interval '30 days' end,
+    'instagram', p.instagram, 'instagram_public', p.instagram_public, 'accepted_rules', p.accepted_rules_at is not null,
+    'notify_level', p.notify_level,
+    'mod_role', p.is_admin or p.is_moderator, 'mfa_ok', public.mfa_ok(),
+    'sanction', case when sa.id is not null then jsonb_build_object('until', sa.until, 'reason', sa.reason) end,
+    'limits', jsonb_build_object('post', public.limit_status('post'), 'comment', public.limit_status('comment'), 'meeting', public.limit_status('meeting')),
+    'clean_version', (select clean_version from public.app_settings where id = 1),
+    'media_ok', true);
+end $$;
+
+create or replace function public.set_notify_level(p_level text) returns void
+language sql security definer set search_path = public as $$
+  update public.profiles set notify_level = p_level where id = auth.uid() and p_level in ('all','important','silent','off') $$;
+-- ---------- данные для экранов ----------
+-- карточка встречи: без точного GPS при скрытом месте (точку дает posts), участники — только ники
+create or replace function public.meeting_get(p_meeting uuid) returns jsonb
+language sql stable security definer set search_path = public as $$
+  select jsonb_build_object(
+    'id', m.id, 'category', m.category, 'title', m.title, 'details', m.details, 'pin', m.pin, 'place_name', m.place_name,
+    'starts_at', m.starts_at, 'ends_at', m.ends_at, 'capacity', m.capacity, 'price_kzt', m.price_kzt, 'rules', m.rules,
+    'status', case when m.status in ('cancelled','finished') then m.status when m.ends_at < now() then 'finished' when m.starts_at <= now() then 'live' else m.status end,
+    'cancel_reason', m.cancel_reason, 'room_id', case when public.meet_role(m.id, auth.uid()) is not null or public.is_mod() then m.room_id end,
+    'accepted', public.meet_accepted_count(m.id),
+    'host', (select jsonb_build_object('id', p.id, 'nickname', p.nickname, 'avatar_url', p.avatar_url, 'verified', p.verified, 'rating', public.user_rating(p.id))
+               from public.profiles p where p.id = m.host_id),
+    'my_status', (select status from public.meeting_members where meeting_id = m.id and user_id = auth.uid()),
+    'my_role', public.meet_role(m.id, auth.uid()),
+    'my_attended', (select attended from public.meeting_members where meeting_id = m.id and user_id = auth.uid()),
+    'members', case when public.meet_role(m.id, auth.uid()) is not null or public.is_mod() then
+      (select coalesce(jsonb_agg(jsonb_build_object('id', p.id, 'nickname', p.nickname, 'avatar_url', p.avatar_url, 'role', mm.role, 'attended', mm.attended,
+                                                    'muted_until', rm.muted_until) order by mm.role = 'host' desc, mm.decided_at), '[]'::jsonb)
+         from public.meeting_members mm join public.profiles p on p.id = mm.user_id
+         left join public.room_members rm on rm.room_id = m.room_id and rm.user_id = mm.user_id
+        where mm.meeting_id = m.id and mm.status = 'accepted') end,
+    'requests', case when public.meet_role(m.id, auth.uid()) in ('host','cohost') then
+      (select coalesce(jsonb_agg(jsonb_build_object('id', p.id, 'nickname', p.nickname, 'avatar_url', p.avatar_url, 'status', mm.status, 'note', mm.note,
+                                                    'rating', public.user_rating(p.id)) order by mm.created_at), '[]'::jsonb)
+         from public.meeting_members mm join public.profiles p on p.id = mm.user_id
+        where mm.meeting_id = m.id and mm.status in ('requested','waitlist')) end,
+    'checkin', case when public.meet_role(m.id, auth.uid()) is not null then
+      (select jsonb_build_object('id', c.id, 'created_at', c.created_at,
+              'answers', (select coalesce(jsonb_object_agg(a.user_id, a.answer), '{}'::jsonb) from public.checkin_answers a where a.checkin_id = c.id))
+         from public.meeting_checkins c where c.meeting_id = m.id and c.closed_at is null) end)
+  from public.meetings m
+  where m.id = p_meeting and (exists (select 1 from public.posts p where p.id = m.id and p.status in ('active','closed')) or public.meet_role(m.id, auth.uid()) is not null or public.is_mod()) $$;
+
+-- список встреч рядом: категория, дата, радиус, стоимость, свободные места
+create or replace function public.meetings_near(p_lat float8, p_lng float8, p_radius int default 10000, p_cats text[] default null,
+                                                p_from timestamptz default null, p_to timestamptz default null,
+                                                p_free_only boolean default false, p_max_price int default null, p_limit int default 30) returns jsonb
+language sql stable security definer set search_path = public as $$
+  select coalesce(jsonb_agg(x order by x.starts_at), '[]'::jsonb) from (
+    select m.id, m.category, m.title, m.pin, m.place_name, m.starts_at, m.ends_at, m.capacity, m.price_kzt, p.lat, p.lng,
+           public.meet_accepted_count(m.id) as accepted,
+           (select nickname from public.profiles where id = m.host_id) as host,
+           (select status from public.meeting_members where meeting_id = m.id and user_id = auth.uid()) as my_status,
+           round((6371000 * 2 * asin(sqrt(power(sin(radians(p.lat - p_lat) / 2), 2) + cos(radians(p_lat)) * cos(radians(p.lat)) * power(sin(radians(p.lng - p_lng) / 2), 2))))::numeric) as dist
+      from public.meetings m join public.posts p on p.id = m.id
+     where m.status = 'open' and m.starts_at > now() and p.status = 'active'
+       and (p_cats is null or m.category = any (p_cats))
+       and (p_from is null or m.starts_at >= p_from) and (p_to is null or m.starts_at < p_to)
+       and (p_max_price is null or coalesce(m.price_kzt, 0) <= p_max_price)
+       and (not p_free_only or public.meet_accepted_count(m.id) < m.capacity)
+       and p.lat between p_lat - p_radius / 111000.0 and p_lat + p_radius / 111000.0
+       and not exists (select 1 from public.blocks b where (b.blocker_id = auth.uid() and b.blocked_id = m.host_id) or (b.blocker_id = m.host_id and b.blocked_id = auth.uid()))
+     order by m.starts_at
+     limit least(coalesce(p_limit, 30), 50)) x
+  where x.dist <= p_radius $$;
+
+-- мои встречи (создатель, участник, заявки, архив)
+create or replace function public.my_meetings() returns jsonb
+language sql stable security definer set search_path = public as $$
+  select coalesce(jsonb_agg(jsonb_build_object('id', m.id, 'title', m.title, 'category', m.category, 'starts_at', m.starts_at, 'ends_at', m.ends_at,
+    'status', case when m.status in ('cancelled','finished') then m.status when m.ends_at < now() then 'finished' else m.status end,
+    'my_status', mm.status, 'my_role', mm.role, 'room_id', case when mm.status = 'accepted' then m.room_id end,
+    'review_due', mm.status = 'accepted' and m.ends_at < now() and m.ends_at > now() - interval '7 days') order by m.starts_at desc), '[]'::jsonb)
+  from public.meeting_members mm join public.meetings m on m.id = mm.meeting_id
+  where mm.user_id = auth.uid() and mm.status not in ('declined') $$;
+
+-- =====================================================================
+-- Часть E (раздел 04): поля семи типов публикаций, событие с концом, SOS с типом.
+-- =====================================================================
+alter table public.events add column if not exists ends_at timestamptz;
+alter table public.events drop constraint if exists events_ends_check;
+alter table public.events add constraint events_ends_check check (ends_at is null or (ends_at > starts_at and ends_at <= starts_at + interval '14 days'));
+
+create or replace function public.post_meta_clean(cat text, m jsonb) returns jsonb
+language plpgsql immutable as $$
+declare o jsonb := '{}'::jsonb; t text; r text; k text;
+begin
+  m := coalesce(m, '{}'::jsonb);
+  foreach k in array array['title','organizer','org','conditions','price_text','source_name'] loop
+    t := btrim(m->>k);
+    if t is not null and t <> '' then
+      r := public.near_block_reason(t);
+      if r is not null then raise exception using errcode = 'NR422', message = public.near_block_message(r), hint = r; end if;
+      m := jsonb_set(m, array[k], to_jsonb(public.near_clean(left(t, case k when 'title' then 80 when 'conditions' then 300 else 60 end))));
+    end if;
+  end loop;
+  if cat = 'incident' then
+    if m->>'itype' in ('dtp','water','power','gas','heat','road','other') then o := o || jsonb_build_object('itype', m->>'itype'); end if;
+    if (m->>'ttl_h') in ('1','3','6','12','24') then o := o || jsonb_build_object('ttl_h', (m->>'ttl_h')::int); end if;
+    -- v14.8: время происшествия — не в будущем и не старше суток
+    if m ? 'occurred_at' then
+      begin
+        if (m->>'occurred_at')::timestamptz between now() - interval '24 hours' and now() + interval '5 minutes' then o := o || jsonb_build_object('occurred_at', m->>'occurred_at');
+        else raise exception using errcode = 'NR422', message = 'Время происшествия: за последние 24 часа'; end if;
+      exception when invalid_datetime_format or datetime_field_overflow then raise exception using errcode = 'NR422', message = 'Проверьте время происшествия'; end;
+    end if;
+    if m->>'stype' in ('medical','fire','crime','accident','lost_person','other') then o := o || jsonb_build_object('stype', m->>'stype'); end if;
+  elsif cat = 'event' then
+    -- название обязательно в форме; старые клиенты без поля — название пустое (карточка покажет текст)
+    if coalesce(m->>'title', '') <> '' then
+      if char_length(m->>'title') < 5 then raise exception using errcode = 'NR422', message = 'Название события: от 5 до 80 символов'; end if;
+      o := o || jsonb_build_object('title', m->>'title');
+    end if;
+    if coalesce(m->>'organizer', '') <> '' then o := o || jsonb_build_object('organizer', m->>'organizer'); end if;
+    if (m->>'price_kzt') ~ '^\d{1,7}$' then o := o || jsonb_build_object('price_kzt', (m->>'price_kzt')::int);
+    elsif m->>'price_kzt' = 'free' then o := o || jsonb_build_object('price_kzt', 0); end if;
+    if public.clean_url(m->>'source_url') is not null then o := o || jsonb_build_object('source_url', m->>'source_url'); end if;
+    if coalesce(m->>'conditions', '') <> '' then o := o || jsonb_build_object('conditions', m->>'conditions'); end if;
+  elsif cat = 'deal' then
+    if coalesce(m->>'conditions', '') <> '' then o := o || jsonb_build_object('conditions', m->>'conditions'); end if;
+    if coalesce(m->>'source_name', '') <> '' then o := o || jsonb_build_object('source_name', m->>'source_name'); end if;
+    if coalesce(m->>'org', '') <> '' then o := o || jsonb_build_object('org', m->>'org'); end if;
+    if coalesce(m->>'price_text', '') <> '' then o := o || jsonb_build_object('price_text', m->>'price_text'); end if;
+    if (m->>'until') is not null then
+      begin
+        if (m->>'until')::timestamptz > now() and (m->>'until')::timestamptz <= now() + interval '14 days' then o := o || jsonb_build_object('until', m->>'until');
+        else raise exception using errcode = 'NR422', message = 'Срок акции: от сегодня до 14 дней'; end if;
+      exception when invalid_datetime_format or datetime_field_overflow then raise exception using errcode = 'NR422', message = 'Проверьте срок акции'; end;
+    end if;
+    if public.clean_url(m->>'url') is not null then o := o || jsonb_build_object('url', m->>'url'); end if;
+  elsif cat = 'help' then
+    if m->>'hkind' in ('need','offer','lost','found','home') then o := o || jsonb_build_object('hkind', m->>'hkind'); else o := o || '{"hkind":"need"}'::jsonb; end if;
+  elsif cat = 'meetup' then
+    if coalesce(m->>'title', '') <> '' then o := o || jsonb_build_object('title', m->>'title'); end if;
+    if m->>'mcat' in ('games','cinema','board','sport','cafe','walk','mountains','study','other') then o := o || jsonb_build_object('mcat', m->>'mcat'); end if;
+  elsif cat = 'talk' then
+    if m->>'kind' in ('discussion','announcement') then o := o || jsonb_build_object('kind', m->>'kind'); end if;
+  elsif cat = 'ad' then
+    if coalesce(m->>'price_text', '') <> '' then o := o || jsonb_build_object('price_text', m->>'price_text'); end if;
+  end if;
+  return o;
+end $$;
+
+-- v14.8: угрозы с обратным порядком слов ("тебя убью", "найду где живешь") — тот же список в src/lib/clean.js
+create or replace function public.near_is_threat(t text) returns boolean language sql immutable as $$
+  select coalesce(replace(lower(translate(t, 'АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ', 'абвгдеёжзийклмнопрстуфхцчшщъыьэюя')), 'ё', 'е')
+    ~ '(^|[^а-яa-z])(убью (тебя|вас|его|ее|тебе)|(тебя|вас|его|ее) (убью|прибью|зарежу)|зарежу|пристрелю|задушу (тебя|вас)|урою|тебе конец|найду тебя и|найду,? где (ты )?живешь|приду за тобой|сожгу (тебя|вас|твой|твою|ваш)|i will kill you|i''ll kill you|kill you|өлтіремін)([^а-яa-z]|$)', false) $$;
+
+-- =====================================================================
+-- Часть F: права. Service role — только сервер; клиент — только RPC и чтение по RLS.
+-- =====================================================================
+do $$ declare f text; begin
+  -- внутренние функции: не вызываются клиентом
+  foreach f in array array[
+    'public.outbox_put(uuid, text, text, jsonb, timestamptz)', 'public.outbox_process(int)', 'public.room_system(uuid, text, jsonb, text)',
+    'public.meet_schedule(uuid, uuid)', 'public.meet_unschedule(uuid, uuid)', 'public.meet_notify(uuid, uuid, text, text, text)',
+    'public.meet_free_place(uuid)', 'public.legacy_dm_refuse()', 'public.meetup_guard()', 'public.rating_parts(uuid)'] loop
+    execute 'revoke all on function ' || f || ' from public, anon, authenticated';
+  end loop;
+  -- для всех, включая гостя: чтение городских данных
+  foreach f in array array[
+    'public.rooms_list(text, text)', 'public.room_feed(uuid, timestamptz, uuid, int)', 'public.meetings_near(float8, float8, int, text[], timestamptz, timestamptz, boolean, int, int)',
+    'public.meeting_get(uuid)', 'public.profile_public(uuid)', 'public.user_rating(uuid)', 'public.meet_pin(text, jsonb, timestamptz, timestamptz, int)',
+    'public.room_can_read(uuid)', 'public.room_role(uuid, uuid)', 'public.meet_role(uuid, uuid)', 'public.review_published(public.reviews)'] loop
+    execute 'grant execute on function ' || f || ' to anon, authenticated';
+  end loop;
+  -- действия: только вошедшие
+  foreach f in array array[
+    'public.join_room(uuid)', 'public.leave_room(uuid)', 'public.room_settings(uuid, text, boolean, boolean)',
+    'public.send_message(uuid, text, text, uuid, text, text)', 'public.room_hide_message(uuid, text)', 'public.set_mute(uuid, uuid, int, text)',
+    'public.room_slow_mode(uuid, int)', 'public.mod_create_room(text, text, text)',
+    'public.create_meeting(jsonb)', 'public.request_join(uuid, text)', 'public.decide_request(uuid, uuid, boolean, text)',
+    'public.remove_member(uuid, uuid, text)', 'public.leave_meeting(uuid)', 'public.set_cohost(uuid, uuid, boolean)', 'public.transfer_host(uuid, uuid)',
+    'public.update_meeting(uuid, jsonb)', 'public.close_recruiting(uuid, boolean)', 'public.cancel_meeting(uuid, text)', 'public.finish_meeting(uuid)',
+    'public.request_checkin(uuid)', 'public.answer_checkin(uuid, text)', 'public.mark_attended(uuid)', 'public.confirm_attendance(uuid, uuid, boolean)',
+    'public.mod_resolve_attendance(uuid, uuid, boolean, text)', 'public.submit_review(uuid, uuid, int, boolean, boolean, boolean, text)',
+    'public.rating_penalty(uuid, text, text, text)', 'public.rating_reverse(bigint, text)', 'public.mod_rating_raw(uuid)',
+    'public.my_meetings()', 'public.set_notify_level(text)', 'public.my_account()'] loop
+    execute 'revoke all on function ' || f || ' from public, anon';
+    execute 'grant execute on function ' || f || ' to authenticated';
+  end loop;
+end $$;
+grant select (notify_level) on public.profiles to authenticated;
+grant update (notify_level) on public.profiles to authenticated;
+
+-- уборка: напоминания и уведомления из outbox (каждую минуту — отдельное задание pg_cron, см. SETUP шаг 19)
+create or replace function public.near_minutely() returns jsonb
+language sql security definer set search_path = public as $$ select public.outbox_process(500) $$;
+revoke all on function public.near_minutely() from public, anon, authenticated;
+do $$ begin
+  perform cron.schedule('near-minutely', '* * * * *', 'select public.near_minutely()');
+exception when others then null;   -- без pg_cron: задание добавляется вручную (SETUP, шаг 19)
+end $$;
+
+-- ---------- 06: метрики пилота (только админ): непустые ленты, возврат, полезные публикации, жалобы, реакция ----------
+create or replace function public.kpi_city(p_days int default 7) returns jsonb
+language plpgsql stable security definer set search_path = public as $$
+declare since timestamptz := now() - make_interval(days => greatest(1, least(coalesce(p_days, 7), 90)));
+begin
+  if not public.is_admin() then raise exception using errcode = 'NR403', message = 'Только администратор'; end if;
+  return jsonb_build_object(
+    'nonempty_feed_share', (select round(100.0 * count(*) filter (where coalesce((props->>'count')::int, 0) > 0) / nullif(count(*), 0), 1)
+                              from public.analytics_events where name = 'feed_loaded' and created_at > since),
+    'useful_posts_share', (select round(100.0 * count(*) filter (where likes_count + comments_count > 0) / nullif(count(*), 0), 1)
+                              from public.posts where created_at > since and status in ('active','closed') and not official),
+    'official_posts', (select count(*) from public.posts where official and created_at > since),
+    'meetings_created', (select count(*) from public.meetings where created_at > since),
+    'meetings_held', (select count(*) from public.meetings where ends_at between since and now() and status <> 'cancelled'),
+    'room_messages', (select count(*) from public.room_messages where created_at > since and sender_id is not null),
+    'reports', (select count(*) from public.reports where created_at > since),
+    'report_reaction_hours_median', (select round((percentile_cont(0.5) within group (order by extract(epoch from resolved_at - created_at) / 3600))::numeric, 1)
+                              from public.reports where created_at > since and resolved_at is not null),
+    'retention', (select jsonb_build_object('d1', s->'d1', 'd7', s->'d7') from (select public.kpi_summary() s) x));
+exception when undefined_function then
+  return jsonb_build_object('error', 'kpi_summary недоступна');
+end $$;
+revoke all on function public.kpi_city(int) from public, anon;
+grant execute on function public.kpi_city(int) to authenticated;

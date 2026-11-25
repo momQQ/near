@@ -56,33 +56,30 @@
     }
     const cnt = (k) => (profCounts ? profCounts[k] : "…");
     b.innerHTML = `<div class="ph">
-        <button class="ph-gear" id="pGear" aria-label="Настройки">⚙</button>
-        <div class="ph-ava ph-ava-c">${user.avatar_url ? `<img src="${esc(user.avatar_url)}" alt="">` : esc(initial(user.nickname || user.name))}</div>
-        <b class="ph-name" translate="no">@${esc(user.nickname || user.name)}${vBadge(user)}</b>
-        ${user.verified ? '<div class="vlabel">✓ Почта подтверждена</div>' : '<div class="vlabel warn">Почта не подтверждена</div>'}
-        <div class="ph-d">В NEAR с ${esc(dfmt(user.created_at || Date.now(), { month: "long", year: "numeric" }))}${user.district ? " · " + esc(user.district) : ""}</div>
+        <div class="ph-top"><div class="ph-ava">${user.avatar_url ? `<img src="${esc(user.avatar_url)}" alt="">` : esc(initial(user.name))}</div>
+          <div class="ph-stats"><div><b id="pcLikes">…</b><span>лайков</span></div><div><b id="pcPosts">${cnt("posts")}</b><span id="plPosts">постов</span></div><div><b id="pcMeet">…</b><span>встреч</span></div></div>
+          <button class="ph-gear" id="pGear" aria-label="Настройки">⚙</button></div>
+        <b class="ph-name" translate="no">${esc(user.name)}${vBadge(user)}</b>${user.verified ? '<div class="vlabel">✓ Email подтвержден</div>' : ""}
+        ${user.district ? `<div class="ph-d">📍 ${esc(user.district)} район</div>` : ""}
         ${user.bio ? `<div class="ph-bio">${esc(user.bio)}</div>` : ""}
-        <div class="ph-stats3"><div><b id="pcLikes">${cnt("likes")}</b><span>Лайки</span></div><div><b id="pcPosts">${cnt("posts")}</b><span>Публикации</span></div><div><b id="pcEvents">${cnt("events")}</b><span>Встречи</span></div></div>
-        <div id="repBox">${repSkeleton()}</div>
-        <div class="ph-menu">
-          <button class="sec-row" id="pMeet"><span class="sec-i">📅</span><div><b>Мои встречи</b><small>участие и организация</small></div><span class="chev">›</span></button>
-          <button class="sec-row" id="pRev"><span class="sec-i">⭐</span><div><b>Отзывы</b><small>что пишут участники встреч</small></div><span class="chev">›</span></button>
-          <button class="sec-row" id="pCom"><span class="sec-i">💬</span><div><b>Мои сообщества</b><small>городской и районный чаты</small></div><span class="chev">›</span></button>
-          <button class="sec-row" id="pSec"><span class="sec-i">🛡</span><div><b>Безопасность</b><small>сессия, вход, решения, апелляции</small></div><span class="chev">›</span></button>
-        </div>
+        ${(user.interests || []).length ? `<div class="int-view">${user.interests.map((k) => `<span>${esc((N.INTERESTS.find((x) => x[0] === k) || [k, k])[1])}</span>`).join("")}</div>` : ""}
+        ${user.instagram ? `<a class="insta" href="https://instagram.com/${esc(user.instagram)}" target="_blank" rel="noopener">📷 @${esc(user.instagram)}</a><small class="dim"> · ${user.instagram_public ? "видят все" : "видите только вы"}</small>` : ""}
+        <div id="pRep"></div>
         <div class="ph-btns"><button id="pEdit">Редактировать профиль</button><button id="pShare">Поделиться</button></div>
+        <button class="srow" id="pMyMeets"><span class="si">${icon("meetup", 20)}</span><span class="st2"><b>Мои встречи</b><small>предстоящие, архив, отзывы</small></span><span class="sr">›</span></button>
       </div>
+      ${user.banned ? '<div class="warn-banner red ban-note">⛔ Ваш аккаунт ограничен модератором: публиковать и писать сообщения нельзя.<div class="wb-acts"><button id="pAppeal">Обжаловать</button></div></div>' : ""}
       ${api.mode === "local" ? '<div class="demo-strip">🧪 Демо-режим: аккаунт и публикации хранятся только на этом устройстве</div>' : ""}
       <div class="ptabs" id="pSeg"><button data-t="posts" class="${profTab === "posts" ? "on" : ""}">Посты</button><button data-t="media" class="${profTab === "media" ? "on" : ""}">Медиа</button><button data-t="saved" class="${profTab === "saved" ? "on" : ""}">🔒 Сохраненное</button></div>
       <div id="pList"><div class="spin"></div></div>`;
-    $("pEdit").onclick = editProfile; $("pGear").onclick = () => go("sv-settings");
-    $("pSec").onclick = () => Shield.center(); $("pRev").onclick = () => openReviews(user.id, "@" + user.nickname);
-    $("pMeet").onclick = () => myMeetings(); $("pCom").onclick = () => { hist = []; go("v-chats", false); };
-    loadRep($("repBox"), user.id, true);
+    $("pEdit").onclick = editProfile; $("pGear").onclick = () => go("sv-settings"); $("pMyMeets").onclick = openMyMeets;
+    api.profilePublic(user.id).then((u) => { if (!u || !$("pcLikes")) return; $("pcLikes").textContent = u.likes; $("pcMeet").textContent = u.meetings; $("pRep").innerHTML = ratingHtml(u.rating); }).catch(() => {});
+    if ($("pAppeal")) $("pAppeal").onclick = () => appealSheet("user", user.id);
     $("pShare").onclick = async () => { const url = location.origin + location.pathname + "#user=" + user.id; try { if (navigator.share) { await navigator.share({ title: "NEAR", text: user.name + " в NEAR", url }); return; } } catch (e) { if (e.name === "AbortError") return; } try { await navigator.clipboard.writeText(url); toast("🔗 Ссылка на профиль скопирована"); } catch (e) { toast(url); } };
     qa("#pSeg [data-t]").forEach((x) => (x.onclick = () => { profTab = x.dataset.t; qa("#pSeg button").forEach((y) => y.classList.toggle("on", y === x)); loadProfList(); }));
     $("pList").onclick = (e) => { const g = e.target.closest("[data-gpost]"); if (g) return openPost(g.dataset.gpost); postClick(e); };
-    api.stats().then((s) => { profCounts = s; ["posts", "likes", "events"].forEach((k) => { const el = $("pc" + k[0].toUpperCase() + k.slice(1)); if (el) el.textContent = s[k]; }); }).catch(() => {});
+    const lbls = () => { if (!profCounts) return; if ($("plPosts")) $("plPosts").textContent = plural(+profCounts.posts, "пост", "поста", "постов"); };
+    api.stats().then((s) => { profCounts = s; ["posts", "saved", "events"].forEach((k) => { const el = $("pc" + k[0].toUpperCase() + k.slice(1)); if (el) el.textContent = s[k]; }); lbls(); }).catch(() => {});
     loadProfList();
   }
   async function loadProfList() {
@@ -99,25 +96,40 @@
       }
       box.innerHTML = list.length ? list.map(card).join("") : `<div class="empty">${tab === "posts" ? '<b>Вы еще ничего не публиковали</b>Расскажите соседям, что происходит рядом<br><button class="btn btn-main mt12" data-create="talk">+ Опубликовать</button>' : "<b>Сохраненного пока нет</b>Нажмите 🔖 на публикации, чтобы сохранить. Это видите только вы"}</div>`;
       wireMedia(box);
-      if (profCounts) { profCounts[tab === "saved" ? "saved" : "posts"] = list.length; const el = $(tab === "saved" ? "pcSaved" : "pcPosts"); if (el) el.textContent = list.length; }
+      if (profCounts && tab === "posts") { profCounts.posts = list.length; const el = $("pcPosts"); if (el) el.textContent = list.length; }
     } catch (e) { box.innerHTML = `<div class="empty"><b>Не удалось загрузить</b>${esc(e.message)}<br><button class="btn btn-main mt12" id="plRetry">Повторить</button></div>`; $("plRetry").onclick = loadProfList; }
   }
   function editProfile() {
     let avatarFile = null;
     openSheet("Редактировать профиль", `<div class="av-edit"><span class="ava" id="avPrev" style="background:#ff2e8822;color:#ff6aa8">${user.avatar_url ? `<img src="${esc(user.avatar_url)}" alt="">` : esc(initial(user.name))}</span><button class="btn btn-ghost" id="avBtn" type="button">📷 Сменить фото</button><input type="file" id="avFile" accept="image/*" hidden></div>
-      <div class="fld"><label>Имя и фамилия</label><input id="peName" value="${esc(user.name)}" maxlength="60"></div>
+      <div class="fld"><label for="peNick">Никнейм</label><div class="nick-in"><span>@</span><input id="peNick" value="${esc(user.nickname || "")}" maxlength="20" autocapitalize="off" spellcheck="false"></div><div class="hint" id="peNickHint">${user.account && user.account.nickname_next_change ? `Следующая смена — ${esc(dfmt(user.account.nickname_next_change, { day: "numeric", month: "long" }))}` : "Менять можно раз в 30 дней"}</div></div>
       <div class="fld"><label>О себе</label><textarea id="peBio" maxlength="160" placeholder="Пара слов о себе: чем занимаетесь, что любите в районе" style="min-height:64px">${esc(user.bio || "")}</textarea><div class="hint" id="peBioN">${(user.bio || "").length}/160</div></div>
       <div class="fld"><label>Район</label><select id="peDist"><option value="">Не показывать</option>${DISTRICTS.map((d) => `<option ${user.district === d[0] ? "selected" : ""}>${d[0]}</option>`).join("")}</select></div>
-      <div class="fld"><label>Instagram</label><input id="peInsta" value="${esc(user.instagram || "")}" placeholder="ваш_ник (без @)" autocapitalize="off" autocomplete="off"></div>
+      <div class="fld"><label>Интересы <small class="dim">до 5</small></label><div class="int-chips" id="peInt">${N.INTERESTS.map(([k, t]) => `<button type="button" data-int="${k}" class="${(user.interests || []).includes(k) ? "on" : ""}" aria-pressed="${(user.interests || []).includes(k)}">${t}</button>`).join("")}</div></div>
+      <div class="fld"><label>Instagram</label><input id="peInsta" value="${esc(user.instagram || "")}" placeholder="ваш_ник (без @)" autocapitalize="off" autocomplete="off">
+        <div class="sw-row"><span>Показывать Instagram другим</span><button class="tg${user.instagram_public ? " on" : ""}" id="peInstaPub" type="button" aria-label="Показывать Instagram другим"></button></div>
+        <div class="hint">По умолчанию скрыт: видите только вы</div></div>
       <div class="err" id="peErr"></div>
       <div class="sheet-btns"><button class="btn btn-ghost" id="peCancel">Отмена</button><button class="btn btn-main" id="peSave">Сохранить</button></div>`);
     $("peBio").oninput = () => ($("peBioN").textContent = $("peBio").value.length + "/160");
+    nickLive($("peNick"), $("peNickHint"));
+    $("peInstaPub").onclick = () => $("peInstaPub").classList.toggle("on");
+    $("peInt").onclick = (e) => { const b = e.target.closest("[data-int]"); if (!b) return; const on = qa("#peInt .on").length; if (!b.classList.contains("on") && on >= 5) return toast("Не больше 5 интересов"); b.classList.toggle("on"); b.setAttribute("aria-pressed", b.classList.contains("on")); };
     $("avBtn").onclick = () => $("avFile").click();
     $("avFile").onchange = (e) => { const f = e.target.files[0]; if (!f) return; try { N.validateFile(f); avatarFile = f; $("avPrev").innerHTML = `<img src="${URL.createObjectURL(f)}" alt="">`; } catch (err) { toast(err.message); } };
     $("peCancel").onclick = closeSheet;
     $("peSave").onclick = async () => {
-      try { user = await busy($("peSave"), () => api.updateProfile({ name: $("peName").value, district: $("peDist").value || null, avatarFile, instagram: $("peInsta").value, bio: $("peBio").value })); closeSheet(); toast("✓ Профиль обновлен"); renderProfile(); if (cur() === "sv-settings") renderSettings(); }
-      catch (e) { $("peErr").textContent = e.message; $("peErr").classList.add("on"); }
+      try {
+        user = await busy($("peSave"), async () => {
+          const nick = $("peNick").value.trim();
+          // никнейм — отдельным запросом: проверки, занятость, раз в 30 дней
+          if (nick !== (user.nickname || "")) await api.setNickname(nick);
+          return api.updateProfile({ district: $("peDist").value || null, avatarFile, instagram: $("peInsta").value, instagram_public: $("peInstaPub").classList.contains("on"),
+            interests: qa("#peInt .on").map((b) => b.dataset.int), bio: $("peBio").value });
+        });
+        closeSheet(); toast("Изменения сохранены"); renderProfile(); if (cur() === "sv-settings") renderSettings();
+      }
+      catch (e) { $("peErr").textContent = /занят/.test(e.message) ? "Никнейм занят" : e.message || "Не удалось сохранить профиль. Повторите попытку"; $("peErr").classList.add("on"); }
     };
   }
   /* ---------- экран настроек ---------- */
@@ -149,11 +161,17 @@
         ${user.provider === "google" ? row("sGoogle", "🔐", "Вход через Google", "пароль не нужен", "") : row("sPass", "🔑", "Сменить пароль", "")}
         ${row("sRecover", "🛟", "Восстановление доступа", "отправить ссылку для сброса пароля на почту")}
         ${row("sOut", "🚪", "Выйти из аккаунта", "", "", "danger")}
-        ${row("sDel", "🗑", "Удалить аккаунт", "навсегда, вместе с публикациями и перепиской", "›", "danger")}</div>
+        ${row("sDel", "🗑", "Удалить аккаунт", "навсегда, вместе с публикациями", "›", "danger")}</div>
+      <div class="sgrp"><div class="sg-t">Сообщества и встречи</div>
+        ${row("sRooms", icon("chat", 20), "Мои сообщества", "городской, районные и тематические чаты")}
+        ${row("sMeets", icon("meetup", 20), "Мои встречи", "предстоящие, архив, отзывы")}
+        ${row("sSaved", icon("bookmark", 20), "Сохраненное", "публикации, которые вы сохранили")}
+        ${row("sDrafts", icon("drafts", 20), "Черновики", localStorage.getItem(draftKey()) ? "есть черновик публикации" : "черновиков нет")}
+        ${row("sNotifyLvl", icon("bell", 20), "Push-уведомления", { all: "все", important: "упоминания и важное", silent: "без звука", off: "отключены" }[(user.account && user.account.notify_level) || "important"])}</div>
       <div class="sgrp"><div class="sg-t">Профиль</div>
-        ${row("sEdit", "👤", "Фото, имя, описание", "")}
+        ${row("sEdit", "👤", "Никнейм, фото, описание, интересы", "заполнено " + profileFill() + "%")}
         ${row("sDist", "📍", "Район", user.district ? esc(user.district) : "не показывается")}
-        ${row("sInsta", "📷", "Instagram", user.instagram ? "@" + esc(user.instagram) : "не указан")}
+        ${row("sInsta", "📷", "Instagram", user.instagram ? "@" + esc(user.instagram) + (user.instagram_public ? " · видят все" : " · скрыт") : "не указан")}
         ${row("sPlaces", "⭐", "Избранные места", "Дом, работа — видите только вы")}</div>
       <div class="sgrp"><div class="sg-t">Приватность</div>
         <div class="srow"><span class="si">🟢</span><span class="st2"><b>Показывать, когда я был(а) в сети</b><small>если выключить, вы тоже не будете видеть статус других</small></span>${tg("show_seen", user.show_seen !== false)}</div>
@@ -165,25 +183,30 @@
       <div class="sgrp"><div class="sg-t">Уведомления в приложении</div>${notif}
         <div class="s-note">Звуки и сигналы — пока NEAR открыт. Уведомления на заблокированный телефон — в разделе выше.</div></div>
       ${appearanceGrp()}
-      <div class="sgrp"><div class="sg-t">Видео</div>
-        <div class="srow"><span class="si">▶️</span><span class="st2"><b>Автозапуск без звука</b><small>видео в ленте запускается, когда видно на экране</small></span>${tg("v_autoplay", prefs.v_autoplay ?? true)}</div>
-        <div class="srow"><span class="si">📶</span><span class="st2"><b>Экономия трафика</b><small>без автозапуска и предзагрузки видео</small></span>${tg("v_saver", prefs.v_saver ?? false)}</div>
-        <div class="srow"><span class="si">🔊</span><span class="st2"><b>Звук при ручном запуске</b><small>автозапуск всегда без звука</small></span>${tg("v_sound", prefs.v_sound ?? false)}</div>
-        <div class="srow disabled"><span class="si">💬</span><span class="st2"><b>Субтитры</b><small>появятся вместе с субтитрами RU/KZ/EN</small></span>${tg("v_subs", false)}</div></div>
       <div class="sgrp"><div class="sg-t">Безопасность</div>
-        ${row("sSec", "🛡", "Центр безопасности", "сессия, история входов, решения, апелляции")}
-        ${user.is_mod ? row("sShield", "🛡", "NEAR Shield", "санкции, апелляции, связанные аккаунты, журнал") : ""}
-        ${user.is_mod ? row("sMod", "🚩", "Модерация", "жалобы, публикации, апелляции", '<span class="mini-badge hidden" id="modBadge"></span> ›') : ""}</div>
+        ${row("sAll", "📵", "Выйти на всех устройствах", "если потеряли телефон или вошли с чужого")}
+        ${row("sSanct", "⚖️", "Мои ограничения и решения", "решения модераторов и апелляции")}
+        ${user.is_mod ? row("sMod", "🛡", "Модерация", "жалобы, публикации, апелляции", '<span class="mini-badge hidden" id="modBadge"></span> ›') : ""}</div>
       <div class="sgrp"><div class="sg-t">О приложении</div>
         ${row("sRules", "📜", "Правила сообщества", "")}
         ${row("sPriv", "🔏", "Политика конфиденциальности", "")}
         ${row("sOnb", "▶️", "Как пользоваться NEAR", "видео на 12 секунд")}
         ${row("sBug", "🐞", "Сообщить об ошибке", "опишите, что пошло не так — ответим в приложении")}
         ${CFG.SUPPORT_EMAIL ? row("sHelp", "💬", "Поддержка по email", esc(CFG.SUPPORT_EMAIL)) : ""}
+        ${row("sPing", "📶", "Скорость связи с сервером", "замер из текущей сети: Wi-Fi или 4G")}
         <div class="s-ver">NEAR ${APP_VERSION}${api.mode === "local" ? " · демо-режим" : ""}</div>
         ${api.mode === "local" ? row("sReset", "🧹", "Сбросить демо-данные", "", "", "danger") : ""}</div>`;
     const on = (id, f) => { const el = $(id); if (el) el.onclick = f; };
     on("sPass", changePassword); on("sOut", logout); on("sEdit", editProfile); on("sDist", editProfile); on("sInsta", editProfile);
+    on("sSanct", mySanctionsSheet); on("sPing", pingSheet);
+    on("sRooms", () => { hist = []; go("v-chats", false); const t = document.querySelector('#chSeg [data-t="mine"]'); if (t) t.click(); });
+    on("sMeets", openMyMeets);
+    on("sSaved", () => { profTab = "saved"; hist = []; go("v-prof", false); });
+    on("sDrafts", () => { if (localStorage.getItem(draftKey())) openCreate({ draft: true }); else toast("Черновиков нет"); });
+    on("sNotifyLvl", () => {
+      openSheet("Push-уведомления", `<div class="sheet-col">${[["all", "Все"], ["important", "Упоминания и важное"], ["silent", "Без звука"], ["off", "Отключить"]].map(([k, t]) => `<button class="btn btn-ghost" data-nl="${k}">${t}</button>`).join("")}</div><p class="s-note">Текст и адрес на экране блокировки скрыты. Без разрешения на push уведомления видны внутри приложения.</p>`);
+      $("bsList").onclick = async (e) => { const b = e.target.closest("[data-nl]"); if (!b) return; closeSheet(); try { await api.setNotifyLevel(b.dataset.nl); toast("Сохранено"); renderSettings(); } catch (er) { toast(er.message); } };
+    });
     on("sRecover", () => {
       openSheet("Восстановление доступа", `<div class="dim" style="font-size:13px;margin-bottom:12px">Отправим ссылку для нового пароля на <b>${esc(user.email)}</b>.</div><div class="cap" id="recCap"></div><div class="err" id="recErr"></div><div class="sheet-btns"><button class="btn btn-ghost" id="recNo">Отмена</button><button class="btn btn-main" id="recYes">Отправить</button></div>`);
       if (Cap.on) Cap.mount($("recCap"));
@@ -206,16 +229,14 @@
     on("sHidden", () => { if (!hiddenPosts.size) return; hiddenPosts.clear(); saveHidden(); renderSettings(); feedDirty = true; toast("Скрытые публикации снова в ленте"); });
     on("sHelp", () => { if (CFG.SUPPORT_EMAIL) location.href = "mailto:" + CFG.SUPPORT_EMAIL + "?subject=" + encodeURIComponent("NEAR: вопрос"); else toast("Пока поддержка через модераторов: нажмите ⚑ на любой публикации"); });
     on("sAll", async () => { if (!(await confirmSheet("Выйти на всех устройствах?", "Сеансы на всех телефонах и компьютерах завершатся. Войти можно будет снова.", "Выйти везде", true))) return; try { const was = user.id; Conv.unsub(); await api.signOutAll(); user = null; Cache.wipe(was); cache.clear(); onUserChange(); hist = []; go("v-feed", false); toast("Вы вышли на всех устройствах"); } catch (e) { toast(e.message); } });
-    on("sMod", () => go("sv-mod")); on("sSec", () => Shield.center()); on("sShield", () => ShieldAdmin.open());
+    on("sMod", () => go("sv-mod"));
     if (user.is_mod) api.openReportsCount().then((n) => { if ($("modBadge") && n) { $("modBadge").textContent = n; $("modBadge").classList.remove("hidden"); } }).catch(() => {});
     qa("[data-tg]", $("setBody")).forEach((t) => (t.onclick = async () => {
       const k = t.dataset.tg, val = !t.classList.contains("on"); t.classList.toggle("on", val);
       if (k === "show_seen") { try { user = await api.updateProfile({ show_seen: val }); toast(val ? "Статус \"в сети\" виден соседям" : "Статус \"в сети\" скрыт"); } catch (e) { t.classList.toggle("on", !val); toast(e.message); } return; }
       if (k === "stats") { try { localStorage.setItem("near_stats", val ? "1" : "0"); } catch (e) {} return; }
-      if (k === "v_subs") { t.classList.remove("on"); toast("Субтитры появятся в следующем обновлении"); return; }
       prefs[k] = val; savePrefs();
       if (k === "sound" && val) Sound.play("notif");
-      if (k === "v_autoplay" || k === "v_saver") { if (!val || k === "v_saver") Player.pauseAll(); }
     }));
     bindAppearance();
   }
@@ -230,9 +251,38 @@
       try { await busy($("bugYes"), () => api.sendFeedback(t, APP_VERSION)); closeSheet(); toast("Спасибо! Сообщение отправлено"); } catch (e) { $("bugErr").textContent = e.message; $("bugErr").classList.add("on"); }
     };
   }
+  // индикатор заполненности профиля (на рейтинг не влияет)
+  function profileFill() { const f = [user.nickname, user.avatar_url, user.district, user.bio, (user.interests || []).length]; return Math.round((f.filter(Boolean).length / f.length) * 100); }
+  async function mySanctionsSheet() {
+    openSheet("Мои ограничения и решения", '<div class="spin"></div>');
+    try {
+      const list = await api.sanctions();
+      $("bsList").innerHTML = (list.length ? list.map((x) => `<div class="sanct"><b>${({ all: "Все действия", post: "Публикации", comment: "Комментарии", chat: "Сообщения", meet: "Встречи" })[x.scope] || x.scope}</b>
+          <span>${x.until ? "до " + esc(dfmt(x.until, { day: "numeric", month: "long", hour: "2-digit", minute: "2-digit", timeZone: "Asia/Almaty" })) : "бессрочно"}</span><p>${esc(x.reason)}</p></div>`).join("")
+          + '<button class="btn btn-ghost full mt12" id="snAppeal">Обжаловать (14 дней)</button>'
+        : '<div class="empty"><b>Ограничений нет</b>Решения модераторов по вашему аккаунту появятся здесь</div>')
+        + '<button class="btn btn-main full mt12" id="snOk">Понятно</button>';
+      $("snOk").onclick = closeSheet; if ($("snAppeal")) $("snAppeal").onclick = () => appealSheet("user", user.id);
+    } catch (e) { $("bsList").innerHTML = `<div class="err on">${esc(e.message)}</div>`; }
+  }
+  // ТЗ 56: задержка до сервера из текущей сети — для решения о регионе базы
+  async function pingSheet() {
+    openSheet("Скорость связи с сервером", '<p class="muted" style="font-size:13px">10 коротких запросов к серверу NEAR...</p><div class="spin"></div>');
+    try {
+      const r = await api.ping(10);
+      const net = (navigator.connection && navigator.connection.effectiveType) || "";
+      $("bsList").innerHTML = r.demo ? '<div class="empty"><b>Демо-режим</b>Замер работает, когда приложение подключено к серверу</div><button class="btn btn-main full mt12" id="pgOk">Понятно</button>'
+        : `<div class="ping"><div><b>${r.p50} мс</b><span>обычно (медиана)</span></div><div><b>${r.p95} мс</b><span>медленные (p95)</span></div></div>
+          <p class="muted" style="font-size:12.5px;margin:10px 0">Сеть: ${esc(net || "не определена")}. Сделайте замер на Wi-Fi и на мобильном интернете — эти цифры помогут выбрать регион сервера.</p>
+          <button class="btn btn-main full" id="pgOk">Понятно</button>`;
+      $("pgOk").onclick = closeSheet; Obs.track("filter_changed", { filter: "ping", ms: r.p50 });
+    } catch (e) { $("bsList").innerHTML = `<div class="err on">${esc(e.message)}</div>`; }
+  }
   function showPrivacy() {
     openSheet("Политика конфиденциальности", `<div class="rules" style="font-size:13px;line-height:1.5">
-      <p><b>Что мы храним:</b> email, имя, пол, район (если указан), фото профиля, ваши публикации, комментарии, сообщения и место публикаций.</p>
+      <p><b>Что мы храним:</b> email, никнейм, район, интересы и фото профиля (если указаны), ваши публикации, комментарии, сообщения и место публикаций. Имя, фамилию и пол NEAR не собирает. Email и телефон видите только вы, Instagram — только если сами включите показ.</p>
+      <p><b>Адрес точки:</b> при выборе места на карте приблизительная точка отправляется сервису OpenStreetMap (Nominatim), чтобы показать адрес. Ваш аккаунт при этом не передается.</p>
+      <p><b>Возраст:</b> по умолчанию неизвестен. Документы NEAR не хранит. Пока возраст не проверен, недоступны личные сообщения незнакомым и офлайн-встречи.</p>
       <p><b>Местоположение:</b> используется, чтобы показать, что рядом. Точное место можно скрыть — метка сместится примерно на 200 м.</p>
       <p><b>Кто что видит:</b> публикации и профиль видят пользователи NEAR. Сохраненное, настройки и заблокированные видите только вы. Файлы из переписки доступны только ее участникам по временной ссылке.</p>
       <p><b>Модерация:</b> модераторы видят жалобы и отмеченные ИИ материалы, но не читают все переписки.</p>
@@ -254,7 +304,7 @@
     if (!(await confirmSheet("Выйти из аккаунта?", "Вы сможете войти снова с тем же email и паролем.", "Выйти", true))) return;
     try { const s = await Push.sub(); if (s) await api.pushRemove(s.endpoint); } catch (e) {}
     const was = user && user.id;
-    Conv.unsub(); await api.signOut(); user = null; Cache.wipe(was); cache.clear(); wide = null;
+    Room.unsub(); await api.signOut(); user = null; Cache.wipe(was); cache.clear(); wide = null;
     onUserChange(); hist = []; go("v-feed", false); toast("Вы вышли из аккаунта. Можно смотреть ленту как гость");
   }
   async function resetDemo() {
@@ -273,17 +323,19 @@
       <li>Без спама, мошенничества и навязчивой рекламы.</li>
       <li>Без откровенных, жестоких и шокирующих фото и видео.</li>
       <li>Не публикуйте чужие личные данные: адреса, номера, документы, лица детей.</li>
+      <li>NEAR — не сервис знакомств: без романтических и интимных объявлений.</li>
+      <li>Не переводите деньги незнакомым пользователям. NEAR не просит SMS-коды.</li>
       <li>При угрозе жизни сначала звоните 112.</li>
-      <li>Грубые слова скрываются автоматически. Фото и сообщения могут проверяться автоматически.</li>
+      <li>Мат скрывается автоматически: остается первая буква, остальное — звездочки. Угрозы не публикуются. Фото и сообщения проверяются автоматически.</li>
+      <li>Лимиты на день: новый аккаунт — 3 публикации, 20 комментариев, 3 новых запроса в чат.</li>
       <li>Нарушения: жалоба ⚑ → проверка модератором → скрытие контента или блокировка аккаунта.</li>
     </ol><button class="btn btn-main full" id="rulesOk">Понятно</button>`);
     $("rulesOk").onclick = () => { closeSheet(); const cb = document.querySelector('#f-signup [name=rules]'); if (cb && $("v-auth").classList.contains("on")) cb.checked = true; };
   }
-  function reportSheet({ type, id, user_id, label, timecode }) {
+  function reportSheet({ type, id, user_id, label }) {
     if (!requireAuth("Войдите, чтобы отправить жалобу")) return;
     const R2 = N.REASONS; let reason = null;
     openSheet("Пожаловаться на " + label, `<div class="reason-list">${Object.entries(R2).map(([k, v]) => `<button class="opt-row" data-reason="${k}">${v}<span></span></button>`).join("")}</div>
-      ${timecode != null ? `<div class="s-note">⏱ Момент в видео: <b>${fmtDur(timecode)}</b> — модератор откроет ролик с этого места</div>` : ""}
       <div class="fld mt8"><textarea id="repDet" maxlength="500" placeholder="Подробности (необязательно)" style="min-height:70px"></textarea></div>
       ${user_id && user && user_id !== user.id ? `<label class="rules-check" style="margin:0 0 12px"><input type="checkbox" id="repBlock"> <span>Также заблокировать этого пользователя</span></label>` : ""}
       <div class="err" id="repErr"></div>
@@ -293,7 +345,7 @@
     $("repYes").onclick = async () => {
       if (!reason) { $("repErr").textContent = "Выберите причину"; $("repErr").classList.add("on"); return; }
       try {
-        await busy($("repYes"), () => api.report({ type, id, user_id, reason, details: (timecode != null ? `[таймкод ${fmtDur(timecode)}] ` : "") + $("repDet").value }));
+        await busy($("repYes"), () => api.report({ type, id, user_id, reason, details: $("repDet").value }));
         const alsoBlock = $("repBlock") && $("repBlock").checked;
         if (alsoBlock) await api.block(user_id);
         closeSheet(); toast("🛡 Спасибо! Модератор проверит жалобу" + (alsoBlock ? ", пользователь заблокирован" : ""));
@@ -324,44 +376,36 @@
     if (!id) return;
     if (user && id === user.id) { hist = []; go("v-prof", false); return; }
     openUserId = id; go("sv-user"); $("uBody").innerHTML = '<div class="spin"></div>'; $("uSub").textContent = "";
-    try { const u = await api.getProfile(id); if (openUserId === id) renderUser(u); }
+    try { const u = await api.profilePublic(id); if (openUserId !== id) return; if (!u) { $("uBody").innerHTML = '<div class="empty"><b>Профиль недоступен</b>Аккаунт удален или ограничен</div>'; return; } renderUser(u); }
     catch (e) { $("uBody").innerHTML = `<div class="empty"><b>Не открылось</b>${esc(e.message)}</div>`; }
   }
+  // ТЗ 10: публично — ник, аватар, подтверждение, лайки, публикации, встречи, рейтинг Host и участника отдельно. Без личных сообщений и дружбы.
+  function ratingHtml(r) {
+    if (!r) return "";
+    const line = (role, t) => { const x = r[role]; return `<span>${t} ${x && x.count ? `★ ${String(x.avg).replace(".", ",")} <small>(${x.count})</small>` : "<small>нет отзывов</small>"}</span>`; };
+    return `<div class="rep-box"><b>${r.enough ? `Репутация ${r.score} / 100` : "Репутация: недостаточно данных"}</b><div>${line("host", "Host")}${line("member", "Участник")}</div>
+      ${r.enough ? "" : '<small class="dim">Появится после 5 встреч и 3 независимых отзывов</small>'}<small class="dim">Рейтинг не гарантирует безопасность встречи</small></div>`;
+  }
   function renderUser(u) {
-    const fs = u.friendship;
-    const fBtn = u.blocked ? "" : fs === "friends" ? `<button class="btn btn-ghost" id="uFriend">✓ В друзьях</button>`
-      : fs === "requested" ? `<button class="btn btn-ghost" id="uFriend">⏳ Заявка отправлена</button>`
-      : fs === "incoming" ? `<button class="btn btn-main" id="uFriend">✓ Принять заявку</button>`
-      : `<button class="btn btn-main" id="uFriend">➕ Добавить в друзья</button>`;
-    $("uSub").textContent = fs === "friends" ? "ваш друг" : "";
-    $("uBody").innerHTML = `<div class="up"><span class="ava-w big">${ava(u)}${isOnline(u) ? '<i class="on-dot"></i>' : ""}</span><b translate="no">@${esc(u.nickname || u.name)}${vBadge(u)}</b>${u.verified ? '<div class="vlabel">✓ Почта подтверждена</div>' : ""}${seenText(u) ? `<div class="seen${isOnline(u) ? " on" : ""}">${seenText(u)}</div>` : ""}${u.bio ? `<div class="ph-bio">${esc(u.bio)}</div>` : ""}<div class="d">${u.district ? "📍 " + esc(u.district) + " район · " : ""}в NEAR с ${dfmt(u.created_at || Date.now(), { day: "numeric", month: "long", year: "numeric" })}</div>
-      ${u.instagram ? `<a class="insta" href="https://instagram.com/${esc(u.instagram)}" target="_blank" rel="noopener">📷 @${esc(u.instagram)}</a>` : ""}</div>
-      <div class="up-stats"><div><b>${u.posts}</b><br><span>публикаций</span></div><div><b>${u.friends}</b><br><span>друзей</span></div></div>
-      <div id="uRep">${repSkeleton()}</div>
-      ${u.blocked ? `<div class="warn-banner red" style="margin:0 0 12px">🚫 Вы заблокировали этого пользователя<div class="wb-acts"><button id="uUnblock">Разблокировать</button></div></div>` : `<div class="up-acts">${fBtn}<button class="btn btn-ghost" id="uMsg">⭐ Отзывы</button><button class="iconbtn" id="uMore">⋯</button></div>`}
-      ${fs === "incoming" && !u.blocked ? `<button class="more" id="uDecline">Отклонить заявку</button>` : ""}
-      ${user && user.is_mod && user.id !== u.id ? `<button class="more" id="uBan">🛡 Открыть в NEAR Shield</button>` : ""}
+    const nm = u.nickname || u.name || "участник";
+    $("uSub").textContent = u.district ? u.district + " район" : "";
+    $("uBody").innerHTML = `<div class="up"><span class="ava-w big">${ava({ name: nm, avatar_url: u.avatar_url })}</span><b translate="no">@${esc(nm)}${vBadge(u)}</b>${u.verified ? '<div class="vlabel">✓ Почта подтверждена</div>' : ""}
+      ${u.bio ? `<div class="ph-bio">${esc(u.bio)}</div>` : ""}
+      ${(u.interests || []).length ? `<div class="int-view">${u.interests.map((k) => `<span>${esc((N.INTERESTS.find((x) => x[0] === k) || [k, k])[1])}</span>`).join("")}</div>` : ""}
+      ${u.instagram ? `<a class="insta" href="https://instagram.com/${esc(u.instagram)}" target="_blank" rel="noopener nofollow">Instagram @${esc(u.instagram)}</a>` : ""}</div>
+      <div class="up-stats"><div><b>${u.likes}</b><br><span>${plural(u.likes, "лайк", "лайка", "лайков")}</span></div><div><b>${u.posts}</b><br><span>${plural(u.posts, "пост", "поста", "постов")}</span></div><div><b>${u.meetings}</b><br><span>${plural(u.meetings, "встреча", "встречи", "встреч")}</span></div></div>
+      ${ratingHtml(u.rating)}
+      ${u.blocked ? `<div class="warn-banner red" style="margin:0 0 12px">Вы заблокировали этого пользователя<div class="wb-acts"><button id="uUnblock">Разблокировать</button></div></div>` : ""}
+      <button class="more" id="uMore">Пожаловаться или заблокировать</button>
+      ${user && user.is_admin && user.id !== u.id ? `<button class="more" id="uBan" style="color:#ff6b7d">Модерация пользователя</button>` : ""}
       <div class="lbl">Публикации</div><div id="uPosts"><div class="spin"></div></div>`;
     const reload = () => openUser(u.id);
-    if ($("uBan")) $("uBan").onclick = async () => { await ShieldAdmin.open(); ShieldAdmin.card(u.id); };
-    loadRep($("uRep"), u.id, false);
+    if ($("uBan")) $("uBan").onclick = () => go("sv-mod");
     if ($("uUnblock")) $("uUnblock").onclick = async () => { try { await api.unblock(u.id); toast("Разблокирован(а)"); wide = null; feedDirty = true; reload(); } catch (e) { toast(e.message); } };
-    if ($("uFriend")) $("uFriend").onclick = async () => {
-      if (!requireAuth("Войдите, чтобы добавлять друзей")) return;
-      try {
-        if (fs === "none") { await api.sendFriendRequest(u.id); toast("👋 Заявка отправлена"); }
-        else if (fs === "incoming") { await api.acceptFriend(u.id); toast("🤝 Теперь вы друзья"); }
-        else if (fs === "requested") { if (!(await confirmSheet("Отменить заявку?", "Заявка в друзья будет удалена.", "Отменить заявку"))) return; await api.removeFriend(u.id); toast("Заявка отменена"); }
-        else if (fs === "friends") { if (!(await confirmSheet("Удалить из друзей?", u.name + " исчезнет из списка друзей. Переписка сохранится.", "Удалить", true))) return; await api.removeFriend(u.id); toast("Удален(а) из друзей"); }
-        reload(); refreshChatBadge();
-      } catch (e) { toast(e.message); }
-    };
-    if ($("uDecline")) $("uDecline").onclick = async () => { try { await api.removeFriend(u.id); toast("Заявка отклонена"); reload(); refreshChatBadge(); } catch (e) { toast(e.message); } };
-    if ($("uMsg")) $("uMsg").onclick = () => openReviews(u.id, "@" + (u.nickname || u.name));
-    if ($("uMore")) $("uMore").onclick = () => {
-      openSheet(u.name, `<button class="opt-row" id="umRep">⚑ Пожаловаться на пользователя<span>›</span></button><button class="opt-row" id="umBlock" style="color:#ff8a95">🚫 Заблокировать<span></span></button>`);
+    $("uMore").onclick = () => {
+      openSheet("@" + nm, `<div class="sheet-col"><button class="btn btn-ghost" id="umRep">Пожаловаться на пользователя</button>${u.blocked ? "" : '<button class="btn btn-ghost red" id="umBlock">Заблокировать</button>'}</div>`);
       $("umRep").onclick = () => reportSheet({ type: "user", id: u.id, user_id: u.id, label: "пользователя" });
-      $("umBlock").onclick = () => blockUser(u.id, u.name, reload);
+      if ($("umBlock")) $("umBlock").onclick = () => blockUser(u.id, "@" + nm, reload);
     };
     api.userPosts(u.id).then((list) => { remember(list); if ($("uPosts")) $("uPosts").innerHTML = list.length ? list.map(rowPost).join("") : '<div class="empty">Публикаций пока нет</div>'; }).catch(() => {});
   }

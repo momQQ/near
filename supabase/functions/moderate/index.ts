@@ -9,9 +9,8 @@
 //     возвращенная — обратно; удаленная — файлы стираются.
 //  3) {kind: "cleanup"} от базы — удаление черновиков старше суток и переписок удаленных
 //     аккаунтов старше 30 дней вместе с файлами.
-//  4) {kind: "media_check", id} от базы — проверка нового фото в приватном staging: тип по сигнатуре,
-//     размер, удаление EXIF/GPS, ИИ-проверка. ИИ недоступен — "на проверке" (закрытая очередь), не публикация.
-//  5) {kind: "media_publish", id} — решение модератора: копия из staging в публичный бакет.
+//  4) {kind: "media_check", id} от базы — проверка нового файла: тип по сигнатуре, размер,
+//     удаление метаданных (GPS) из видео; неподходящий файл удаляется, автор получает уведомление.
 //
 //  Секреты: OPENAI_API_KEY (для ИИ). SUPABASE_URL, SUPABASE_ANON_KEY и
 //  SUPABASE_SERVICE_ROLE_KEY Supabase добавляет сам.
@@ -52,9 +51,13 @@ async function quarantine(postId: string, status: string) {
     const base = m.path.replace(/\.[a-z0-9]+$/i, "");
     const files = [m.path, base + "-t.jpg", base + "-p.jpg"];
     if (status === "deleted") {
-      for (const b of ["post-media", "post-quarantine"]) await admin.storage.from(b).remove(files);
+      // v14: ошибка хранилища учитывается — строку публикации тогда не удаляем (повтор при следующей уборке)
+      // v14.2: + приватный бакет post-private и превью WebP
+      const all = [...files, base + "-t.webp"];
+      for (const b of ["post-media", "post-quarantine", "post-private"]) { const { error } = await admin.storage.from(b).remove(all); if (error && !/not.?found/i.test(error.message)) failed++; }
       continue;
     }
+    if (m.bucket === "post-private") continue; // v14.2: доступ к приватным файлам закрывает база (storage_media_visible)
     const to = status === "hidden" ? "post-quarantine" : "post-media";
     const from = to === "post-media" ? "post-quarantine" : "post-media";
     if (m.bucket === to) continue;
@@ -72,15 +75,17 @@ async function quarantine(postId: string, status: string) {
 }
 
 // ---------- уборка черновиков старше суток ----------
+// v14: строка удаляется, только если файлы убраны; иначе остается до следующей уборки (повтор), ссылки не теряются
 async function cleanup() {
   const { data: drafts } = await admin.from("posts").select("id").eq("status", "draft").lt("created_at", new Date(Date.now() - 86400e3).toISOString()).limit(200);
-  let removed = 0;
+  let removed = 0, retry = 0;
   for (const d of drafts ?? []) {
-    await quarantine(d.id, "deleted");
+    const r = await quarantine(d.id, "deleted").catch(() => ({ failed: 1 }));
+    if (r && r.failed) { retry++; continue; }
     const { error } = await admin.from("posts").delete().eq("id", d.id);
-    if (!error) removed++;
+    if (!error) removed++; else retry++;
   }
-  return { removed };
+  return { removed, retry };
 }
 
 // ---------- MEDIA-01: проверка каждого файла на сервере ----------
@@ -115,124 +120,73 @@ export function stripMeta(buf: Uint8Array): number {
   walk(0, buf.length);
   return hits;
 }
-// ---------- MEDIA: приватный staging → проверка → публикация ----------
-// Фото: тип по сигнатуре, размер, удаление EXIF/GPS (JPEG, PNG, WebP), ИИ-проверка по короткой подписанной ссылке.
-// Видео обрабатывает изолированный FFmpeg worker (tools/media-worker), сюда приходит только публикация.
-const STAGING = "post-staging", PUBLIC = "post-media";
-function stripImage(buf: Uint8Array, kind: string): Uint8Array {
-  if (kind === "image/jpeg") {
-    // оставляем только сегменты изображения: APP1..APP15 (EXIF, XMP, GPS) и комментарии удаляются
-    const out: number[] = [0xff, 0xd8]; let o = 2;
-    while (o + 4 <= buf.length && buf[o] === 0xff) {
-      const mk = buf[o + 1];
-      if (mk === 0xda) { for (let i = o; i < buf.length; i++) out.push(buf[i]); return new Uint8Array(out); }
-      const len = (buf[o + 2] << 8) | buf[o + 3];
-      const drop = (mk >= 0xe1 && mk <= 0xef) || mk === 0xfe;
-      if (!drop) for (let i = o; i < o + 2 + len; i++) out.push(buf[i]);
-      o += 2 + len;
-    }
-    return buf;
-  }
-  if (kind === "image/png") {
-    const out: number[] = [...buf.slice(0, 8)]; let o = 8;
-    while (o + 12 <= buf.length) {
-      const len = new DataView(buf.buffer, buf.byteOffset + o).getUint32(0);
-      const type = String.fromCharCode(...buf.slice(o + 4, o + 8));
-      if (!["tEXt", "zTXt", "iTXt", "eXIf", "tIME"].includes(type)) for (let i = o; i < o + 12 + len; i++) out.push(buf[i]);
-      o += 12 + len;
-    }
-    return new Uint8Array(out);
-  }
-  if (kind === "image/webp") {
-    const out: number[] = [...buf.slice(0, 12)]; let o = 12;
-    while (o + 8 <= buf.length) {
-      const type = String.fromCharCode(...buf.slice(o, o + 4)); const len = new DataView(buf.buffer, buf.byteOffset + o + 4).getUint32(0, true);
-      const end = o + 8 + len + (len % 2);
-      if (!["EXIF", "XMP "].includes(type)) for (let i = o; i < end; i++) out.push(buf[i]);
-      o = end;
-    }
-    const v = new DataView(new Uint8Array(out).buffer); v.setUint32(4, out.length - 8, true);
-    return new Uint8Array(v.buffer);
-  }
-  return buf;
-}
-const jobDone = (job: string, state: string, result: Record<string, unknown>) => admin.rpc("media_job_done", { p_job: job, p_state: state, p_result: result });
-
-async function publish(m: { id: string; object_key: string; cover_key?: string | null; job_id: string }, by = "server") {
-  const out: Record<string, unknown> = { bucket: PUBLIC, by };
-  for (const [k, field] of [[m.object_key, "url"], [m.cover_key, "poster_url"]] as const) {
-    if (!k) continue;
-    const { data: blob, error } = await admin.storage.from(STAGING).download(k);
-    if (error || !blob) return { status: "missing" };
-    const { error: ue } = await admin.storage.from(PUBLIC).upload(k, new Uint8Array(await blob.arrayBuffer()), { contentType: blob.type || undefined, upsert: true });
-    if (ue) return { status: "error" };
-    out[field] = admin.storage.from(PUBLIC).getPublicUrl(k).data.publicUrl;
-  }
-  out.thumb_url = out.poster_url ?? out.url;
-  await jobDone(m.job_id, "approved", out);
-  await admin.storage.from(STAGING).remove([m.object_key, m.cover_key].filter(Boolean) as string[]);
-  return { status: "approved" };
-}
-
-async function aiImage(url: string): Promise<string[] | null> {
-  const key = Deno.env.get("OPENAI_API_KEY");
-  if (!key) return null;
-  const r = await fetch("https://api.openai.com/v1/moderations", {
-    method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
-    body: JSON.stringify({ model: "omni-moderation-latest", input: [{ type: "image_url", image_url: { url } }] }), signal: AbortSignal.timeout(15000),
-  }).catch(() => null);
-  if (!r || !r.ok) return null;
-  const out = await r.json();
-  const cats = out.results?.[0]?.categories ?? {};
-  return BLOCK.filter((k) => cats[k]);
-}
-
+const hasGps = (buf: Uint8Array) => { const t = new TextDecoder("latin1").decode(buf); return /\u00a9xyz|[+-]\d{2}\.\d{3,}[+-]\d{3}\.\d{3,}/.test(t); };
 async function mediaCheck(id: string) {
-  const { data: m } = await admin.from("post_media").select("id,post_id,user_id,object_key,type,state,job_id").eq("id", id).maybeSingle();
-  if (!m || !m.object_key || m.state !== "processing" || m.type !== "image") return { status: "skip" };
-  const { data: blob, error } = await admin.storage.from(STAGING).download(m.object_key);
-  if (error || !blob) { await jobDone(m.job_id, "retry", { error: "file missing" }); return { status: "missing" }; }
-  let buf = new Uint8Array(await blob.arrayBuffer());
-  const kind = sniff(buf);
-  const reject = async (why: string) => { await jobDone(m.job_id, "rejected", { error: why }); return { status: "rejected", why }; };
+  const { data: m } = await admin.from("post_media").select("id,post_id,user_id,path,type,bucket,checked_at").eq("id", id).maybeSingle();
+  if (!m || !m.path || m.checked_at) return { status: "skip" };
+  const bucket = m.bucket || "post-media";
+  const { data: blob, error } = await admin.storage.from(bucket).download(m.path);
+  if (error || !blob) return { status: "missing" };
+  const buf = new Uint8Array(await blob.arrayBuffer());
+  const kind = sniff(buf), want = m.type === "video" ? "video" : "image";
+  const reject = async (why: string) => {
+    const base = m.path.replace(/\.[a-z0-9]+$/i, "");
+    await admin.storage.from(bucket).remove([m.path, base + "-t.jpg", base + "-p.jpg"]);
+    await admin.from("post_media").delete().eq("id", m.id);
+    await admin.from("notifications").insert({ user_id: m.user_id, type: "post_hidden", post_id: m.post_id, text: "Файл в публикации отклонен: " + why });
+    return { status: "rejected", why };
+  };
   if (buf.length > MAX_BYTES) return reject("больше 20 МБ");
-  if (!kind || !["image/jpeg", "image/png", "image/webp"].includes(kind)) return reject("неподдерживаемый формат");
-  const clean = stripImage(buf, kind);
-  if (clean.length !== buf.length) {
-    buf = clean;
-    const { error: ue } = await admin.storage.from(STAGING).upload(m.object_key, buf, { contentType: kind, upsert: true });
-    if (ue) { await jobDone(m.job_id, "retry", { error: "reupload" }); return { status: "error" }; }
+  if (!kind || !kind.startsWith(want)) return reject("неподдерживаемый формат");
+  let stripped = 0;
+  if (kind === "video/mp4") {
+    stripped = stripMeta(buf);
+    if (stripped) {
+      const { error: ue } = await admin.storage.from(bucket).upload(m.path, buf, { contentType: "video/mp4", upsert: true });
+      if (ue) return { status: "error", why: "reupload" };
+    }
+    if (hasGps(buf)) return reject("в видео остались данные о месте съемки");
   }
-  const { data: sig } = await admin.storage.from(STAGING).createSignedUrl(m.object_key, 300);
-  const hits = sig?.signedUrl ? await aiImage(sig.signedUrl) : null;
-  if (hits === null) {
-    // обязательная проверка недоступна — не публикуем, закрытая очередь модератора
-    await jobDone(m.job_id, "pending_review", { reason: "ai_unavailable", size: buf.length });
-    return { status: "pending_review" };
-  }
-  if (hits.length) {
-    await jobDone(m.job_id, "pending_review", { reason: hits.some((h) => h.startsWith("sexual")) ? "intimate" : "ai_flag", error: hits.join(", ") });
-    return { status: "pending_review", hits };
-  }
-  await admin.from("post_media").update({ size_bytes: buf.length }).eq("id", m.id);
-  return publish(m);
+  await admin.from("post_media").update({ checked_at: new Date().toISOString() }).eq("id", m.id);
+  return { status: "ok", kind, stripped };
 }
 
 // ---------- PRIV-01: переписки удаленных аккаунтов старше 30 дней ----------
+// v14: файлы читаются постранично; при любой ошибке хранилища переписка НЕ удаляется (ссылки на файлы остаются),
+// задача повторяется при следующей уборке
+async function listAll(bucket: string, dir: string): Promise<string[] | null> {
+  const out: string[] = [];
+  for (let offset = 0; offset < 100000; offset += 1000) {
+    const { data, error } = await admin.storage.from(bucket).list(dir, { limit: 1000, offset });
+    if (error) return null;
+    out.push(...(data ?? []).map((f: { name: string }) => `${dir}/${f.name}`));
+    if (!data || data.length < 1000) break;
+  }
+  return out;
+}
 async function cleanupOrphans() {
   const { data: convs } = await admin.from("conversations").select("id,user_a,user_b").lt("orphaned_at", new Date(Date.now() - 30 * 86400e3).toISOString()).limit(200);
-  let removed = 0;
+  let removed = 0, retry = 0;
   for (const c of convs ?? []) {
+    let ok = true;
     for (const u of [c.user_a, c.user_b].filter(Boolean)) {
-      const { data: files } = await admin.storage.from("chat-media").list(`${u}/${c.id}`, { limit: 1000 });
-      const paths = (files ?? []).map((f: { name: string }) => `${u}/${c.id}/${f.name}`);
-      if (paths.length) { const { error } = await admin.storage.from("chat-media").remove(paths); if (error) continue; }
+      const paths = await listAll("chat-media", `${u}/${c.id}`);
+      if (paths === null) { ok = false; break; }
+      for (let i = 0; i < paths.length && ok; i += 100) {
+        const { error } = await admin.storage.from("chat-media").remove(paths.slice(i, i + 100));
+        if (error) ok = false;
+      }
+      if (!ok) break;
     }
+    if (!ok) { retry++; console.warn("orphan cleanup retry", c.id); continue; }
     const { error } = await admin.from("conversations").delete().eq("id", c.id);
-    if (!error) removed++;
+    if (!error) removed++; else retry++;
   }
-  return { removed };
+  return { removed, retry };
 }
+
+// для автотеста уборки (supabase/tests/functions/cleanup_test.mts)
+(globalThis as Record<string, unknown>).__near_cleanupOrphans = cleanupOrphans;
 
 // ---------- очередь модератора ----------
 async function queue(targetType: string, targetId: string, owner: string | null, reason: string, details: string) {
@@ -246,14 +200,17 @@ Deno.serve(async (req) => {
   const body = await req.json().catch(() => ({}));
   try {
     // ---- вызовы от базы ----
-    if (body.kind === "quarantine" || body.kind === "cleanup" || body.kind === "media_check" || body.kind === "media_publish") {
+    if (body.kind === "quarantine" || body.kind === "cleanup" || body.kind === "media_check" || body.kind === "media_delete") {
       if (req.headers.get("x-near-secret") !== (await dbSecret())) return json({ error: "forbidden" }, 403);
       if (body.kind === "cleanup") return json({ ...(await cleanup()), ...(await cleanupOrphans()) });
-      if (body.kind === "media_publish") {
-        // решение модератора: файл из staging копируется в публичный бакет только сейчас
-        const { data: m } = await admin.from("post_media").select("id,object_key,cover_key,job_id,state").eq("id", body.id).maybeSingle();
-        if (!m || m.state !== "pending_review") return json({ status: "skip" });
-        return json(await publish(m, "moderator"));
+      // v14.2: модератор отклонил файл — файлы удаляются, строка остается со статусом rejected (для апелляции)
+      if (body.kind === "media_delete") {
+        if (typeof body.id !== "string") return json({ error: "bad request" }, 400);
+        const { data: m } = await admin.from("post_media").select("path,bucket,mod_status").eq("id", body.id).maybeSingle();
+        if (!m || m.mod_status !== "rejected" || !m.path) return json({ status: "skip" });
+        const base = m.path.replace(/\.[a-z0-9]+$/i, "");
+        const { error } = await admin.storage.from(m.bucket || "post-private").remove([m.path, base + "-t.jpg", base + "-t.webp", base + "-p.jpg"]);
+        return json({ status: error ? "retry" : "deleted" });
       }
       if (body.kind === "media_check") {
         if (typeof body.id !== "string") return json({ error: "bad request" }, 400);
@@ -291,6 +248,10 @@ Deno.serve(async (req) => {
       let imgUrl: string | null = row.url ?? row.media_url;
       if (table === "messages" && row.media_path) {
         const { data: sig } = await admin.storage.from("chat-media").createSignedUrl(row.media_path, 600);
+        imgUrl = sig?.signedUrl ?? null;
+      }
+      if (table === "post_media" && row.path && (row.bucket === "post-private" || String(imgUrl).startsWith("private:"))) {
+        const { data: sig } = await admin.storage.from(row.bucket || "post-private").createSignedUrl(row.path, 600);
         imgUrl = sig?.signedUrl ?? null;
       }
       if (imgUrl && !imgUrl.startsWith("private:")) input.push({ type: "image_url", image_url: { url: imgUrl } });

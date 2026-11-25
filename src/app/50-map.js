@@ -57,11 +57,29 @@
     });
     return st;
   }
+  // v14.8 (ТЗ 05): фирменный стиль — фиолетовые кварталы, оранжевые магистрали, контрастные подписи; светлый вариант
+  function brandStyle(st, theme) {
+    const L = theme === "light";
+    const C = L ? { res: "#efe7fb", bld: "#e3d6f6", bldLine: "#d2c1ee", major: "#ffb08a", motor: "#FF7848", label: "#2a2338", halo: "#ffffff", place: "#1d1630" }
+                : { res: "#1f1930", bld: "#2a2140", bldLine: "#382c55", major: "#c9643c", motor: "#FF7848", label: "#d9d4ea", halo: "#12121E", place: "#F5F3FA" };
+    st.layers.forEach((l) => {
+      const id = l.id, p = (l.paint = l.paint || {});
+      if (l.type === "fill" && /residential/.test(id)) { p["fill-color"] = C.res; p["fill-opacity"] = 1; }
+      else if (l.type === "fill" && /^building/.test(id)) { p["fill-color"] = C.bld; p["fill-outline-color"] = C.bldLine; }
+      else if (l.type === "line" && !/casing|tunnel|bridge_.*casing/.test(id) && /motorway|trunk/.test(id)) p["line-color"] = C.motor;
+      else if (l.type === "line" && !/casing/.test(id) && /primary|highway_major|secondary/.test(id)) p["line-color"] = C.major;
+      else if (l.type === "symbol" && (l.layout || {})["text-field"]) {
+        p["text-color"] = /^place|city|town|village/.test(id) ? C.place : id === "water_name" ? (L ? "#3b6aa0" : "#7aa3d6") : C.label;
+        p["text-halo-color"] = C.halo; p["text-halo-width"] = 1.4;
+      }
+    });
+    return st;
+  }
   const styleCache = {};
   function mapStyle(theme) {
     const name = theme === "light" ? "liberty" : "dark";
     if (!styleCache[name]) styleCache[name] = fetch(OFM + name).then((r) => { if (!r.ok) throw new Error("Стиль карты недоступен"); return r.json(); })
-      .then((st) => (name === "dark" ? tuneDark(ruLabels(st)) : ruLabels(st))).catch((e) => { delete styleCache[name]; throw e; });
+      .then((st) => brandStyle(name === "dark" ? tuneDark(ruLabels(st)) : ruLabels(st), theme)).catch((e) => { delete styleCache[name]; throw e; });
     return styleCache[name].then((s) => JSON.parse(JSON.stringify(s)));
   }
   function circlePoly(lat, lng, r, n = 72) {
@@ -101,7 +119,7 @@
     try { await loadML(); style = await mapStyle(mapTheme); }
     catch (e) { $("mapMsg").innerHTML = `<div>🗺️<br>Карта не загрузилась. Проверьте интернет.<br><button class="btn btn-main mt12" id="mapRetry">Повторить</button></div>`; $("mapRetry").onclick = initMap; return; }
     map = new maplibregl.Map({ container: "map", style, bounds: radBounds(), fitBoundsOptions: { padding: MAP_PAD() }, minZoom: 9, maxZoom: 18.5,
-      attributionControl: { compact: true }, dragRotate: false, touchPitch: false, pitchWithRotate: false, fadeDuration: 150 });
+      attributionControl: { compact: false }, dragRotate: false, touchPitch: false, pitchWithRotate: false, fadeDuration: 150 });
     map.touchZoomRotate.disableRotation();
     map.on("style.load", addOverlays);
     map.on("load", () => { $("mapMsg").classList.add("hidden"); });
@@ -164,7 +182,7 @@
     map.getSource("posts").setData({ type: "FeatureCollection", features: mapPosts.map((p) => {
       const c = CATS[p.category] || CATS.talk;
       return { type: "Feature", geometry: { type: "Point", coordinates: [p.lng, p.lat] },
-        properties: { id: p.id, color: c.c, emoji: c.e, sos: p.is_sos ? 1 : 0, fresh: Date.now() - new Date(p.created_at) < 3600e3 ? 1 : 0, ended: postEnded(p) ? 1 : 0 } };
+        properties: { id: p.id, color: c.c, cat: p.category, sos: p.is_sos ? 1 : 0, fresh: Date.now() - new Date(p.created_at) < 3600e3 ? 1 : 0, ended: postEnded(p) ? 1 : 0 } };
     }) });
   }
   function syncMarkers() {
@@ -181,8 +199,8 @@
         } else {
           // завершенное событие — другая форма (квадрат) и подпись, а не только цвет
           el.className = "ml-pin" + (pr.ended ? " ended" : pr.sos ? " sos" : pr.fresh ? " fresh" : ""); el.style.setProperty("--c", pr.color);
-          el.innerHTML = `<span>${pr.emoji}</span>${pr.ended ? "<em>завершено</em>" : ""}`; el.setAttribute("aria-label", pr.ended ? "Завершенное событие" : pr.sos ? "SOS" : "Публикация");
-          el.onclick = (ev) => { ev.stopPropagation(); const p = cache.get(pr.id); if (p) selectPost(p); };
+          el.innerHTML = `<span>${catIc(pr.cat, 16)}</span>${pr.ended ? "<em>завершено</em>" : ""}`; el.setAttribute("aria-label", pr.ended ? "Завершенное событие" : pr.sos ? "SOS" : "Публикация");
+          el.onclick = (ev) => { ev.stopPropagation(); const p = cache.get(pr.id) || mapPosts.find((x) => x.id === pr.id); if (p) selectPost(p); };
         }
         mk = new maplibregl.Marker({ element: el, anchor: cl ? "center" : "bottom" }).setLngLat(f.geometry.coordinates).addTo(map);
         htmlMarkers.set(key, mk);
@@ -196,14 +214,14 @@
   const MF = { who: "all", period: null };
   const postEnded = (p) => !!(p.event && new Date(p.event.starts_at).getTime() + 3 * 3600e3 < Date.now());
   const isHot = (p) => p.is_sos || (p.category === "incident" && Date.now() - new Date(p.created_at) < 3 * 3600e3) || (p.likes || 0) + (p.comments || 0) * 2 >= 4;
-  function loadMapFilters() { const m = prefs.map || {}; MF.who = ["all", "friends", "hot"].includes(m.who) ? m.who : "all"; MF.period = ["today", "week"].includes(m.period) ? m.period : null; renderMapFlt(); }
+  function loadMapFilters() { const m = prefs.map || {}; MF.who = ["all", "hot"].includes(m.who) ? m.who : "all"; MF.period = ["today", "week"].includes(m.period) ? m.period : null; renderMapFlt(); }
   function renderMapFlt() {
-    $("mapFlt").innerHTML = [["all", "Все"], ["friends", "Друзья"], ["hot", "🔥 Горячее"]].map(([k, t]) => `<button data-who="${k}" class="${MF.who === k ? "on" : ""}">${t}</button>`).join("")
+    $("mapFlt").innerHTML = [["all", "Все"], ["hot", "Обсуждаемое"]].map(([k, t]) => `<button data-who="${k}" class="${MF.who === k ? "on" : ""}">${t}</button>`).join("")
       + '<span class="sep"></span>' + [[null, "Все время"], ["today", "Сегодня"], ["week", "Неделя"]].map(([k, t]) => `<button data-per="${k || ""}" class="${MF.period === k ? "on" : ""}">${t}</button>`).join("");
   }
   $("mapFlt").onclick = (e) => {
     const w = e.target.closest("[data-who]"), pe = e.target.closest("[data-per]");
-    if (w) { if (w.dataset.who === "friends" && !requireAuth("Войдите, чтобы видеть публикации друзей")) return; MF.who = w.dataset.who; }
+    if (w) { MF.who = w.dataset.who; }
     else if (pe) MF.period = pe.dataset.per || null; else return;
     prefs.map = { who: MF.who, period: MF.period }; savePrefs(); renderMapFlt(); Obs.track("filter_changed", { filter: "map_" + MF.who, period: MF.period || "all" }); loadMapPosts(true);
   };
@@ -231,8 +249,12 @@
     try {
       const ext = { period: MF.period, friends: MF.who === "friends" && !!user, signal: mapCtrl && mapCtrl.signal };
       const args = mapMode === "radius" ? { lat: pos.lat, lng: pos.lng, radius: R, category: catFilter(mapCat), limit: 400, ...ext } : { bounds: b, category: catFilter(mapCat), limit: 400, ...ext };
-      const list = remember(await api.listPosts(args));
+      // v14.2 (ТЗ 57): карта берет легкие точки map_v14 (без текста и файлов); карточка догружается при выборе
+      let list, trunc = false;
+      if (api.mapPoints) { const r = await api.mapPoints(args); list = r.items.map((x) => (x._light && cache.has(x.id) ? cache.get(x.id) : x)); trunc = r.truncated; }
+      else list = remember(await api.listPosts(args));
       if (seq !== reqSeq) return;
+      mapTrunc = trunc;
       loadedArea = { b, cat: mapCat, at: Date.now(), mode: mapMode, r: R, lat: pos.lat };
       mapPosts = list.filter((p) => p.status !== "closed" && (MF.who !== "hot" || isHot(p)));
       setPostsData(); updateCount();
@@ -248,15 +270,22 @@
   };
   function updateCount() {
     const n = inView().length, where = mapMode === "radius" ? `в радиусе ${fmtDist(R)}` : "на экране";
+    if (mapTrunc) { $("mapCount").textContent = `Показаны ${n} ближайших · приблизьте карту, чтобы увидеть все`; return; }
     $("mapCount").textContent = n ? `${n} ${plural(n, "публикация", "публикации", "публикаций")} ${where}` : `${where[0].toUpperCase() + where.slice(1)} пока пусто — опубликуйте первым`;
   }
 
+  let mapTrunc = false;
   function selectPost(p) {
+    if (p._light) {
+      // легкая точка: показываем тип и время сразу, полный текст и фото — после загрузки
+      api.getPost(p.id).then((full) => { if (!full) return; cache.set(full.id, full); const i = mapPosts.findIndex((x) => x.id === full.id); if (i >= 0) mapPosts[i] = full; if (selId === full.id) selectPost(full); }).catch(() => {});
+      p = { ...p, text: p.text || "Загружаем...", author: { name: "" }, media: [] };
+    }
     selId = p.id; syncMarkers();
     const c = CATS[p.category] || CATS.talk, m = p.media && p.media[0], img = m && m.type === "image" && !shieldFor(m, p.user_id);
     $("mapCard").innerHTML = `<div class="mc-grab"></div>
-      <div class="mc-top"><span class="mc-cat" style="--c:${c.c}">${c.e} ${c.n}</span><span class="mc-meta">${fmtDist(D(p))} · ${timeAgo(p.created_at)}</span><button class="x" id="mcX" aria-label="Закрыть">✕</button></div>
-      <div class="mc-body"><div class="th" style="${img ? `background-image:url('${esc(m.url)}')` : `background:${c.c}2b`}">${img ? "" : c.e}</div>
+      <div class="mc-top"><span class="mc-cat" style="--c:${c.c}">${catIc(p.category)} ${c.n}</span><span class="mc-meta">${fmtDist(D(p))} · ${timeAgo(p.created_at)}</span><button class="x" id="mcX" aria-label="Закрыть">✕</button></div>
+      <div class="mc-body"><div class="th" style="${img ? `background-image:url('${esc(m.url)}')` : `background:${c.c}2b;color:${c.c}`}">${img ? "" : catIc(p.category, 22)}</div>
         <div class="tx"><b translate="no">${esc(p.text)}</b><span><i translate="no">${esc(p.author.name)}</i>${p.media.length > 1 ? " · 📷 " + p.media.length : ""}</span></div></div>
       <div class="mc-acts"><button class="btn btn-main" data-post="${p.id}">Открыть</button><a class="btn btn-ghost" href="https://www.google.com/maps/dir/?api=1&destination=${p.lat},${p.lng}" target="_blank" rel="noopener">Маршрут</a></div>`;
     $("mapCard").classList.remove("hidden"); $("v-map").classList.add("carded");
@@ -280,7 +309,7 @@
   $("mapListBtn").onclick = () => { const l = $("mapList"); l.classList.toggle("hidden"); $("mapListBtn").textContent = l.classList.contains("hidden") ? "☰" : "🗺"; if (!l.classList.contains("hidden")) renderMapList(); };
   function rowPost(p) {
     const c = CATS[p.category] || CATS.talk, m = p.media[0];
-    return `<button class="row-post" data-post="${p.id}"><span class="th" style="${m && m.type === "image" ? `background-image:url('${esc(m.url)}')` : `background:${c.c}33`}">${m && m.type === "image" ? "" : c.e}</span><div><b>${esc(p.text)}</b><span>${c.e} ${c.n} · ${fmtDist(D(p))} · ${timeAgo(p.created_at)}${p.status === "closed" ? " · закрыто" : ""}</span></div></button>`;
+    return `<button class="row-post" data-post="${p.id}"><span class="th" style="${m && m.type === "image" ? `background-image:url('${esc(m.url)}')` : `background:${c.c}33`}">${m && m.type === "image" ? "" : c.e}</span><div><b>${esc(p.text || (p.official ? "Официальный источник" : c.n))}</b><span>${c.e} ${c.n} · ${fmtDist(D(p))} · ${timeAgo(p.created_at)}${p.status === "closed" ? " · закрыто" : ""}</span></div></button>`;
   }
   function renderMapList() {
     const list = (mapReady ? inView() : mapPosts).sort((a, b) => D(a) - D(b));
@@ -288,18 +317,58 @@
   }
   $("mapList").onclick = (e) => { const b = e.target.closest("[data-post]"); if (b) openPost(b.dataset.post); };
 
-  /* picker */
-  let pick = null;
+  /* picker — v14.2 / 11: своя верхняя панель, фирменная метка, адрес и район вместо координат */
+  let pick = null, pickGeoT = null, pickInfo = null, pickDot = null;
   async function openPicker(center) {
     go("sv-pick");
+    $("pickSearch").classList.add("hidden"); $("pickQ").value = ""; $("pickRes").innerHTML = "";
     let style;
     try { await loadML(); style = await mapStyle(mapTheme); } catch (e) { toast("Карта не загрузилась. Проверьте интернет."); back(); return; }
     if (!pick) {
-      pick = new maplibregl.Map({ container: "pickMap", style, center: [center.lng, center.lat], zoom: 16, minZoom: 9, dragRotate: false, touchPitch: false, attributionControl: { compact: true } });
+      pick = new maplibregl.Map({ container: "pickMap", style, center: [center.lng, center.lat], zoom: 16, minZoom: 9, dragRotate: false, touchPitch: false, attributionControl: { compact: false } });
       pick.touchZoomRotate.disableRotation();
-      pick.on("move", () => { const c = pick.getCenter(); $("pickHint").textContent = `${c.lat.toFixed(5)}, ${c.lng.toFixed(5)}`; });
+      pick.on("movestart", () => { $("pickPin").classList.add("up"); document.body.classList.add("pick-moving"); $("pickOk").disabled = true; });
+      pick.on("moveend", () => { $("pickPin").classList.remove("up"); document.body.classList.remove("pick-moving"); pickLookup(); });
     } else pick.jumpTo({ center: [center.lng, center.lat], zoom: 16 });
-    setTimeout(() => pick.resize(), 80);
+    // отдельная точка "я здесь" (GPS), не путать с меткой выбора
+    if (pos.real) {
+      if (!pickDot) { const el = document.createElement("div"); el.className = "gps-dot"; pickDot = new maplibregl.Marker({ element: el }).setLngLat([pos.lng, pos.lat]).addTo(pick); }
+      else pickDot.setLngLat([pos.lng, pos.lat]);
+    }
+    setTimeout(() => { pick.resize(); pickLookup(); }, 80);
   }
-  $("pickBack").onclick = back;
-  $("pickOk").onclick = () => { if (pick) { const c = pick.getCenter(); cr.loc = { lat: c.lat, lng: c.lng, how: "map" }; renderLoc(); } back(); };
+  function pickLookup() {
+    if (!pick) return;
+    const c = pick.getCenter(), z = pick.getZoom();
+    $("pickAddr").textContent = "Определяем адрес..."; $("pickSub").textContent = nearestDistrict(c.lat, c.lng) + " район";
+    pickInfo = { lat: c.lat, lng: c.lng, addr: null, district: nearestDistrict(c.lat, c.lng) };
+    clearTimeout(pickGeoT);
+    pickGeoT = setTimeout(async () => {
+      const g = await geoLabel(c.lat, c.lng); if (!pickInfo || pickInfo.lat !== c.lat) return;
+      pickInfo.addr = g.unknown ? null : g.addr; pickInfo.district = g.district;
+      $("pickAddr").textContent = g.unknown ? "Точка на карте · адрес не определен" : g.addr; $("pickSub").textContent = `${g.district} район · точность ~${z >= 17 ? 10 : z >= 15 ? 30 : z >= 13 ? 150 : 500} м`;
+      $("pickOk").disabled = false;
+    }, 400);
+  }
+  $("pickBack").onclick = () => { pickFor = null; back(); };
+  $("pickGps").onclick = async () => { try { const g = await getGeo(true); pick && pick.easeTo({ center: [g.lng, g.lat], zoom: 17, duration: matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 400 }); } catch (e) { toast(e.message); } };
+  $("pickSearchBtn").onclick = () => { $("pickSearch").classList.toggle("hidden"); if (!$("pickSearch").classList.contains("hidden")) $("pickQ").focus(); };
+  let pickQT = null;
+  $("pickQ").oninput = () => {
+    clearTimeout(pickQT); const q = $("pickQ").value.trim();
+    pickQT = setTimeout(async () => {
+      if (q.length < 3) { $("pickRes").innerHTML = ""; return; }
+      let r = []; try { r = await geoSearch(q); } catch (e) {}
+      $("pickRes").innerHTML = r.length ? r.map((x, i) => `<button type="button" data-pr="${i}">${esc(x.name)}</button>`).join("") : `<div class="dim">${api.mode === "local" ? "Поиск адреса недоступен в демо" : "Ничего не нашлось. Передвиньте карту вручную"}</div>`;
+      $("pickRes").onclick = (e) => { const b = e.target.closest("[data-pr]"); if (!b) return; const x = r[+b.dataset.pr]; $("pickSearch").classList.add("hidden"); pick.jumpTo({ center: [x.lng, x.lat], zoom: 17 }); };
+    }, 450);
+  };
+  // "Готово" возвращает в исходную форму без потери текста и файлов; "назад" отменяет выбор
+  let pickFor = null;
+  $("pickOk").onclick = () => {
+    if (pick) {
+      const c = pick.getCenter(), L = { lat: c.lat, lng: c.lng, how: "map", addr: pickInfo && pickInfo.addr, district: pickInfo && pickInfo.district };
+      if (pickFor === "meet") { MC.loc = L; renderMeetLoc(); } else { cr.loc = L; renderLoc(); saveDraft(); }
+    }
+    pickFor = null; back();
+  };

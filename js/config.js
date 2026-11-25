@@ -29,12 +29,15 @@ window.NEAR_CONFIG = {
   // Ограничения загрузки файлов
   MAX_FILES: 5,
   MAX_IMAGE_MB: 15,   // исходное фото (перед сжатием)
-  MAX_VIDEO_MB: 20,    // v14.9: исходник до 20 МБ; итоговое видео до 30 с (длинное обрезается в редакторе)
-  MAX_VIDEO_SEC: 600,  // исходник до 10 минут в пределах 20 МБ: обрезка до 30 с в редакторе
+  MAX_VIDEO_MB: 20,    // v14.2: видео до 20 МБ и до 30 секунд
+  MAX_VIDEO_SEC: 30,
   SUPPORT_EMAIL: "",
 
   // Push-уведомления: публичный VAPID-ключ (секретная пара — только в Supabase → Edge Functions → Secrets)
   VAPID_PUBLIC_KEY: "BGLgiT_VBCkSPbZ7U8H_88nKuuuhQnwZ83OJ6Mh6JB5Xqmu6XwbE1xsam2-iNw6w3oTqiizxw0aJkKTYM3IKkhc",
+
+  // Вход через Google: true — только после включения провайдера Google в Supabase (SETUP.md, шаг 11)
+  GOOGLE_AUTH: false,
 
   // Защита от ботов: Site Key из Cloudflare Turnstile (пусто — капча выключена)
   TURNSTILE_SITE_KEY: "",

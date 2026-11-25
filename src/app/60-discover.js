@@ -48,14 +48,19 @@
   $("radarBox").onclick = (e) => { const b = e.target.closest("[data-post]"); if (b) openPost(b.dataset.post); };
 
   // события по дням (идея из Posse): колонка даты слева, карточки справа; "Все / Сегодня / Неделя"
-  let evPeriod = "all";
+  let evPeriod = "all", evKind = null;
+  // v14: быстрые входы ленты — "Встречи" и "События" открывают один календарь с фильтром по типу
+  qa("[data-quick]").forEach((b) => (b.onclick = () => { evKind = b.dataset.quick; go("sv-events"); }));
+  document.addEventListener("click", (e) => { const o = e.target.closest('[data-open="sv-events"]'); if (o && !o.closest("#quick")) evKind = null; }, true);
   qa("#evSeg [data-ev]").forEach((b) => (b.onclick = () => { evPeriod = b.dataset.ev; qa("#evSeg button").forEach((x) => x.classList.toggle("on", x === b)); renderEvents(); }));
   const dayKey = (d) => d.toLocaleDateString("en-CA", { timeZone: "Asia/Almaty" });
   function renderEvents() {
     withWide("eventsList", (list) => {
       const now = new Date(), today = dayKey(now), wk = Date.now() + 7 * 86400e3;
-      const ev = upcoming(list).filter((p) => { const t = new Date(p.event.starts_at); return evPeriod === "all" || (evPeriod === "today" ? dayKey(t) === today : t.getTime() < wk); });
-      if (!ev.length) { $("eventsList").innerHTML = `<div class="empty"><b>${evPeriod === "today" ? "Сегодня событий нет" : "Ближайших событий нет"}</b>Создайте первое: футбол, прогулку или встречу соседей</div>`; return; }
+      $("evTitle").textContent = evKind === "meetup" ? "Встречи" : evKind === "event" ? "События" : "События и встречи";
+      const cb = document.querySelector("#sv-events [data-create]"); if (cb) { cb.dataset.create = evKind === "meetup" ? "meetup" : "event"; cb.textContent = evKind === "meetup" ? "+ Создать встречу" : "+ Создать событие"; }
+      const ev = upcoming(list).filter((p) => !evKind || p.category === evKind).filter((p) => { const t = new Date(p.event.starts_at); return evPeriod === "all" || (evPeriod === "today" ? dayKey(t) === today : t.getTime() < wk); });
+      if (!ev.length) { $("eventsList").innerHTML = `<div class="empty"><b>${evKind === "meetup" ? (evPeriod === "today" ? "Сегодня встреч нет" : "Ближайших встреч нет") : evPeriod === "today" ? "Сегодня событий нет" : "Ближайших событий нет"}</b>${evKind === "meetup" ? "Расширьте радиус или создайте встречу: футбол, настолки, прогулка" : "Создайте первое: концерт, ярмарку или встречу соседей"}</div>`; return; }
       const groups = []; ev.forEach((p) => { const k = dayKey(new Date(p.event.starts_at)); const g = groups.find((x) => x.k === k); if (g) g.items.push(p); else groups.push({ k, items: [p] }); });
       const tomorrow = dayKey(new Date(Date.now() + 86400e3));
       $("eventsList").innerHTML = groups.map((g) => {
@@ -105,19 +110,19 @@
     const c = e.target.closest("[data-post]"); if (c) openPost(c.dataset.post);
   };
 
-  let lfMode = "lost";
+  let lfMode = "help";
   function renderLost() {
     withWide("lfGrid", (list) => {
       const ls = list.filter((p) => p.category === lfMode && p.status !== "closed").sort((a, b) => b.created_at.localeCompare(a.created_at));
       $("lfGrid").innerHTML = ls.length ? ls.map((p) => {
         const c = CATS[p.category], m = p.media[0];
         return `<button class="lf" data-post="${p.id}"><div class="im" style="${m && m.type === "image" ? `background:url('${esc(m.url)}') center/cover` : `background:linear-gradient(135deg,${c.c}88,#1f1f2e)`}">${m && m.type === "image" ? "" : c.e}</div><div class="t"><b style="display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">${esc(p.text)}</b><span>${fmtDist(D(p))} · ${timeAgo(p.created_at)}</span></div></button>`;
-      }).join("") : `<div class="empty" style="grid-column:span 2"><b>Пока пусто</b>${lfMode === "lost" ? "Никто ничего не потерял рядом 🙂" : "Находок рядом пока нет"}</div>`;
+      }).join("") : `<div class="empty" style="grid-column:span 2"><b>Пока пусто</b>${lfMode === "lost" ? "Никто ничего не потерял рядом 🙂" : lfMode === "help" ? "Просьб о помощи рядом пока нет" : "Находок рядом пока нет"}</div>`;
     });
   }
-  qa("#lfSeg [data-lf]").forEach((b) => (b.onclick = () => { qa("#lfSeg button").forEach((x) => x.classList.toggle("on", x === b)); lfMode = b.dataset.lf; renderLost(); }));
+  qa("#lfSeg [data-lf]").forEach((b) => (b.onclick = () => { qa("#lfSeg button").forEach((x) => x.classList.toggle("on", x === b)); lfMode = b.dataset.lf; $("lfAdd").textContent = lfMode === "help" ? "+ Попросить или предложить помощь" : "+ Я потерял / нашел"; renderLost(); }));
   $("lfGrid").onclick = (e) => { const b = e.target.closest("[data-post]"); if (b) openPost(b.dataset.post); };
-  $("lfAdd").onclick = () => { if (requireAuth("Войдите, чтобы публиковать")) openCreate({ type: lfMode }); };
+  $("lfAdd").onclick = () => { if (requireAuth("Войдите, чтобы публиковать")) openCreate({ type: lfMode, group: "help" }); };
   $("parkBtn").onclick = () => toast("🅿️ Парковки появятся на следующих этапах");
 
   /* =====================================================

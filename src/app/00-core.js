@@ -1,5 +1,5 @@
   const CFG = window.NEAR_CONFIG || {};
-  const APP_VERSION = "14.9";
+  const APP_VERSION = "14.8";
   const N = window.NEAR;
   const CATS = N.CATS, CITY = N.CITY;
   let api = null, user = null;
@@ -9,10 +9,7 @@
   const qa = (sel, root = document) => [...root.querySelectorAll(sel)];
   const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   let toastT = null;
-  function toast(m) {
-    // отозванная сессия или бан из любого ответа сервера — показываем экран Shield, а не короткое сообщение
-    try { if (/выполнен вход на другом устройстве|Аккаунт заблокирован|Подтвердите вход с этого устройства/.test(m) && Shield.handle({ message: m })) return; } catch (e) {}
-    const t = $("toast"); t.textContent = m; t.classList.add("on"); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove("on"), 2600); }
+  function toast(m) { const t = $("toast"); t.textContent = m; t.classList.add("on"); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove("on"), 2600); }
   function timeAgo(iso) {
     const s = (Date.now() - new Date(iso).getTime()) / 1000;
     if (s < 60) return "только что";
@@ -30,6 +27,62 @@
     return a.avatar_url
       ? `<span class="ava"><img src="${esc(a.avatar_url)}" alt=""></span>`
       : `<span class="ava" style="background:${color}22;color:${color}">${esc(initial(a.name))}</span>`;
+  }
+  /* ---------- v14.8 (ТЗ 02): SVG-иконки вместо emoji в интерфейсе ---------- */
+  const IC_PATHS = {
+    feed: '<rect x="4" y="4" width="16" height="7" rx="2"/><rect x="4" y="13" width="16" height="7" rx="2"/>',
+    map: '<path d="M9 4 3 6v14l6-2 6 2 6-2V4l-6 2-6-2z"/><path d="M9 4v14M15 6v14"/>',
+    plus: '<path d="M12 5v14M5 12h14"/>',
+    chat: '<path d="M4 5h16v11H9l-5 4V5z"/>',
+    user: '<circle cx="12" cy="8" r="4"/><path d="M4 21c1.5-4 4.5-6 8-6s6.5 2 8 6"/>',
+    talk: '<path d="M4 5h16v11H9l-5 4V5z"/><path d="M8 9h8M8 12h5"/>',
+    incident: '<path d="M12 3 2 20h20L12 3z"/><path d="M12 10v4M12 17v.5"/>',
+    meetup: '<circle cx="8" cy="9" r="3"/><circle cx="16" cy="9" r="3"/><path d="M2 20c1-3 3-5 6-5s5 2 6 5M14 15c3 0 5 2 6 5"/>',
+    event: '<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/>',
+    deal: '<path d="M3 12V4h8l10 10-8 8L3 12z"/><circle cx="7.5" cy="8.5" r="1.5"/>',
+    help: '<path d="M12 21s-8-5-8-11a4.5 4.5 0 0 1 8-3 4.5 4.5 0 0 1 8 3c0 6-8 11-8 11z"/>',
+    lost: '<circle cx="11" cy="11" r="6"/><path d="m20 20-4.5-4.5"/>', found: '<path d="m5 12 4 4 10-10"/>', ad: '<path d="M4 9v6h4l7 4V5L8 9H4z"/>',
+    sos: '<circle cx="12" cy="12" r="9"/><path d="M12 7v6M12 16v.5"/>',
+    city: '<path d="M3 21V9l6-3v15M9 21V4l6 3v14M15 21V10l6 2v9"/>', district: '<path d="M12 21s-7-6-7-11a7 7 0 0 1 14 0c0 5-7 11-7 11z"/><circle cx="12" cy="10" r="2.5"/>',
+    topic: '<path d="M4 6h16M4 12h16M4 18h10"/>',
+    games: '<rect x="2" y="7" width="20" height="11" rx="5"/><path d="M7 11v3M5.5 12.5h3M16 12h.5M18 14h.5"/>',
+    cinema: '<rect x="3" y="6" width="18" height="13" rx="2"/><path d="M3 10h18M7 6l2 4M12 6l2 4M17 6l2 4"/>',
+    board: '<rect x="4" y="4" width="16" height="16" rx="3"/><circle cx="9" cy="9" r="1"/><circle cx="15" cy="15" r="1"/><circle cx="15" cy="9" r="1"/><circle cx="9" cy="15" r="1"/>',
+    sport: '<circle cx="12" cy="12" r="9"/><path d="M12 3v18M3 12h18M5.6 5.6c3 3 3 9.8 0 12.8M18.4 5.6c-3 3-3 9.8 0 12.8"/>',
+    cafe: '<path d="M4 9h12v5a5 5 0 0 1-5 5H9a5 5 0 0 1-5-5V9zM16 10h2a2 2 0 0 1 0 4h-2M8 3v3M12 3v3"/>',
+    walk: '<circle cx="13" cy="4" r="2"/><path d="m9 21 2-6 3 3v3M7 12l3-4 4 1 2 4M11 15l-1-4"/>',
+    mountains: '<path d="m2 20 7-12 4 6 3-4 6 10H2z"/>',
+    study: '<path d="M2 8l10-4 10 4-10 4L2 8z"/><path d="M6 10v5c3 2 9 2 12 0v-5"/>',
+    other: '<circle cx="5" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="19" cy="12" r="1.5"/>',
+    clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>', pin: '<path d="M12 21s-7-6-7-11a7 7 0 0 1 14 0c0 5-7 11-7 11z"/><circle cx="12" cy="10" r="2.5"/>',
+    users: '<circle cx="9" cy="8" r="3.5"/><path d="M2 20c1-4 4-6 7-6s6 2 7 6M16 4a3.5 3.5 0 0 1 0 7M18 14c2 1 3.5 3 4 6"/>',
+    star: '<path d="m12 3 2.8 5.8 6.2.9-4.5 4.4 1 6.3L12 17.5 6.5 20.4l1-6.3L3 9.7l6.2-.9L12 3z"/>',
+    gear: '<circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1"/>',
+    shield: '<path d="M12 3 4 6v6c0 5 3.5 8 8 9 4.5-1 8-4 8-9V6l-8-3z"/>', bell: '<path d="M6 16V11a6 6 0 0 1 12 0v5l2 2H4l2-2zM10 20a2 2 0 0 0 4 0"/>',
+    bookmark: '<path d="M6 3h12v18l-6-4-6 4V3z"/>', edit: '<path d="M4 20h4L20 8l-4-4L4 16v4z"/>', lock: '<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>',
+    trash: '<path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/>', drafts: '<path d="M6 3h9l4 4v14H6V3z"/><path d="M15 3v4h4M9 12h6M9 16h4"/>',
+    check: '<path d="m5 12 4 4 10-10"/>', x: '<path d="M6 6l12 12M18 6 6 18"/>', back: '<path d="m15 5-7 7 7 7"/>', search: '<circle cx="11" cy="11" r="6"/><path d="m20 20-4.5-4.5"/>'
+  };
+  const CAT_IC = { incident: "incident", event: "event", deal: "deal", lost: "lost", found: "found", help: "help", meetup: "meetup", ad: "ad", talk: "talk" };
+  const catIc = (k, s = 14) => icon(CAT_IC[k] || "talk", s);
+  const icon = (n, s = 22) => `<svg class="ic" viewBox="0 0 24 24" width="${s}" height="${s}" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${IC_PATHS[n] || IC_PATHS.other}</svg>`;
+  qa("[data-ic]").forEach((el) => (el.innerHTML = icon(el.dataset.ic, +el.dataset.s || 22)));
+  // девять категорий встреч (ТЗ 07.1)
+  const MEET_CATS = {
+    games: { n: "Компьютерные игры", ic: "games", c: "#A54EE7" }, cinema: { n: "Кино", ic: "cinema", c: "#EC398E" }, board: { n: "Настольные игры", ic: "board", c: "#FF7848" },
+    sport: { n: "Спорт", ic: "sport", c: "#2bd47d" }, cafe: { n: "Кафе", ic: "cafe", c: "#ffb020" }, walk: { n: "Прогулки", ic: "walk", c: "#3da5ff" },
+    mountains: { n: "Горы", ic: "mountains", c: "#00b4a6" }, study: { n: "Обучение", ic: "study", c: "#7c8cff" }, other: { n: "Другое", ic: "other", c: "#A29CB3" }
+  };
+  // таймер встречи: один локальный тик; >24 ч — дни и часы, затем ч:м:с, после начала — "Встреча идет"
+  function meetTimerText(m) {
+    if (!m || !m.starts_at) return "";
+    if (m.status === "cancelled") return "Встреча отменена";
+    const now = Date.now(), st = new Date(m.starts_at).getTime(), en = new Date(m.ends_at).getTime();
+    if (m.status === "finished" || now >= en) return "Встреча завершена";
+    if (now >= st) return "Встреча идет";
+    const s = Math.floor((st - now) / 1000), d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), mi = Math.floor((s % 3600) / 60), se = s % 60;
+    const p2 = (x) => String(x).padStart(2, "0");
+    return d >= 1 ? `До начала ${d} ${plural(d, "день", "дня", "дней")} ${h} ч` : `До начала ${p2(h)} : ${p2(mi)} : ${p2(se)}`;
   }
   /* ---------- язык и тема ---------- */
   const I18N = window.NEAR_I18N || { lang: "ru", locale: () => LOC(), t: (x) => x, start() {}, setLang() {} };
@@ -113,7 +166,7 @@
   const cache = new Map();
   const remember = (list) => { list.forEach((p) => cache.set(p.id, p)); return list; };
   const D = (p) => N.dist(pos, p);
-  const CHIPS = [["all", "🔥 Все"], ["incident", "🚨 Происшествия"], ["event", "🎉 События"], ["deal", "🏷️ Акции"], ["lostfound", "🔎 Потери и находки"], ["meetup", "⚽ Встречи"], ["ad", "📢 Объявления"], ["talk", "💬 Обсуждения"]];
+  const CHIPS = [["all", "🔥 Все"], ["incident", "🚨 Происшествия"], ["event", "🎉 События"], ["deal", "🏷️ Акции"], ["help", "🤲 Помощь"], ["lostfound", "🔎 Потери и находки"], ["meetup", "⚽ Встречи"], ["ad", "📢 Объявления"], ["talk", "💬 Обсуждения"]];
   const catFilter = (c) => (c === "all" ? null : c === "lostfound" ? ["lost", "found"] : c);
   const DISTRICTS = [
     ["Алмалинский", 43.2530, 76.9100], ["Бостандыкский", 43.2150, 76.9050], ["Медеуский", 43.2400, 76.9700], ["Ауэзовский", 43.2300, 76.8400],
@@ -122,24 +175,40 @@
 
   /* ---------- navigation ---------- */
   let hist = [];
-  const TABS = ["v-feed", "v-map", "v-disc", "v-create", "v-chats", "v-prof"];
+  // v14: 5 вкладок (лента, карта, +, чаты, профиль); "Все разделы" (v-disc) — из быстрых входов ленты
+  const TABS = ["v-feed", "v-map", "v-create", "v-chats", "v-prof"];
   const cur = () => { const v = document.querySelector(".view.on:not(#v-auth)"); return v ? v.id : "v-feed"; };
-  function go(id, push = true) {
+  const ROOT_VIEWS = ["v-feed", "v-map", "v-chats", "v-prof", "v-disc"];
+  // v14.8: клавиатура на iOS — высота видимой области, чтобы поле ввода и кнопка не уходили под клавиатуру
+  if (window.visualViewport) {
+    const setVV = () => document.documentElement.style.setProperty("--vvh", Math.round(visualViewport.height) + "px");
+    visualViewport.addEventListener("resize", setVV); setVV();
+  }
+  // v14.2: форма может попросить подтверждение перед уходом (несохраненный черновик)
+  let leaveGuard = null;
+  function go(id, push = true, force) {
     const c = cur();
     if (c === id) return;
+    if (!force && leaveGuard && leaveGuard(id, () => go(id, push, true)) === false) return;
     if (push) hist.push(c);
     qa(".view").forEach((v) => { if (v.id !== "v-auth") v.classList.remove("on", "nav-fwd", "nav-back", "nav-tab"); });
     // анимация перехода: вперед — справа, назад — слева, вкладки — плавно
     const anim = push ? "nav-fwd" : TABS.includes(id) && TABS.includes(c) ? (TABS.indexOf(id) > TABS.indexOf(c) ? "nav-tab r" : "nav-tab l") : "nav-back";
     $(id).classList.remove("r", "l"); $(id).classList.add("on", ...anim.split(" "));
     $(id).scrollTop = 0;
-    document.body.classList.toggle("picking", id === "sv-pick"); document.body.classList.toggle("in-conv", id === "sv-conv");
-    if (id !== "sv-conv") { convId = null; Conv.unsub(); stopRec(true); }
+    document.body.classList.toggle("picking", id === "sv-pick"); document.body.classList.toggle("creating", id === "v-create"); document.body.classList.toggle("in-conv", id === "sv-room");
+    // ТЗ 02 / UI-01: на внутренних маршрутах (формы, чат, выбор места, встречи) нет глобальной шапки и нижнего меню
+    document.body.classList.toggle("inner", !ROOT_VIEWS.includes(id));
+    if (id !== "sv-room") { roomId = null; Room.unsub(); }
     const tab = TABS.includes(id) ? id : null;
     if (tab) qa(".tb,.tb-plus").forEach((x) => x.classList.toggle("on", x.dataset.v === tab));
     onEnter(id);
   }
-  function back() { go(hist.pop() || "v-feed", false); }
+  function back() {
+    const to = hist[hist.length - 1] || "v-feed", run = () => { hist.pop(); go(to, false, true); };
+    if (leaveGuard && leaveGuard(to, run) === false) return;
+    run();
+  }
   function onEnter(id) {
     if (id === "v-map") initMap();
     if (id === "v-prof") renderProfile();
@@ -152,12 +221,14 @@
     if (id === "sv-lost") renderLost();
     if (id === "sv-notif") renderNotifs();
     if (id === "v-chats") renderChats();
-    if (id === "sv-find") { $("fq").value = ""; $("fRes").innerHTML = '<div class="dim center" style="font-size:12px;padding:20px">Введите минимум 2 буквы</div>'; setTimeout(() => $("fq").focus(), 150); }
+    if (id === "sv-meets") renderMeets();
     if (id === "sv-mod") renderMod();
     if (id === "v-feed" && feedDirty) loadFeed();
   }
   qa("[data-v]").forEach((b) => (b.onclick = () => {
-    if (b.dataset.v === "v-create") { if (!requireAuth("Войдите, чтобы публиковать", { t: "create" })) return; openCreate({}); return; }
+    if (b.dataset.v === "v-create") { openCreateMenu(); return; }
+    // v14.2: повторное нажатие на текущую вкладку — наверх
+    if (cur() === b.dataset.v) { const v = $(b.dataset.v); v.scrollTo({ top: 0, behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" }); window.scrollTo({ top: 0 }); return; }
     hist = []; go(b.dataset.v, false);
   }));
   document.addEventListener("click", (e) => {
@@ -169,8 +240,29 @@
   });
 
   /* ---------- bottom sheet ---------- */
-  function openSheet(title, html) { $("bsTitle").textContent = title; $("bsList").innerHTML = html; $("sheetBg").classList.add("on"); $("bsheet").classList.add("on"); }
-  function closeSheet() { $("sheetBg").classList.remove("on"); $("bsheet").classList.remove("on"); }
+  let sheetBack = null;
+  function openSheet(title, html, cls) {
+    $("bsTitle").textContent = title; $("bsList").innerHTML = html; $("bsheet").className = "bsheet on" + (cls ? " " + cls : "");
+    $("bsheet").setAttribute("role", "dialog"); $("bsheet").setAttribute("aria-modal", "true"); $("bsheet").setAttribute("aria-label", title);
+    $("sheetBg").classList.add("on"); sheetBack = document.activeElement;
+    // фокус внутрь панели: клавиатура и экранный диктор
+    setTimeout(() => { const f = $("bsList").querySelector("button,input,select,textarea,[tabindex]"); if (f && !/^(INPUT|TEXTAREA)$/.test(f.tagName)) f.focus({ preventScroll: true }); }, 60);
+  }
+  function closeSheet() {
+    $("sheetBg").classList.remove("on"); $("bsheet").classList.remove("on"); $("bsheet").classList.remove("cr-sheet");
+    const pb = $("plusBtn"); if (pb) { pb.classList.remove("open"); pb.setAttribute("aria-expanded", "false"); }
+    if (sheetBack && sheetBack.focus && document.contains(sheetBack)) { try { sheetBack.focus({ preventScroll: true }); } catch (e) {} } sheetBack = null;
+  }
+  // Escape закрывает панель; Tab не уходит за ее пределы
+  document.addEventListener("keydown", (e) => {
+    if (!$("bsheet").classList.contains("on")) return;
+    if (e.key === "Escape") { e.preventDefault(); closeSheet(); return; }
+    if (e.key === "Tab") {
+      const f = qa("button:not([disabled]),input,select,textarea,a[href]", $("bsheet")).filter((x) => x.offsetParent !== null); if (!f.length) return;
+      if (e.shiftKey && document.activeElement === f[0]) { e.preventDefault(); f[f.length - 1].focus(); }
+      else if (!e.shiftKey && document.activeElement === f[f.length - 1]) { e.preventDefault(); f[0].focus(); }
+    }
+  });
   $("sheetBg").onclick = closeSheet;
   function confirmSheet(title, text, okLabel, danger) {
     return new Promise((res) => {
@@ -339,6 +431,8 @@
     if ((m = h.match(/post=([\w-]+)/))) openPost(m[1]);
     else if ((m = h.match(/user=([\w-]+)/))) openUser(m[1]);
     else if ((m = h.match(/conv=([\w-]+)/))) { if (user) openConv(m[1]); }
+    else if ((m = h.match(/room=([\w-]+)/))) openRoom(m[1]);
+    else if ((m = h.match(/meet=([\w-]+)/))) openMeet(m[1]);
     else if (/notif/.test(h)) go("sv-notif");
   }
   if ("serviceWorker" in navigator) navigator.serviceWorker.addEventListener("message", (e) => {
@@ -380,7 +474,7 @@
     const r = (k, ico, t, sub) => `<div class="srow"><span class="si">${ico}</span><span class="st2"><b>${t}</b>${sub ? `<small>${sub}</small>` : ""}</span>${tg(k, p[k])}</div>`;
     return `<div class="sgrp" id="pushGrp"><div class="sg-t">Push-уведомления на телефон</div>${state}
       ${Push.supported ? `<div class="srow"><span class="si">🔔</span><span class="st2"><b>Присылать уведомления</b><small>${on ? "включены на этом устройстве" : "даже когда NEAR закрыт"}</small></span><span class="tg${on ? " on" : ""}" id="pushMain"></span></div>` : ""}
-      ${on ? r("msg", "✉️", "Личные сообщения") + r("comment", "💬", "Комментарии и ответы") + r("like", "❤️", "Лайки") + r("friend", "🤝", "Заявки в друзья")
+      ${on ? r("msg", "✉️", "Чаты встреч и упоминания") + r("comment", "💬", "Комментарии и ответы") + r("like", "❤️", "Лайки") + r("friend", "🤝", "Заявки в друзья")
         + r("near", "🚨", "Происшествия и SOS рядом", "по вашему местоположению")
         + (p.near ? `<div class="srow"><span class="si"></span><span class="st2"><b>Радиус</b></span><span class="rad-ch">${[1, 3, 5, 10].map((k) => `<button data-prad="${k}" class="${+p.radius === k ? "on" : ""}">${k} км</button>`).join("")}</span></div>` : "")
         + r("quiet", "🌙", "Тихие часы 23:00–08:00", "по времени Алматы, без уведомлений ночью")
@@ -425,7 +519,7 @@
           if (!pw) { $("delErr").innerHTML = ""; $("delErr").insertAdjacentHTML("beforebegin", `<div class="fld"><label for="delPw">Для удаления введите пароль еще раз</label><input id="delPw" type="password" autocomplete="current-password"></div>`); $("delPw").focus(); return; }
           await busy($("delYes"), async () => { await api.reauth(pw.value); await api.deleteAccount(); });
         }
-        const was = user && user.id; Conv.unsub(); closeSheet(); user = null; cache.clear(); Cache.wipe(was);
+        const was = user && user.id; Room.unsub(); closeSheet(); user = null; cache.clear(); Cache.wipe(was);
         onUserChange(); hist = []; go("v-feed", false); toast("Аккаунт удален. Спасибо, что были с NEAR");
       } catch (e) { $("delErr").textContent = e.message; $("delErr").classList.add("on"); }
     };
